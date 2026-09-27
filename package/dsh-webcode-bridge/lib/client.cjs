@@ -605,19 +605,24 @@ window.__ModuleLoader__.load({
         h('div', { className: 'hwb-waitpanel-head' },
           h('span', { className: 'hwb-waitpanel-title' },
             h(IconWait, { size: 14 }), '等待发送统计'),
-          data?.sessionValue
-            ? h('span', { className: 'hwb-waitpanel-value' }, data.sessionValue)
+          // 0.19.34：标题右侧那个数就是**在途实时读数**本身，不再另起一行。
+          //
+          // 用户原话：「移除突然出现的：正在等待发送 Ns，改为实时更新面板顶部
+          // 『等待发送统计』」。旧形态是标题右侧钉着**已落账**的本会话累计
+          //（sessionValue），在途那一段另起一行「正在等待发送 3 秒」——面板里同时
+          // 站着两个数，一个不动、一个在涨，而标题那个恰恰是旧的那个。
+          //
+          // 现在的口径与药丸逐字同源（见 wait-stats.js 的 projectedWaitMs）：
+          // 标题右侧 = 本会话等待发送总量 = 账本累计 + 在途增量。在途期间它每秒
+          // 前进一格，轮询节奏由上面 liveActive 那条 effect 提到 1 秒。
+          data?.projectedValue
+            ? h('span', { className: 'hwb-waitpanel-value' }, data.projectedValue)
             : null),
         h('div', { className: 'hwb-waitpanel-rule', 'aria-hidden': true }),
-        // 0.16.24：正在等待时，明细第一行就是这一段（与药丸同源同数）。
-        // 它排在账本行之前，因为「此刻在等多久」比「历史累计」更贴近用户此刻
-        // 的问题——面板展开时数字仍在逐秒更新。
-        (data?.liveValue || rows.length)
+        // 明细只放**账本口径**的条目。在途读数已经上了标题，这里不再重复——
+        // 同一个数在一张面板里出现两次，读者就要开始猜它们为什么可能不一样。
+        (data?.projectedValue || rows.length)
           ? h('dl', { className: 'hwb-waitpanel-grid' },
-            data?.liveValue
-              ? h('div', { className: 'hwb-waitpanel-row live' },
-                h('dt', null, '正在等待发送'), h('dd', null, data.liveValue))
-              : null,
             rows.map(r => h('div', { key: r.label, className: 'hwb-waitpanel-row' },
               h('dt', null, r.label), h('dd', null, r.value))))
           : h('p', { className: 'hwb-hint' }, '本会话尚无等待记录。'));
@@ -668,16 +673,28 @@ window.__ModuleLoader__.load({
      * 因为每个行数据的来源是服务端对同一个 siteId 的现算（`buildSitePromptRows`），
      * 内容与选路都由服务端决定，不依赖客户端的调用时机。
      */
-    function usePromptVariants() {
+    function usePromptVariants(revision) {
       const [data, setData] = React.useState(null);
       const [error, setError] = React.useState('');
-      const load = React.useCallback(() => {
+      // ⚠ 依赖里必须有 revision（0.19.33）。
+      //
+      // 这条 effect 此前是 `React.useEffect(() => { load(); }, [load])`，而 load 是
+      // `useCallback(fn, [])` ⇒ **只在挂载时拉一次**。于是用户在站点页改完投递形态后，
+      // 派生自 /prompt-variants 的一切（只读模板、增量轮再教学、「实际使用：<协议>」）
+      // 永远停在首次挂载那一刻——面板上「已保存」与「看到的仍是旧的」同时成立，
+      // 这正是用户报的「更改后提示词更新跟不上」。
+      //
+      // 为什么不自己做内容比对/定时轮询：那会在浏览器侧造出第二套「设置变了没有」
+      // 的判据，而权威判据在服务端（每次落盘自增的 settingsRevision）。让服务端给号、
+      // 客户端把它当依赖，是唯一不会分叉的写法。
+      React.useEffect(() => {
+        let alive = true;
         api('prompt-variants')
-          .then(r => { setData(r || null); setError(''); })
-          .catch(e => setError(e.message));
-      }, []);
-      React.useEffect(() => { load(); }, [load]);
-      return { data, error, reload: load };
+          .then(r => { if (alive) { setData(r || null); setError(''); } })
+          .catch(e => { if (alive) setError(e.message); });
+        return () => { alive = false; };
+      }, [revision]);
+      return { data, error };
     }
 
     /**
@@ -690,30 +707,43 @@ window.__ModuleLoader__.load({
      *   · 显示该站点的提示词文件路径，并提供「用默认程序打开」——路径由**服务端**
      *     给（同一次 /prompt-variants），前端不拼路径；
      *   · 编辑**该站点自己的**那一段指令（extraPromptBySite[siteId]）；
-     *   · 只读模板默认折叠，展开用于核对「此刻真的在教什么」。
+     *   · 只读模板默认折叠，展开用于核对「此刻真的在教什么」。展开后是**两个框**
+     *（0.19.31 用户要求）：「该站点此刻实际使用的只读模板」与「增量轮再教学」，
+     *     两框同形（都用 `<pre>`，样式来自 `.hwb-import pre`）、间距由
+     *     `.hwb-site-prompt-frames` 的 `gap` 给。
      */
-    function SitePromptCard({ siteId, value, notice, onSave, disabled }) {
+    function SitePromptCard({ siteId, value, notice, onSave, disabled, revision }) {
       const [draft, setDraft] = React.useState(value);
       const [busy, setBusy] = React.useState(false);
       const [openNotice, setOpenNotice] = React.useState('');
-      const { data, error } = usePromptVariants();
+      // revision 透传（0.19.33）：设置一变，这张卡的只读模板与再教学必须跟着重算，
+      // 否则「改了设置、页面停在旧模板」在站点页尤其难发现（用户切过来就是为了核对它）。
+      const { data, error } = usePromptVariants(revision);
       // 外部值变化（切 tab / 保存后回读）时同步草稿——否则切走再切回来会看到旧文本。
       React.useEffect(() => { setDraft(value); }, [value, siteId]);
       const row = (data?.sites || []).find(r => r && r.siteId === siteId) || null;
       const variant = (data?.variants || []).find(v => v && v.id === (row?.variantId || '')) || null;
       async function openFile() {
         setOpenNotice('');
-        try {
-          const r = await api('prompt-file', { siteId });
-          if (r && r.ok) { setOpenNotice('已用系统默认程序打开：' + r.file); return; }
-          const codes = {
-            PROMPT_FILE_MISSING: '该站点的提示词文件还没生成——发送第一条消息后自动落盘。',
-            PROMPT_STORE_OFF: '提示词落盘已被显式关闭（WEBCODE_PROMPT_STORE_DIR=off）。',
-            OPEN_UNAVAILABLE: '宿主没有提供「用默认程序打开」的能力。',
-            OPEN_FAILED: '系统默认程序没有打开成功',
-          };
-          setOpenNotice((codes[r && r.code] || '打开失败') + (r && r.file ? ' 文件：' + r.file : ''));
-        } catch (e) { setOpenNotice('打开失败：' + e.message); }
+        // 0.19.36：改用 apiSoft（不抛）。
+        //
+        // 旧写法用 `api()`，而它在 `ok:false` 时**就抛了**——下面那张 codes 映射表
+        // 因此永远走不到，用户看到的是一句 `打开失败：HTTP 200 OK：{"ok":false,
+        // "code":"PROMPT_FILE_MISSING","file":"C:\\..."}`（用户实报）。两个后果：
+        //   ① 报码映射表形同虚设——它本就是为这条路写的；
+        //   ② 整段 JSON（含完整路径）成了界面文案，长到必然溢出所在元素。
+        // 现在：非 ok 走映射表给**短文案**；只有真异常（网络/超时）才落 catch。
+        const r = await apiSoft('prompt-file', { siteId });
+        const data = r.data || null;
+        if (r.ok && data && data.ok) { setOpenNotice('已用系统默认程序打开：' + data.file); return; }
+        const codes = {
+          PROMPT_FILE_MISSING: '该站点的提示词文件还没生成——发送第一条消息后自动落盘。',
+          PROMPT_STORE_OFF: '提示词落盘已被显式关闭（WEBCODE_PROMPT_STORE_DIR=off）。',
+          OPEN_UNAVAILABLE: '宿主没有提供「用默认程序打开」的能力。',
+          OPEN_FAILED: '系统默认程序没有打开成功。',
+        };
+        const code = data?.code;
+        setOpenNotice(codes[code] || ('打开失败：' + (r.error || code || '未知原因')));
       }
       return h('div', { className: 'hwb-import' },
         h('div', { className: 'hwb-row' },
@@ -721,7 +751,10 @@ window.__ModuleLoader__.load({
           h('div', { className: 'hwb-row-main' },
             h('code', { className: 'hwb-filepath', title: row?.file || '' },
               row?.file || (data ? '（未提供路径）' : '加载中…')),
-            h('button', { type: 'button', disabled: !row, onClick: openFile }, '用默认程序打开'),
+            // 0.19.31（用户 2026-09-27）：「按钮改名『查看』」—— 两个界面（全局页与
+            // 站点页）的这颗按钮现在是同一个词、同一个动作（打开默认程序），
+            // 不再一处叫「用默认程序打开」、另一处叫别的。
+            h('button', { type: 'button', className: 'hwb-filepath-open', disabled: !row, onClick: openFile }, '查看'),
             openNotice && h('span', { className: 'hwb-hint' }, openNotice))),
         h('p', { className: 'hwb-hint' }, '本网站指令：只对本站点生效。'),
         h('textarea', {
@@ -740,19 +773,58 @@ window.__ModuleLoader__.load({
             onClick: async () => { setBusy(true); try { setDraft(''); await onSave(''); } finally { setBusy(false); } },
           }, '清空'),
           notice && h('span', { className: 'hwb-hint' }, notice)),
+        // ── 0.19.31（用户 2026-09-27 原话）：「各个站点的：『查看该站点此刻的只读模板 /
+        //     实际使用：DeepSeek 官方模板（原生工具调用格式）』区域，让增量也通过上面一样
+        //     的框展示，然后两框注意间隔」────────────────────────────────────────────
+        //
+        // 「上面一样的框」= 上面那段只读模板正文的框：两段正文都写成 `<pre>`，而站点卡根
+        // 节点就是 `.hwb-import`，于是底色 / 圆角 / 内边距 / 换行口径由**同一条规则**给
+        //（`.hwb-import pre`）——不引第二套视觉，两块框天然逐项相同。旧实现里增量再教学
+        // 只是一行 `.hwb-hint`（没有框），与上面那个框不同形态，这正是用户报的那点。
+        //
+        // 「两框注意间隔」由 `.hwb-site-prompt-frames` 的 `gap:8px` 给（与 `.hwb-import` /
+        // `.hwb-site-prompt` 同一档），不靠相邻元素 margin 的巧合。
         h('details', { className: 'hwb-site-prompt-details' },
           h('summary', null, '查看该站点此刻的只读模板'),
           error ? h('p', { role: 'alert', className: 'hwb-hint' }, '模板加载失败：' + error)
             : (!row ? h('p', { className: 'hwb-hint' }, '加载中…')
-              : h('div', null,
-                h('p', { className: 'hwb-hint' }, '实际使用：' + ((variant && variant.label) || row.variantId)),
-                h('pre', null, row.text),
-                variant && h('p', { className: 'hwb-hint' }, '增量轮再教学：' + variant.trainNote)))));
+              : h('div', { className: 'hwb-site-prompt-frames' },
+                h('div', { className: 'hwb-prompt-frame' },
+                  h('p', { className: 'hwb-hint' }, '实际使用：' + ((variant && variant.label) || row.variantId)),
+                  h('pre', null, row.text)),
+                variant && h('div', { className: 'hwb-prompt-frame' },
+                  h('p', { className: 'hwb-hint' }, '增量轮再教学'),
+                  h('pre', null, variant.trainNote))))));
     }
 
     /** 全站点只读总览（全局页）。默认折叠每站模板，避免十个站点把设置页淹掉。 */
-    function PromptPanel({ onSaved } = {}) {
-      const { data, error } = usePromptVariants();
+    function PromptPanel({ onSaved, revision } = {}) {
+      const { data, error } = usePromptVariants(revision);
+      // ── 0.19.31（用户 2026-09-27 原话）：「所有界面的查看提示词里面的『查看完整模板』
+      //     改为不是展开而是直接打开默认的程序打开文件，然后是这个按钮改名『查看』，
+      //     然后是需要放在路径显示右边，做好合适间隔，合适按钮」──────────────────────
+      //
+      // 于是这一行与站点页那颗「用默认程序打开」走**同一条控制面路由**（`POST prompt-file`，
+      // 服务端现算路径、只认 siteId，前端不拼路径），只是按钮文案按用户要求收成「查看」。
+      // 每行各自持一个提示（`noticeBySite`）：一个站点的失败不该显示在另一个站点旁边。
+      const [noticeBySite, setNoticeBySite] = React.useState({});
+      async function openFile(siteId) {
+        const put = (msg) => setNoticeBySite(prev => ({ ...prev, [siteId]: msg }));
+        put('');
+        // 0.19.36：与站点页那颗「查看」同一个缺陷、同一个修法（见 SitePromptCard.openFile）。
+        // 这里此前也用 `api()`，`ok:false` 时直接抛，映射表走不到，界面显示整段 JSON。
+        const r = await apiSoft('prompt-file', { siteId });
+        const data = r.data || null;
+        if (r.ok && data && data.ok) { put('已用系统默认程序打开'); return; }
+        const codes = {
+          PROMPT_FILE_MISSING: '提示词文件还没生成——发送第一条消息后自动落盘。',
+          PROMPT_STORE_OFF: '提示词落盘已被显式关闭（WEBCODE_PROMPT_STORE_DIR=off）。',
+          OPEN_UNAVAILABLE: '宿主没有提供「用默认程序打开」的能力。',
+          OPEN_FAILED: '系统默认程序没有打开成功。',
+        };
+        const code = data?.code;
+        put(codes[code] || ('打开失败：' + (r.error || code || '未知原因')));
+      }
       if (error) return h('p', { role: 'alert', className: 'hwb-hint' }, '首轮提示词加载失败：' + error);
       if (!data) return h('p', { className: 'hwb-hint' }, '加载首轮提示词…');
       const rows = data.sites || [];
@@ -766,16 +838,23 @@ window.__ModuleLoader__.load({
             h('span', { className: 'hwb-site-prompt-name' }, row.siteName),
             h('span', { className: 'hwb-site-prompt-variant' },
               '实际使用：' + ((variantById.get(row.variantId) || {}).label || row.variantId))),
-          h('code', { className: 'hwb-filepath hwb-site-prompt-path', title: row.file || '' }, row.file || ''),
-          h('details', { className: 'hwb-site-prompt-details' },
-            h('summary', null, '查看完整模板'),
-            h('pre', null, row.text)))),
+          // 路径与「查看」同一行：路径可伸缩、按钮固定宽且不换行。
+          // 间隔由 `.hwb-site-prompt-pathrow` 的 gap 给（8px），按钮高度走
+          // `.hwb-row-actions button` 那套 28px 小刻度，与账户行按钮同一档。
+          h('div', { className: 'hwb-site-prompt-pathrow' },
+            h('code', { className: 'hwb-filepath hwb-site-prompt-path', title: row.file || '' }, row.file || ''),
+            h('button', {
+              type: 'button', className: 'hwb-filepath-open',
+              title: row.file ? '用系统默认程序打开 ' + row.file : '用系统默认程序打开',
+              onClick: () => openFile(row.siteId),
+            }, '查看')),
+          noticeBySite[row.siteId] && h('p', { className: 'hwb-hint' }, noticeBySite[row.siteId]))),
         data.active?.tools?.length
           ? h('p', { className: 'hwb-hint' }, '本会话工具：' + data.active.tools.join(', '))
           : null);
     }
 
-    function GlobalPrompt({ onSaved } = {}) {
+    function GlobalPrompt({ onSaved, onRevision } = {}) {
       const [value, setValue] = React.useState('');
       const [saved, setSaved] = React.useState('');
       const [busy, setBusy] = React.useState(false);
@@ -792,6 +871,16 @@ window.__ModuleLoader__.load({
           const r = await api('settings', { extraPrompt: value });
           setSaved(r.extraPrompt || ''); setValue(r.extraPrompt || '');
           setNotice('已保存。');
+          // 全局指令改了 ⇒ 每个变体的 text 都跟着变，提示词读数必须重拉（0.19.33）。
+          // 旧实现只调 onSaved?.()，而 PromptSection 早就不接这个回调了（0.16.38 拆卡
+          // 之后它是 `h(PromptPanel, {})`）——于是「改了全局指令、模板不更新」也是一条
+          // 真实的旧缺陷，只是被站点投递形态那条更显眼的症状盖住了。
+          //
+          // ⚠ 必须用**本组件自己的**回调（onRevision），不能在体内直接调主组件的
+          // `applyRevision` —— 那是另一个作用域，静态看不出来、一按就抛
+          // `ReferenceError: applyRevision is not defined`（本仓库 0.15.2 的 `nav`、
+          // 0.19.33 的 `sleep` 都是这个形状）。
+          onRevision?.(r);
           onSaved?.();
         } catch (e) { setError(e.message); }
         finally { setBusy(false); }
@@ -816,8 +905,8 @@ window.__ModuleLoader__.load({
      *（全局指令 / 首轮提示词只读）之后，`GlobalPrompt` 会被渲染**两次**——同一设置两个
      * 输入框，改一个另一个不知道，保存后还会互相覆盖。这里只留只读那半。
      */
-    function PromptSection() {
-      return h(PromptPanel, {});
+    function PromptSection({ revision } = {}) {
+      return h(PromptPanel, { revision });
     }
 
     // 按站点分组的模型下拉选项：从桥的 /__webcode/models 取全站点目录
@@ -1904,6 +1993,53 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * **dwb 品牌标记**（0.19.39）。
+     *
+     * 用户原话：「为本项目 dwb 设计合适的矢量图标，替代所有本项目默认的图标：
+     * 设置界面两个，右侧 tab 界面两个：标签页和主界面大图标，设置切换标签页和
+     * 设置界面项目主界面介绍大图标」。
+     *
+     * ## 图形语义（为什么是这个形状）
+     *
+     * 本插件的本质是**桥**：一边是多个网页站点，另一边是一个模型接口。因此用
+     * 「拱桥 + 顶点节点」而不是一个通用齿轮/终端图标——
+     *   · 拱（`M2.5 12.5c0-4 …`）＝「桥接」这件事本身；
+     *   · 桥面（`M1.5 12.5h13`）＝被连起来的那一排**多个**站点；
+     *   · 顶点圆点＝桥接的落点（模型/会话）。
+     * 三点结构让它在 16px 下仍然读得出「连接」而不是「一栋房子」。
+     *
+     * ## 为什么画法与 TaskBoardPanelIcon 逐项同源
+     *
+     * `viewBox 16` / `stroke-width 1.3` / `round` 端点 / `currentColor`——与官方
+     * panel 行图标同一套刻度。这样并排时光学粗细一致（写死颜色或换 stroke 宽度
+     * 会让它在一排官方图标里明显「重」一档）。
+     * `currentColor` 还让**明暗主题与选中态自动成立**：颜色由宿主继承下来，
+     * 我们不需要知道当前是什么主题。
+     *
+     * ## 尺寸：`props.size` 由宿主给
+     *
+     * 官方在折叠成 56px 轨道时给 18px、展开时给 16px；右栏 guide 大图标给 22/26px。
+     * 因此这里必须读 `props.size` 而不是写死一个数——写死会让它在折叠态里显得偏大。
+     * 缺省 16 只是兜底。
+     *
+     * @param {{size?: number}} props 宿主给的图标呈现（与官方 IconProps 同形）
+     */
+    function DwbMark(props) {
+      const size = Number(props?.size) || 16;
+      return h('svg', {
+        viewBox: '0 0 16 16', width: size, height: size, fill: 'none',
+        stroke: 'currentColor', strokeWidth: 1.3, strokeLinecap: 'round',
+        strokeLinejoin: 'round', 'aria-hidden': 'true', focusable: 'false',
+      },
+        // 拱：桥的主体
+        h('path', { d: 'M2.5 12.4c0-3.9 2.46-6.9 5.5-6.9s5.5 3 5.5 6.9' }),
+        // 桥面：被连起来的一排站点
+        h('path', { d: 'M1.5 12.4h13' }),
+        // 顶点：桥接的落点
+        h('circle', { cx: 8, cy: 3.6, r: 1.35 }));
+    }
+
+    /**
      * **任务板主列页面**（0.16.0）：左栏 `sidebar.panellist` 入口切过来的那一列。
      *
      * ## 与右栏那个任务板标签页的分工
@@ -1955,6 +2091,11 @@ window.__ModuleLoader__.load({
           needLogin: s.needLogin === true,
           sessionLostCount: Number.isFinite(s.sessionLostCount) ? s.sessionLostCount : 0,
           lastSessionLost: s.lastSessionLost || null,
+          // 真实昵称/头像（0.19.37）：**又一处「只挑几个字段」的坑**——
+          // 与上面那段注释警告过的 sessionLostCount 逐字同型：服务端算好了、
+          // 这里不挑进来，下游就永远读不到，界面只剩默认头像与槽名。
+          accountName: s.accountName || null,
+          avatarUrl: s.avatarUrl || null,
         }))
         .filter(s => !onlySiteId || s.siteId === onlySiteId)
         .sort((a, b) => {
@@ -2134,14 +2275,28 @@ window.__ModuleLoader__.load({
                 // 部按 tier 分支），因此这里不新增任何资产或网络依赖。
                 // 真正表达**账户状态**的仍是外圈那一道环（颜色不是唯一载体，
                 // 见上方 aria-label/title）。
+                // 真实头像（0.19.37）：抓到了就画真实头像，抓不到回落站点矢量标记。
+                // 跨域 CDN 可能拒热链 ⇒ onError 时藏掉 img，露出后面的标记；
+                // **不造假**：读不到就不用槽名冒充头像（与右栏账户下拉同一纪律）。
+                s.avatarUrl
+                  ? h('img', {
+                    className: 'hwb-avatar-img', src: s.avatarUrl, alt: '', loading: 'lazy',
+                    onError: (e) => { try { e.currentTarget.style.display = 'none'; } catch { /* 忽略 */ } },
+                  })
+                  : null,
                 h('span', { className: 'hwb-avatar-glyph', 'aria-hidden': 'true' },
                   h(SiteGlyph, { sid: s.siteId, size: 12 }))),
-              h('span', { className: 'hwb-site-name' }, s.displayName)),
-            h('span', {
-              className: 'hwb-site-state ' + (s.loggedIn === true ? 'ok' : s.loggedIn === false ? 'bad' : 'idle'),
-              title: basisText(s),
-            },
-              s.loggedIn === true ? (s.loggedInCached ? '已登录(缓存)' : '已登录') : s.loggedIn === false ? '未登录' : '待检查'),
+              // 昵称：**抓到的真实昵称优先**，抓不到才回落槽名（displayName）。
+              // 用户原话：「尝试拉取账户名称和图像，替代现在的默认头像和非圆框」。
+              // 回落时仍是 displayName，绝不把槽名伪装成真实昵称。
+              h('span', { className: 'hwb-site-name' }, s.accountName || s.displayName)),
+            // 0.19.37：原来这里的「已登录 / 未登录 / 待检查」占位框已删除。
+            //
+            // 用户原话：「『已登录』占位框改为右上角和『智谱清言 的账户与登录』
+            // 同行合适位置的单独绿色圆点状态指示……只需要通过颜色圆点显示」。
+            // 于是状态从「每行一个带文字的框」收敛成**标题行右上角的一个圆点**，
+            // 且判据是跨该站点全部账户的聚合（见 siteHealthOf）。
+            // 登录依据（basisText）随之少了一个落点——它仍可从「检测」按钮的结果行读到。
             h('span', { className: 'hwb-row-actions' },
               h('button', { disabled: busySite !== null, onClick: () => doLogin(s.accountKey) },
                 busySite === s.accountKey ? '等待登录完成…' : s.loggedIn === true ? '更换账户' : '登录'),
@@ -2250,9 +2405,9 @@ window.__ModuleLoader__.load({
       // 选择器在本插件的落点。空串表示「该站的默认模型」，由桥端
       //（`POST chat` → `sendTurn(..., { model })`）按缺省处理，与既有行为逐字相同。
       const [cols, setCols] = React.useState(() => [
-        { key: 'c1', siteId: 'deepseek', modelId: '', sessionKey: '', messages: [], status: 'idle', error: '', input: '', role: 'review', artifactDir: '' },
-        { key: 'c2', siteId: 'glm', modelId: '', sessionKey: '', messages: [], status: 'idle', error: '', input: '', role: 'explore', artifactDir: '' },
-        { key: 'c3', siteId: 'kimi', modelId: '', sessionKey: '', messages: [], status: 'idle', error: '', input: '', role: 'explore', artifactDir: '' },
+        { key: 'c1', siteId: 'deepseek', modelId: '', thinkMode: 'auto', sessionKey: '', messages: [], status: 'idle', error: '', input: '', role: 'review', artifactDir: '' },
+        { key: 'c2', siteId: 'glm', modelId: '', thinkMode: 'auto', sessionKey: '', messages: [], status: 'idle', error: '', input: '', role: 'explore', artifactDir: '' },
+        { key: 'c3', siteId: 'kimi', modelId: '', thinkMode: 'auto', sessionKey: '', messages: [], status: 'idle', error: '', input: '', role: 'explore', artifactDir: '' },
       ]);
       // 0.19.20（用户 Q5）：共享输入条与全局 `sending` 锁**已移除**——三列各自
       // 有输入区、各自发车、各自等待。旧的 `handleSendAll` 让「一列在跑」= 全体
@@ -2357,6 +2512,7 @@ window.__ModuleLoader__.load({
       // 切换按钮的位置以及上下限」。所以左右栏只影响两件事：**上下限**与**按钮位置**，
       // 列宽本身是**三列同步的一个独立值**，不是左右栏的实时函数。
       const SIDEBAR_MAX = 420;
+      const SIDEBAR_MIN = 264;
       const RIGHTBAR_MIN = 300;
       // 官方会话的**完整最宽**：官方对话内容宽上限 920（`ConversationRoot.module.css`
       // 的 `--dsh-chat-content-width: clamp(680px, column*0.64, 920px)`）加上官方
@@ -2393,9 +2549,37 @@ window.__ModuleLoader__.load({
       //
       // 用户答「官方对话的默认值！」—— 所以默认就这么取，而不是我另定一个数。
       // 下限 = 中间区**最窄**（左栏拉到最宽 + 右栏拉到最窄）。
-      const colWidthMin = Math.max(200, viewportW - SIDEBAR_MAX - RIGHTBAR_MIN);
-      // 上限 = 官方会话的**完整最宽**（内容 920 + 卡片余量 32 = 952）。
-      const colWidthMax = OFFICIAL_CONTENT_MAX + OFFICIAL_CARD_PAD;
+      // 下限 = 中间区**最窄**（左右栏都拉到最宽一侧）。再兜一个 320 的可读下限：
+      // 中间区被挤到 300px 以下时，「一列」已经放不下任何可读内容，此时列宽贴住下限、
+      // 靠左右切换看列，比继续压窄到看不清更符合用户「不压窄、靠切换」的本意。
+      // 下限 = 左右栏都拉到**最宽**时中间剩下的宽度（= 中间区最窄）。
+      //
+      // ⚠️ 这里我改过两次，方向都错过，记录清楚免得再翻车：
+      //   · 第一版把下限写成 `vw − 左栏最小 − 右栏最小` —— 那是「中间区**最宽**」，
+      //     当**上限**用才对；
+      //   · 上一版采信了一份「官方右栏上限 vw×0.7 会让中间区只剩 168px」的推理，
+      //     把下限改成 `vw − 左栏最大 − 右栏**最小**`。实测**视口越大这个值越大**
+      //     （1920 → 1200），下限反过来超过上限，列宽被钉死、三列永远放不下——
+      //     即「每列都占满整屏」。
+      //   正确的一对是「左右栏各取相反极值」：
+      //     下限 = vw − 左栏最大 420 − 右栏最大 vw×0.7
+      //     上限 = vw − 左栏最小 264 − 右栏最小 300
+      //   两者恒有 下限 < 上限，且视口越宽列能越宽（单调），符合直觉。
+      const RIGHTBAR_MAX_RATIO = 0.7;
+      const colWidthMin = Math.max(
+        320,
+        viewportW - SIDEBAR_MAX - Math.round(viewportW * RIGHTBAR_MAX_RATIO),
+      );
+      // 上限 = 官方会话的**完整最宽**，且不超过「中间区最宽」（左右栏都拉到最窄一侧）。
+      //
+      // 第二项是 0.19.30 补的：此前上限恒为 952，于是在窄视口（如 1200）上算出的列宽
+      // 比中间区本身还宽，一列都放不下整数列 —— 而官方在嵌入场景下用的是
+      // `min(calc(100% - 32px), 920px)`（`ConversationRoot.module.css` 的 `.embeddedBody`），
+      // 即**上限随可用宽收**。两条现在一致了。
+      const colWidthMax = Math.min(
+        OFFICIAL_CONTENT_MAX + OFFICIAL_CARD_PAD,
+        Math.max(colWidthMin, viewportW - SIDEBAR_MIN - RIGHTBAR_MIN),
+      );
       // 默认 = 官方对话的**默认内容宽**（`clamp(680px, column*0.64, 920px)`），
       // 再夹进上面算出的上下限之间。
       //
@@ -2438,7 +2622,7 @@ window.__ModuleLoader__.load({
           seqRef.current += 1;
           return [...prev, {
             key: 'c' + Date.now().toString(36) + seqRef.current,
-            siteId: pick, modelId: '', sessionKey: '', messages: [], status: 'idle', error: '',
+            siteId: pick, modelId: '', thinkMode: 'auto', sessionKey: '', messages: [], status: 'idle', error: '',
             input: '',
             // 新列默认是**探索列**：用户要「选定一个模型做主要审查」，那个位置
             // 已经由默认的 c1 占着，新加的列去探索更符合分工直觉。
@@ -2476,8 +2660,38 @@ window.__ModuleLoader__.load({
         setCols((prev) => prev.map((c) => (c.key === key ? { ...c, modelId } : c)));
       };
 
+      /** 改某列的**思考模式**（用户第 2 点「保留完整的切换模式」的落点）。
+       *
+       *  与换模型同样**不清空会话**：它只改下一轮怎么生成，不改这一列的上下文。 */
+      const setColThink = (key, thinkMode) => {
+        setCols((prev) => prev.map((c) => (c.key === key ? { ...c, thinkMode } : c)));
+      };
+
       /** 某列可选的模型清单：按该列的站点过滤，取不到就是空数组（如实降级为只显示站点级）。 */
       const modelsForSite = (siteId) => modelCatalog.filter((m) => m.siteId === siteId);
+
+      /** 某列输入面的占位文字。官方把它做成**独立的绝对定位元素**
+       *（`.uV2eYG_placeholder`，`inset:4px 8px auto 14px`），而不是 textarea 的
+       *  `placeholder` 属性 —— 因为官方文本面是 contenteditable，没有那个属性。
+       *  本插件照抄这个结构：文本面旁挂一个同定位的占位元素，文字面自己不带
+       *  `placeholder`（带了两处会同时显示，一眼就看出不是官方那个）。 */
+      const colPlaceholder = (c) => '向 ' + siteName(c.siteId) + ' 继续提问…';
+
+      /** 每列可用的**思考模式**档位（官方 `.uV2eYG_modes` 位置的等价控件）。
+       *
+       *  官方在这个位置放的是 `conversation.input.permission` / `conversation.input.plan`
+       *  两个槽（权限模式、Plan 模式）。本插件三列走的是**网页控制面**，桥端根本没有
+       *  「权限」这个概念 —— 画一个改不动它的控件就是撒谎。
+       *
+       *  桥端**真正有**、且逐字对得上「模式切换」的是 `thinkMode`
+       *（`browser-driver.js:2840`：`'on'` 强制开深度思考 / `'off'` 强制关 /
+       *  `'auto'` 按模型默认）。所以这里如实放它，名称也照它的真实语义写，
+       *  不冒用「权限」「Plan」这些本插件没有的东西。 */
+      const THINK_MODES = [
+        { id: 'auto', name: '默认' },
+        { id: 'on', name: '深度思考' },
+        { id: 'off', name: '快速' },
+      ];
 
       /** 改某列输入区。每列一个受控 input —— 这就是「三个独立对话框」的落点。 */
       const setColInput = (key, text) => {
@@ -2566,6 +2780,11 @@ window.__ModuleLoader__.load({
           // `POST chat` 把它交给 `sendTurn(..., { model })`，而 `web-control.js:1421`
           // 本来就有这个形参（本改动不新增后端路径）。
           ...(col.modelId ? { model: col.modelId } : {}),
+          // 0.19.30（用户第 2 点「保留完整的切换模式」）：本列的思考模式随请求下发。
+          //
+          // 同样是**只在非默认时才带**：'auto' 是该列的出厂态，不带它请求体就与上一版
+          // 逐字相同。取值为 'auto'|'on'|'off'，与 `browser-driver.js:2840` 的三态一致。
+          ...(col.thinkMode && col.thinkMode !== 'auto' ? { thinkMode: col.thinkMode } : {}),
           // Q2：引用片段随请求下发，由 `POST chat` 拼成 `> ` 块引。
           ...(q ? { quote: q.text, quoteFrom: q.from } : {}),
           // Q5 沙箱适配：把**列身份**一起下发，由 `POST chat` 渲染成一段工作区约定
@@ -2648,21 +2867,22 @@ window.__ModuleLoader__.load({
         // 放在 style 上而不是类上：它是一个**算出来的像素值**，不是可枚举的档位。
         style: { '--hwb-col-width': colWidth + 'px' },
       },
-        // 0.19.29（用户 2026-09-26 原话，逐字）：
-        //   「将『并列多会话』改为『并列』，然后上方不必要占用位置：『并列多会话 Team／
-        //     每列一条独立网页会话、各有一个对话框，互不等待。把某列设为「主审」后，
-        //     可把其它列的回复引用给它做统一审查。／3 列主审：DeepSeek+ 加一列』说明去除」
+        // ── 0.19.31（用户 2026-09-27 原话，逐字）──────────────────────────────
+        //   「请你是把『对话』/『轨迹』并列的『并列多对话改为』-『并发』，去除界面内的
+        //     中心上方占用位置的『并列』两个字」
         //
-        // 因此这一块**只剩标题**：
-        //   · 「并列多会话 Team」→「并列」（用户要的词就是这两个字）；
-        //   · 那两行说明文字整段删除 —— 用户说它们「上方不必要占用位置」；
-        //   · 「3 列／主审：X／+ 加一列」这条工具行也一并删除。
+        // 于是**这一整块标题（含它的容器）删除**：
+        //   · 用户点名的就是「中心上方占用位置的『并列』两个字」—— 那两个字在本视图里
+        //     只出现在这里（0.19.29 起这块已只剩标题，见 git 历史）；
+        //   · 视图名改叫「并发」，由 `conversation.view` 的 `label` 承载，显示在中央区
+        //     顶栏「对话 / 轨迹 / 并发」那一行 —— 视图内部不再重复写一遍名字。
         //
-        // 控件（加列／设为列／移除列）没有丢，只是**移进了每列的原生对话框工具栏**
-        //（见下方 `hwb-col-composer-tools`）—— 这是用户第 2 点「保留完整切换模式、
-        //  模型显示项目等完整能力」的落点，也让顶部不再占高度。
-        h('div', { className: 'hwb-compare-header' },
-          h('h3', { className: 'hwb-compare-title' }, '并列')),
+        // 上一轮（0.19.29）在这里留下了标题「并列」。本轮把它连同 `.hwb-compare-header`
+        // 容器一起删掉，而不是只删文字：只删文字会留下一个**空的高度占位**，
+        // 而用户要的正是「不再占用中心上方位置」。
+        //
+        // 控件（加列／设为列／移除列）仍在每列的原生对话框工具栏里
+        //（见下方 `hwb-col-composer-tools`），能力一个不少。
 
         // 引用状态条：**引用是跨列的**，所以它的可见位置必须在列之外——
         // 夹在某一列里会让「引用来自哪一列」看起来像是那一列的属性。
@@ -2780,11 +3000,15 @@ window.__ModuleLoader__.load({
               onSubmit: (e) => { e.preventDefault(); sendCol(c.key); },
             },
               h('div', { className: 'hwb-col-composer-card' },
+                // 官方 `.uV2eYG_grow` 包 `.uV2eYG_scroll`：**只有 scroll 滚动**，
+                // 文本面在其中随内容自增。占位文字是**独立元素**（见下），
+                // 因为官方文本面是 contenteditable，没有 placeholder 属性。
+                h('div', { className: 'hwb-col-composer-scroll' },
+                h('div', { className: 'hwb-col-composer-grow' },
                 h('textarea', {
                   className: 'hwb-col-composer-input',
                   rows: 1,
                   ref: (el) => { inputRefs.current[c.key] = el; },
-                  placeholder: '向 ' + siteName(c.siteId) + ' 继续提问…',
                   value: c.input || '',
                   onChange: (e) => setColInput(c.key, e.target.value),
                   onKeyDown: (e) => {
@@ -2796,12 +3020,52 @@ window.__ModuleLoader__.load({
                     sendCol(c.key);
                   },
                 }),
+                // 官方 `.uV2eYG_placeholder`：绝对定位、单行省略、`pointer-events:none`。
+                // 官方在组字中会隐藏它（`.input[data-composer-composing] + .placeholder`）；
+                // 本插件没有那个属性面，用「有文字即不渲染」这一等价条件，效果相同。
+                !String(c.input || '') && h('div', { className: 'hwb-col-composer-placeholder' },
+                  colPlaceholder(c)),
+                ),
+                ),
                 h('div', { className: 'hwb-col-composer-row' },
                   // ── 官方 `.uV2eYG_tools` 位置：本列的站点选择 ───────────────
                   // 原列头那个下拉搬到这里（用户第 2 点：能力不能少，位置按官方）。
                   // 外观用官方 `.uV2eYG_select` 的刻度：高 28、字号 13、圆角 8、
                   // 右侧 20px 内边距给官方那条 SVG 箭头。
                   h('div', { className: 'hwb-col-composer-tools' },
+                    // ── 官方 `.uV2eYG_add`：28px 圆形图标按钮 ──────────────────
+                    // 官方那颗是「+ 命令菜单」。本插件没有命令菜单，但**有**一个
+                    // 同形状、同语义的真实动作：「加一列」（原来在 trailing 里当文字
+                    // 按钮）。把它放到官方这颗圆按钮的位置上——外观逐字照抄，
+                    // 而按下去真的有事发生。画一颗按不动的 + 才是照抄的反面。
+                    h('button', {
+                      type: 'button',
+                      className: 'hwb-col-composer-add',
+                      // 官方 `.add` **始终渲染**，锁定/不可用时走 `:disabled{opacity:.5}`。
+                      // 因此这里同样始终渲染、到上限才禁用——既与官方形态一致，
+                      // 也让「列数封顶」这件事在界面上始终看得见（而不是按钮消失）。
+                      title: cols.length >= MAX_COLS ? '最多 ' + MAX_COLS + ' 列' : '在末尾再加一列',
+                      disabled: cols.length >= MAX_COLS,
+                      onClick: addCol,
+                    }, h('svg', { viewBox: '0 0 16 16', width: 14, height: 14, 'aria-hidden': true },
+                      h('path', {
+                        d: 'M8.75 2v5.25H14v1.5H8.75V14h-1.5V8.75H2v-1.5h5.25V2h1.5Z',
+                        fill: 'currentColor',
+                      }))),
+                    // ── 官方 `.uV2eYG_modes`：模式切换 ────────────────────────
+                    // 官方放 `conversation.input.permission` 与 `conversation.input.plan`
+                    // 两个槽。本插件三列走网页控制面，桥端没有「权限」也没有「Plan」，
+                    // 画一个改不动它的控件就是撒谎。桥端**真正有**、且逐字对得上
+                    // 「模式切换」的是 `thinkMode`（`browser-driver.js:2840` 三态），
+                    // 所以这里如实放它，名称照它的真实语义写。
+                    h('div', { className: 'hwb-col-composer-modes' },
+                      h('select', {
+                        className: 'hwb-col-composer-select',
+                        value: c.thinkMode || 'auto',
+                        title: '本列的思考模式（下一轮生成起生效）',
+                        onChange: (e) => setColThink(c.key, e.target.value),
+                      }, THINK_MODES.map((m) => h('option', { key: m.id, value: m.id }, m.name)))),
+                    // 官方 `.tools` 里的第三个位置（left 槽）：本列的**站点**选择。
                     h('select', {
                       className: 'hwb-col-composer-select',
                       value: c.siteId,
@@ -2862,25 +3126,21 @@ window.__ModuleLoader__.load({
                       title: '移除这一列',
                       onClick: () => removeCol(c.key),
                     }, '✕'),
-                    // 「加一列」原来在顶部工具行里，随用户第 1 点删掉整行后**无处安放**。
-                    // 它不能跟着消失：`addCol` 会变成「定义了却没人调」的死代码，
-                    // 而 2~4 列是这款视图的既有能力（0.18.0 的核心需求）。
-                    // 因此把它放到**最后一列**的工具栏里 —— 加出来的新列接在末尾，
-                    // 按钮跟着末尾走，位置与语义一致，顶部也不用再占高度。
-                    c.key === cols[cols.length - 1].key && h('button', {
-                      type: 'button',
-                      className: 'hwb-col-composer-mini',
-                      title: cols.length >= MAX_COLS ? '最多 ' + MAX_COLS + ' 列' : '在末尾再加一列',
-                      disabled: cols.length >= MAX_COLS,
-                      onClick: addCol,
-                    }, '+ 加一列'),
+                    // 「加一列」**没有消失**，只是搬到了官方 `.uV2eYG_add` 那个
+                    // 圆形图标按钮的位置上（见 tools 组）。它此前在这里当文字按钮，
+                    // 而官方那个位置本来就是一颗 + 号圆按钮——形状与语义现在都对上了。
                     h('button', {
                       type: 'submit',
                       className: 'hwb-col-composer-send',
                       title: '发送（Enter）',
+                      'aria-label': '发送',
                       // 这一列的锁只看这一列的 status —— 别列在跑与本列无关。
                       disabled: isColSending(c) || !String(c.input || '').trim(),
-                    }, '↑'))))))))));
+                    }, h('svg', { viewBox: '0 0 16 16', width: 16, height: 16, 'aria-hidden': true },
+                      h('path', {
+                        d: 'M8.3125 0.980183C8.66767 1.0531 8.97902 1.20418 9.2627 1.43233C9.48724 1.61297 9.73029 1.85793 9.97949 2.10714L14.707 6.83468L13.293 8.24874L9 3.95577V15.0417H7V3.95577L2.70703 8.24874L1.29297 6.83468L6.02051 2.10714C6.26971 1.85793 6.51277 1.61297 6.7373 1.43233C6.97662 1.23986 7.28445 1.04402 7.6875 0.980183C7.8973 0.947006 8.1031 0.95516 8.3125 0.980183Z',
+                        fill: 'currentColor',
+                      }))))))))))));
     }
 
     function SettingsSection(props) {
@@ -2942,6 +3202,14 @@ window.__ModuleLoader__.load({
       const [promptTransport, setPromptTransport] = React.useState('attach');
       const [promptTransportSaved, setPromptTransportSaved] = React.useState('attach');
       const [promptTransportNotice, setPromptTransportNotice] = React.useState('');
+      // 站点级投递形态（0.19.32）。用户要求「提示词投递：给每个模型站点都做到和『发送
+      // 间隔（全局）』一样的逻辑：全局设置一个，但是针对每个单独网站设置能够单独设置」。
+      //
+      // 键**只在站点显式设过时才存在**——「跟随全局」用**删键**表达，不写第三个值，
+      // 这样「没配」与「配成跟随全局」在设置文件里就是两件不同的事（同 extraPromptBySite）。
+      const [transportBySite, setTransportBySite] = React.useState({});
+      const [transportBySiteSaved, setTransportBySiteSaved] = React.useState({});
+      const [siteTransportNotice, setSiteTransportNotice] = React.useState('');
       // 站点 tab（0.16.33）：设置页内部按站点分页，形态参考 dsh-market 的 tab 条。
       // `''` = 全局页；其余值是 siteId。切 tab **只切视图**，不改任何连接/账号底层。
       // initialSettingsTab（0.16.38）：**只给测试与将来的深链用**的初值入口。
@@ -2971,10 +3239,25 @@ window.__ModuleLoader__.load({
           // 只接管纵向滚轮：横向滚轮（触控板左右滑）本来就能滚，抢过来会变扭。
           if (!e.deltaY || e.deltaX) return;
           const before = el.scrollLeft;
+          // ── 0.19.38（用户 2026-09-27 原话）：「切换网站标签页这一栏：现在鼠标滚动
+          //     让网站到底后这一行的滚动应该就不要继续了，而不是现在的不限制让他
+          //     直接页面下滑」────────────────────────────────────────────────────
+          //
+          // 旧实现只判「`scrollLeft` 变没变」，而**已经到底时**赋值 `scrollLeft`
+          // 仍然成立（浏览器把越界值钳回最大值，`before` 与之后的值相等），于是
+          // `if (el.scrollLeft !== before)` 为 false ⇒ **不** preventDefault ⇒
+          // 同一次滚轮继续冒泡去滚整个设置页。用户描述的就是这个：条滚到头了，
+          // 页面接着往下滑。
+          //
+          // 判据改成「**这一下还能不能真滚**」：只在还有余量时接管；到边就把默认
+          // 行为还回去？——不，到边**更要**拦住：用户的意思是「这一行的滚动到此为止」，
+          // 而不是「让它去滚页面」。因此到边时 preventDefault 但不动 scrollLeft。
           el.scrollLeft = before + e.deltaY;
-          // 真的滚动了才阻止默认：否则页面在条上滚不动（内容本来就没几屏，副作用很小，
-          // 但「滚轮在条上失效」正是用户报的那个问题，所以这里必须让它生效）。
-          if (el.scrollLeft !== before) e.preventDefault();
+          // 只要**这条栏真的有可滚内容**就拦下默认行为——不论这一下是滚动了、
+          // 还是已经到边（到边时用户要的是「停在这里」，不是「继续滚页面」）。
+          // 唯一放行的是「整条根本没有可滚内容」：那时接管毫无意义，
+          // 拦住反而会让设置页在这一行上彻底滚不动（比原缺陷更糟）。
+          if (el.scrollWidth > el.clientWidth) e.preventDefault();
         };
         el.addEventListener('wheel', onWheel, { passive: false });
         return () => el.removeEventListener('wheel', onWheel);
@@ -2990,6 +3273,24 @@ window.__ModuleLoader__.load({
       // 文案只在服务端算一份，bundle 里不写第二份（本文件是单文件 bundle，
       // import 不到 lib/，两份格式化必然漂移）。
       const [attachStatus, setAttachStatus] = React.useState(null);
+      // 设置**修订号**（0.19.33）：服务端每次落盘设置就自增，随 /settings、
+      // /attach-status、/prompt-variants 一起回来。
+      //
+      // 为什么需要它：设置面有一批读数是服务端**现算**的（提示词模板、增量再教学、
+      // 投递形态生效值），而它们的拉取时机此前只有「挂载时一次」。用户在站点页改完
+      // 设置后，那些读数既不知道该重拉、也没有任何依据判断该不该重拉 —— 于是
+      // 「已保存」与「看到的仍是旧的」同时成立（真机症状：改了站点投递形态，
+      // 「当前生效：」那一行与站点只读模板都不动）。
+      //
+      // 这里不自己发明判据（内容比对 / 固定轮询都会造出第二套真相），而是把服务端
+      // 给的号存成 state，当**依赖**传给消费它的组件：号一变，那些 effect 自己重跑。
+      const [settingsRevision, setSettingsRevision] = React.useState(0);
+      // 投递读数要**按当前站点**读（0.19.32）：轮询 effect 的依赖是 `[]`，闭包里拿不到
+      // 后面的 settingsTab，所以用一个 ref 把「此刻看的是哪个 tab」传进去。
+      // 没有它，站点页那一行会永远显示全局口径——而用户要核对的是「这个站点自己设的
+      // 到底生效没有」，两者不是一件事。
+      const tabRef = React.useRef(settingsTab);
+      tabRef.current = settingsTab;
       const refresh = () => api('status').then(s => setStatus(s)).catch(() => {});
       React.useEffect(() => {
         let alive = true;
@@ -2997,7 +3298,18 @@ window.__ModuleLoader__.load({
           api('status').then(s => { if (alive) setStatus(s); }).catch(e => { if (alive) setError(e.message); });
           // 投递读数与状态同频刷新（4s）：真机出问题时用户往往就停在这一页，
           // 读数必须自己更新——旧版本这一页对附件投递完全沉默。
-          api('attach-status').then(s => { if (alive) setAttachStatus(s); }).catch(() => {});
+          // 两条调用各自成文（0.19.32）：选着某个站点 tab 时带 siteId ⇒ POST，
+          // 全局页不带参数 ⇒ GET（由服务端取驱动当前站点，逐字沿用旧形态）。
+          //
+          // 为什么写成两个调用点而不是 `api('attach-status', cond ? {…} : undefined)`：
+          // 客户端的 api() 契约是「有第二实参就 POST」，三元表达式**始终**有第二实参，
+          // 于是那一种写法只走 POST，服务端那两个方法里就有一个永远没有客户端用它——
+          // test/client-server-contract.test.mjs 会把注册了却没人用的那个方法判成死路由。
+          // 两处写开之后，GET 与 POST 都真的是「有人在用」的。
+          const readAttach = tabRef.current
+            ? api('attach-status', { siteId: tabRef.current })
+            : api('attach-status');
+          readAttach.then(s => { if (alive) setAttachStatus(s); }).catch(() => {});
         };
         poll();
         api('models').then(m => { if (alive) setModels(m.models || []); }).catch(() => {});
@@ -3031,10 +3343,31 @@ window.__ModuleLoader__.load({
           setModelBySite(mbs); setModelBySiteSaved(mbs);
           const pbs = s.extraPromptBySite && typeof s.extraPromptBySite === 'object' ? s.extraPromptBySite : {};
           setSitePromptBySite(pbs); setSitePromptSaved(pbs);
+          // 站点级投递形态：原样取回（服务端已归一化过非法键与非法值）。
+          // 同 slotGaps 的纪律——不在这里补默认值，「没配」（跟随全局）与「配成某个值」
+          // 是两件事，前端补默认会把前者渲染成后者。
+          const tbs = s.promptTransportBySite && typeof s.promptTransportBySite === 'object' ? s.promptTransportBySite : {};
+          setTransportBySite(tbs); setTransportBySiteSaved(tbs);
         }).catch(() => {});
         const timer = setInterval(poll, 4000);
         return () => { alive = false; clearInterval(timer); };
       }, []);
+      // 切站点 tab 时立刻重读一次该站点的投递读数（0.19.32）。
+      //
+      // 上面的轮询是 4s 一次且闭包固定在挂载那一刻的 tab 上，只靠它的话：切到站点页后
+      // 那一行会先显示**上一个站点**的读数（最长 4 秒），而「投递形态」这一格恰好是
+      // 用户切过去就是为了核对的东西——显示成别人的值比不显示更糟。
+      React.useEffect(() => {
+        if (!settingsTab) return undefined;
+        let alive = true;
+        api('attach-status', { siteId: settingsTab })
+          .then(s => {
+            if (!alive) return;
+            setAttachStatus(s);
+            if (s && typeof s.settingsRevision === 'number') setSettingsRevision(s.settingsRevision);
+          }).catch(() => {});
+        return () => { alive = false; };
+      }, [settingsTab]);
       async function action(name, body) {
         setPending(true); setError('');
         try { await api(name, body); await refresh(); }
@@ -3057,6 +3390,7 @@ window.__ModuleLoader__.load({
         setPending(true); setError('');
         try {
           const r = await api('settings', { sendGapMsBySlot: next });
+          applyRevision(r);
           const back = r.sendGapMsBySlot && typeof r.sendGapMsBySlot === 'object' ? r.sendGapMsBySlot : {};
           setSlotGaps(back); setSlotGapSaved(back);
           setSlotGapNotice('已保存 ' + siteName(siteId) + ' 的排队间隔。下一次向该站点发送起生效。');
@@ -3071,6 +3405,7 @@ window.__ModuleLoader__.load({
         setPending(true); setError('');
         try {
           const r = await api('settings', { sendGapMsBySlot: next });
+          applyRevision(r);
           const back = r.sendGapMsBySlot && typeof r.sendGapMsBySlot === 'object' ? r.sendGapMsBySlot : {};
           setSlotGaps(back); setSlotGapSaved(back);
           setSlotGapNotice(siteName(siteId) + ' 已恢复为跟随全局间隔。');
@@ -3092,9 +3427,43 @@ window.__ModuleLoader__.load({
         setPending(true); setError(''); setSiteModelNotice('');
         try {
           const r = await api('settings', { defaultModelBySite: next });
+          applyRevision(r);
           const back = r.defaultModelBySite && typeof r.defaultModelBySite === 'object' ? r.defaultModelBySite : {};
           setModelBySite(back); setModelBySiteSaved(back);
           setSiteModelNotice('已保存 ' + siteName(siteId) + ' 的默认模型。下一轮起生效。');
+        } catch (e) { setError(e.message); }
+        finally { setPending(false); }
+      }
+
+      /**
+       * 保存某站点的**投递形态**（0.19.32）。
+       *
+       * 与 `saveSlotGap` 逐字同一套纪律（整个字典读改写、只 POST 单个键会把其余站点的
+       * 覆盖抹掉）。`mode === null` = **删键**、回落到全局档——不是一个「第三种形态」。
+       *
+       * 这里**不**动全局那一档：站点档与全局档是两条独立的设置，改其中一条时另一条
+       * 原样保留（用户要的正是「全局设一个、每个站点也能自己设」）。
+       */
+       async function saveSiteTransport(siteId, mode) {
+        const next = { ...transportBySite };
+        if (mode === 'inline' || mode === 'attach') next[siteId] = mode; else delete next[siteId];
+        setPending(true); setError(''); setSiteTransportNotice('');
+        try {
+          const r = await api('settings', { promptTransportBySite: next });
+          applyRevision(r);
+          const back = r.promptTransportBySite && typeof r.promptTransportBySite === 'object' ? r.promptTransportBySite : {};
+          setTransportBySite(back); setTransportBySiteSaved(back);
+          // 读数行必须当场重读（0.19.33）：这一格是用户核对「本站点覆盖到底生效没有」
+          // 的唯一入口，而它由服务端按站点现算（`attach-status?siteId=…`）。不重读的话，
+          // 保存成功与「当前生效：」仍显示旧值会同时成立——这正是用户报的「跟不上」。
+          api('attach-status', { siteId })
+            .then(s => {
+              setAttachStatus(s);
+              if (s && typeof s.settingsRevision === 'number') setSettingsRevision(s.settingsRevision);
+            }).catch(() => {});
+          setSiteTransportNotice(mode
+            ? '已保存 ' + siteName(siteId) + ' 的投递形态。下一轮起生效。'
+            : siteName(siteId) + ' 已恢复为跟随全局投递形态。');
         } catch (e) { setError(e.message); }
         finally { setPending(false); }
       }
@@ -3107,6 +3476,7 @@ window.__ModuleLoader__.load({
         setPending(true); setError(''); setSitePromptNotice('');
         try {
           const r = await api('settings', { extraPromptBySite: next });
+          applyRevision(r);
           const back = r.extraPromptBySite && typeof r.extraPromptBySite === 'object' ? r.extraPromptBySite : {};
           setSitePromptBySite(back); setSitePromptSaved(back);
           setSitePromptNotice(trimmed
@@ -3116,13 +3486,94 @@ window.__ModuleLoader__.load({
         finally { setPending(false); }
       }
 
+      /**
+       * 应用一次设置写入返回的**修订号**（0.19.33）。
+       *
+       * 所有 `api('settings', …)` 的调用点都必须过这里。为什么不让每个 saver 各写一行：
+       * 漏掉任何一处，那条路径就回到「保存了但派生读数不刷新」的旧行为，而这种缺陷
+       * 在界面上**看不出来**（保存提示照常显示成功）。集中一处，漏接就等于没写。
+       *
+       * 服务端 POST settings 会把落盘后的新号直接回在响应里，因此这里是**同一次
+       * 交互内**就更新，不必等下一次轮询——这正是「点了保存、提示词与生效值立刻
+       * 跟上」要兑现的那一点。
+       */
+      function applyRevision(r) {
+        const v = r && r.settingsRevision;
+        if (typeof v === 'number' && Number.isFinite(v)) setSettingsRevision(v);
+      }
+
       async function saveSetting(key, value, onDone) {
         setPending(true); setError('');
         try {
           const r = await api('settings', { [key]: value });
+          applyRevision(r);
           onDone(r);
         } catch (e) { setError(e.message); }
         finally { setPending(false); }
+      }
+
+      /**
+       * 本插件的版本与更新（0.19.39）。
+       *
+       * 三条状态分开，因为它们是三件不同的事：
+       *   · `updateInfo`  —— registry 的检查结果（有没有新版）
+       *   · `updating`    —— 正在装（按钮禁用 + 文案换「更新中…」）
+       *   · `updateNotice`—— 装完的**重启提醒**（含失败原因）
+       * 合成一个对象会让「正在装」与「装完了」互相覆盖，而这恰好是用户最需要
+       * 分清的两种时刻（一个该等、一个该去重启）。
+       *
+       * 检查在挂载时自动做一次：顶部要显示「v0.19.39」这种当前版本，而用户
+       * 打开设置页的第一眼就该看到它——不该先去点一次「检查更新」才知道自己跑的是哪版。
+       */
+      const [updateInfo, setUpdateInfo] = React.useState(null);
+      const [updateCheckedLoading, setUpdateCheckedLoading] = React.useState(true);
+      const [updating, setUpdating] = React.useState(false);
+      const [updateNotice, setUpdateNotice] = React.useState(null);
+      const checkUpdate = React.useCallback(async () => {
+        setUpdateCheckedLoading(true);
+        try {
+          const r = await api('update-status');
+          if (r && r.ok) setUpdateInfo(r);
+          else setUpdateInfo({ status: 'unknown', current: status?.build?.version || '?', reason: '检查失败' });
+        } catch (e) {
+          setUpdateInfo({ status: 'unknown', current: status?.build?.version || '?', reason: e.message });
+        } finally { setUpdateCheckedLoading(false); }
+        // 依赖用 `status?.build?.version` 而**不是** `build?.version`：本块的位置在
+        // `const build = status?.build;` 之前，而依赖数组是**渲染期**求值的——
+        // 引用 `build` 会撞上 TDZ（ReferenceError）。读同一个值但走已声明的 `status`，
+        // 既拿到相同依赖，又不依赖声明顺序。
+      }, [status?.build?.version]);
+      React.useEffect(() => { checkUpdate(); }, [checkUpdate]);
+      /** 「检查更新」按钮：已是最新时给一句明确回执（否则用户不知道点没点上）。 */
+      async function doCheckUpdate() {
+        await checkUpdate();
+        setUpdateNotice(null);
+      }
+      /**
+       * 「更新到 vX」按钮：**真装**（用户明确选择），装完给重启提醒。
+       *
+       * 三件必须说清的事，写在这里而不是让用户猜：
+       *   · profile 取服务端给的（浏览器侧不知道自己在哪个 profile 里跑）；
+       *   · 装完**不会**自动重启 —— 重启会终止正在跑的会话，那是用户此刻在用的东西；
+       *   · 装完**必须**重启才生效（本项目第一号踩坑：「装完不重启 = 等于没装」）。
+       */
+      async function doUpdate() {
+        const target = updateInfo?.latest || '';
+        setUpdating(true); setUpdateNotice(null);
+        try {
+          const r = await api('update', { profile: updateInfo?.profile || 'web', version: target }, 300000);
+          if (r && r.ok) {
+            setUpdateNotice({
+              tone: 'ok',
+              text: '已装 v' + target + '。**请重启 dsh web** —— 安装只换了磁盘上的文件，'
+                + '正在跑的进程里仍是旧代码（本项目最常见的「装了却没生效」）。',
+            });
+          } else {
+            setUpdateNotice({ tone: 'bad', text: '更新失败：' + ((r && (r.error || r.output)) || '未知原因') });
+          }
+        } catch (e) {
+          setUpdateNotice({ tone: 'bad', text: '更新失败：' + e.message });
+        } finally { setUpdating(false); }
       }
 
       const relay = status?.relay;
@@ -3136,18 +3587,78 @@ window.__ModuleLoader__.load({
       // tab**（0.16.38：模型管理搬到站点页之后，这里配的对象就是那个站点；旧判据
       //「默认模型落在哪个站点」是模型管理还在全局页时的写法，已随之退役）。其余
       // 站点的 pill 契约未真机校准，不硬造开关。
+      /**
+       * 站点级三色健康度（0.19.37）。
+       *
+       * 用户原话：「『已登录』占位框改为右上角…单独绿色圆点状态指示：红就是全部
+       * 不行了，绿就是全部可以，黄就是有可以有不可以，只需要通过颜色圆点显示，
+       * 然后所有网站都需要应用，deepseek 一样」。
+       *
+       * 因此判据是**跨该站点全部账户**的聚合，而不是单账户那一行：
+       *   绿 ← 每个账户都 loggedIn === true
+       *   红 ← 没有一个账户可用
+       *   黄 ← 部分可用（至少一个可用、至少一个不可用）
+       * 无账户行时返回 null，调用方不画点——「没有账户」不是一种健康度。
+       *
+       * 颜色是唯一**视觉**载体（用户明确要求），因此 aria-label 必须把话说全：
+       * 屏幕阅读器用户读到的不能是一个没有含义的色块。
+       */
+      const siteHealthOf = (sid) => {
+        const rows = (Array.isArray(sites) ? sites : []).filter(r => r && r.siteId === sid);
+        if (!rows.length) return null;
+        const ok = rows.filter(r => r.loggedIn === true).length;
+        if (ok === rows.length) return 'ok';
+        if (ok === 0) return 'bad';
+        return 'warn';
+      };
+      const healthLabel = (h) => h === 'ok' ? '全部账户可用' : h === 'bad' ? '全部账户不可用' : '部分账户可用';
       return h('section', { className: 'hwb-settings' },
-        // 标题行：左边是设置名，右边是项目主页链接（用户要求「设置界面加上 github
-        // 连接在顶部合适位置」）。放在标题这一行的右端而不是另起一行——设置页顶部
-        // 的空间要留给**状态**（构建指纹 + 一句说明），多一行纯链接会把它挤下去。
+        // ---- 顶部：品牌标记 + 名称 + 版本 + 更新 + GitHub（0.19.39）---------
+        //
+        // 用户原话：「参考 dsh-store 的设置界面顶部『插件市场 / dsh-market /
+        // v1.65.1 / 更新插件市场 / 本次全部忽略』设计好本插件的更新和只做提醒
+        // 重启操作，替换现在空白的单独 github 按钮」。
+        //
+        // 因此这一块是「品牌 + 版本 + 动作」一行：左边 dwb 标记 + 插件名，
+        // 右边版本号 + 「更新」+ GitHub。与参考实现同构（它也是左边名字、
+        // 右边版本与两颗按钮），但**不抄「本次全部忽略」**——那是给「一次列出
+        // 多个可更新插件」的场景准备的，本插件只有它自己一个，忽略提醒只会
+        // 让用户再也看不到更新（本项目不做「点了就永远不提醒」这种状态）。
         h('div', { className: 'hwb-settings-head' },
-          h('h2', null, 'Harness Web Bridge'),
-          h('a', {
-            className: 'hwb-repo-link',
-            href: 'https://github.com/RSLN-creator/dsh-web-bridge',
-            target: '_blank', rel: 'noreferrer noopener',
-            title: '在 GitHub 打开项目主页（新标签）',
-          }, 'GitHub')),
+          h('span', { className: 'hwb-brand' },
+            h('span', { className: 'hwb-brand-mark', 'aria-hidden': 'true' }, h(DwbMark, { size: 20 })),
+            h('h2', null, 'Harness Web Bridge')),
+          h('span', { className: 'hwb-head-actions' },
+            updateInfo
+              ? h('span', {
+                className: 'hwb-version',
+                title: updateInfo.status === 'outdated'
+                  ? '当前 v' + updateInfo.current + '，registry 上是 v' + updateInfo.latest
+                  : updateInfo.status === 'current'
+                    ? 'registry 上也是 v' + (updateInfo.latest || updateInfo.current)
+                    : '检查失败：' + (updateInfo.reason || '未知原因'),
+              }, 'v' + updateInfo.current + (updateInfo.status === 'outdated' ? ' → v' + updateInfo.latest : ''))
+              : (build?.version ? h('span', { className: 'hwb-version' }, 'v' + build.version) : null),
+            h('button', {
+              type: 'button', className: 'hwb-update-btn' + (updateInfo?.status === 'outdated' ? ' primary' : ''),
+              disabled: updating || updateCheckedLoading,
+              title: updateInfo?.status === 'outdated'
+                ? '安装 v' + updateInfo.latest + '（装完需要重启 dsh web）'
+                : '到 npm registry 查一次有没有新版本',
+              onClick: () => (updateInfo?.status === 'outdated' ? doUpdate() : doCheckUpdate()),
+            }, updating ? '更新中…' : updateCheckedLoading ? '检查中…'
+              : updateInfo?.status === 'outdated' ? '更新到 v' + updateInfo.latest : '检查更新'),
+            h('a', {
+              className: 'hwb-repo-link',
+              href: 'https://github.com/RSLN-creator/dsh-web-bridge',
+              target: '_blank', rel: 'noreferrer noopener',
+              title: '在 GitHub 打开项目主页（新标签）',
+            }, 'GitHub'))),
+        // 更新结果 / 重启提醒。**必须显眼**：装完不重启 = 等于没装，
+        // 这是本项目的第一号踩坑，而重启会终止在跑的会话，因此只能由用户手动做。
+        updateNotice
+          ? h('p', { className: 'hwb-update-notice ' + (updateNotice.tone || ''), role: 'status' }, updateNotice.text)
+          : null,
         build?.hash && h('p', { className: 'hwb-build' }, '构建指纹：' + build.hash + (build.version ? ' · v' + build.version : '')),
         // 0.19.x：原文写的是「用已登录的 Edge 网页」，那是驱动改造前的措辞——桥用的是
         // 自带的 Chromium（系统浏览器只是兜底），写 Edge 会让用户以为要另装一个。
@@ -3187,7 +3698,26 @@ window.__ModuleLoader__.load({
 
         // ---- 站点页：账户与登录（0.16.38 起**只在站点页**）-------------------
         settingsTab && h('div', { className: 'hwb-card' },
-          h('h3', { className: 'hwb-group first' }, siteName(settingsTab) + ' 的账户与登录'),
+          // 标题行：站点名在左，三色健康度圆点在**右上角**（用户指定的位置）。
+          (() => {
+            const health = siteHealthOf(settingsTab);
+            return h('h3', { className: 'hwb-group first hwb-group-row' },
+              h('span', null, siteName(settingsTab) + ' 的账户与登录'),
+              health ? h('span', {
+                className: 'hwb-dot ' + health,
+                role: 'img',
+                // 颜色是唯一视觉载体 ⇒ 读屏必须能读出含义。
+                'aria-label': siteName(settingsTab) + ' 账户状态：' + healthLabel(health),
+                // `title` 给逐账户的登录依据（哪一个账户、凭什么判的）。
+                // 它顺带让 `basisText` 保持**有调用方**——删掉徽章后它一度成了
+                // 死代码，而那正是它存在意义的反面：那句话是给「未登录看起来像
+                // 凭空断言」准备的解释，不该随徽章一起消失。
+                title: (Array.isArray(sites) ? sites : [])
+                  .filter(r => r && r.siteId === settingsTab)
+                  .map(r => (r.accountName || r.displayName || '') + '：' + basisText(r))
+                  .join('\n') || null,
+              }) : null);
+          })(),
           // 只列该站点的账户行——`SiteAccounts` 本来就支持 `onlySiteId`（子代理站点
           // 那一处一直在用），这里复用同一个过滤，不另写一份「按站点筛」的逻辑。
           h(SiteAccounts, { sites, onRefresh: refresh, onlySiteId: settingsTab })),
@@ -3237,6 +3767,49 @@ window.__ModuleLoader__.load({
               cur === null
                 ? '未覆盖：跟随全局间隔 ' + (Math.round(Number(sendGapMs) || 0) / 1000) + ' 秒'
                 : '已覆盖为 ' + (cur / 1000) + ' 秒，只对本站点生效（点「跟随全局」清除）'));
+        })(),
+
+        // ---- 站点专属提示词投递形态（0.19.32）--------------------------------
+        //
+        // 用户原话：「提示词投递：给每个模型站点都做到和『发送间隔（全局）』一样的逻辑：
+        // 全局设置一个，但是针对每个单独网站设置能够单独设置」。
+        //
+        // 因此这一张卡与上面「排队间隔」那张**逐字同构**：三态（跟随全局 / 附件投递 /
+        // 纯文本）+ 一行只读读数。回落链也同构：站点档 → 全局档 → 插件 config → 'attach'。
+        //
+        // 为什么需要它：投递形态此前是**进程级**的一个开关，而站点差异是真实存在的
+        //（deepseek 与 kimi 的输入框实测上限远低于全站默认阈值，见 SITE_ATTACH_INLINE_LIMIT
+        // 的取证）。全局只能二选一时，用户只能为某一个站点让所有站点一起改。
+        //
+        // 读数那一行读的是**服务端按本站点算好的**文案（attach-status 带 siteId），
+        // 前端不自己拼「本站点现在是什么」——两处各拼一份，迟早分叉。
+        settingsTab && (() => {
+          const cur = Object.prototype.hasOwnProperty.call(transportBySite, settingsTab)
+            ? transportBySite[settingsTab] : null;
+          return h('div', { className: 'hwb-card' },
+            // 卡名不带「提示词投递」四个字：那是**全局页**那张卡的标题，而站点页的
+            // 「不得出现全局卡」由 test/client-render.test.mjs 的 0.16.38 作用域用例按
+            // 词钉住——同词会让那条护栏分不清「全局卡漏到站点页」与「站点卡起了同名」。
+            h('h3', { className: 'hwb-group first' }, siteName(settingsTab) + ' 的投递形态'),
+            h('div', { className: 'hwb-row' }, h('span', { className: 'hwb-row-label' }, '投递形态'),
+              h('div', { className: 'hwb-row-main' },
+                h('label', { className: 'hwb-consent', title: '跟随全局页那一档（未覆盖时就是这个）' },
+                  h('input', { type: 'radio', name: 'hwb-site-transport', checked: cur === null, disabled: pending,
+                    onChange: () => saveSiteTransport(settingsTab, null) }),
+                  h('span', null, '跟随全局')),
+                h('label', { className: 'hwb-consent', title: '超过阈值的正文改为附件上传；任何一步失败都自动回落纯文本' },
+                  h('input', { type: 'radio', name: 'hwb-site-transport', checked: cur === 'attach', disabled: pending,
+                    onChange: () => saveSiteTransport(settingsTab, 'attach') }),
+                  h('span', null, '附件投递')),
+                h('label', { className: 'hwb-consent', title: '正文逐字写进网页输入框（旧行为）' },
+                  h('input', { type: 'radio', name: 'hwb-site-transport', checked: cur === 'inline', disabled: pending,
+                    onChange: () => saveSiteTransport(settingsTab, 'inline') }),
+                  h('span', null, '纯文本')),
+                siteTransportNotice && h('span', { className: 'hwb-hint' }, siteTransportNotice))),
+            h('p', { className: 'hwb-hint indent' }, cur === null
+              ? '未覆盖：跟随全局投递形态。'
+              : '已覆盖为「' + (cur === 'inline' ? '纯文本' : '附件投递') + '」，只对本站点生效。'),
+            h('p', { className: 'hwb-hint indent' }, '当前生效：' + (attachStatus?.transportLine || '读数加载中…')));
         })(),
 
         // ---- 站点页：模型管理（0.16.38）-------------------------------------
@@ -3320,6 +3893,8 @@ window.__ModuleLoader__.load({
             notice: sitePromptNotice,
             onSave: (text) => saveSitePrompt(settingsTab, text),
             disabled: pending,
+            // 设置一变，这张卡的只读模板 / 再教学跟着重算（0.19.33）。
+            revision: settingsRevision,
           })),
 
         // 0.19.x：原先这里有一张「正在运行（子代理 / Team）」卡（渲染 AgentRoster）。
@@ -3362,13 +3937,14 @@ window.__ModuleLoader__.load({
               sendGapNotice && h('span', { className: 'hwb-hint' }, sendGapNotice))),
           h('div', { className: 'hwb-row' }, h('span', { className: 'hwb-row-label' }, '间隔基准'),
             h('div', { className: 'hwb-row-main' },
+              // 0.19.31（用户 2026-09-27 原话）：「全局界面发送间隔：答完那一刻起重新数满
+              // 间隔。这样的提示行去除」—— 两个分支的说明文案整行删除，只留下拉本身。
+              // 选项各自的语义挪进 option 的 title（悬停即见），因此删掉的是**常驻占位**
+              // 而不是信息：界面不再为一句解释长期留一行。
               h('select', { className: 'hwb-model-select', value: sendGapBasis, disabled: pending,
                 onChange: e => setSendGapBasis(e.target.value === 'end-to-start' ? 'end-to-start' : 'send-to-send') },
                 h('option', { value: 'send-to-send', title: '防限流：距上次发出' }, '距上次发出'),
-                h('option', { value: 'end-to-start', title: '防贴太紧：距上次回复完成' }, '距上次回复完成')),
-              h('span', { className: 'hwb-hint' }, sendGapBasis === 'end-to-start'
-                ? '答完那一刻起重新数满间隔。'
-                : '按请求到达计，上一轮跑得久时本轮无需再等。')))),
+                h('option', { value: 'end-to-start', title: '防贴太紧：距上次回复完成' }, '距上次回复完成'))))),
 
         // 提示词投递形态（0.16.3）。用户原话：「没有做到能够把提示词放入文本
         //（设置界面也改为打开文本）导致输出对话一开头就很长 token 窗口」——
@@ -3518,7 +4094,7 @@ window.__ModuleLoader__.load({
         !settingsTab && h('div', { className: 'hwb-card' },
           h('h3', { className: 'hwb-group first' }, '全局指令'),
           h('p', { className: 'hwb-hint' }, '追加一段 [全局指令] 注入每个新网页会话的首条消息。'),
-          h(GlobalPrompt)),
+          h(GlobalPrompt, { onRevision: applyRevision })),
 
         // ---- 全局页：首轮提示词模板总览（0.16.38）---------------------------
         //
@@ -3528,7 +4104,7 @@ window.__ModuleLoader__.load({
         !settingsTab && h('div', { className: 'hwb-card' },
           h('h3', { className: 'hwb-group first' }, '首轮提示词（只读）'),
           h('p', { className: 'hwb-hint' }, '只读：模板按本会话工具清单生成；可编辑的是全局指令与各站点自己的那一段。'),
-          h(PromptSection)),
+          h(PromptSection, { revision: settingsRevision })),
         relay?.lastError ? h('p', { role: 'alert', className: 'hwb-hint' }, '最近错误: ' + relay.lastError) : null,
         error && h('p', { role: 'alert' }, error));
     }
@@ -3613,8 +4189,14 @@ window.__ModuleLoader__.load({
       qwen: 'M23.919 14.545 20.817 9.17l1.47-2.544a.56.56 0 0 0 0-.566l-1.633-2.83a.57.57 0 0 0-.49-.283h-6.207L12.487.402a.57.57 0 0 0-.49-.284H8.732a.56.56 0 0 0-.49.284L5.139 5.775h-2.94a.56.56 0 0 0-.49.284L.077 8.887a.56.56 0 0 0 0 .567L3.18 14.83l-1.47 2.545a.56.56 0 0 0 0 .566l1.634 2.83a.57.57 0 0 0 .49.283h6.205l1.47 2.545a.57.57 0 0 0 .49.284h3.266a.57.57 0 0 0 .49-.284l3.104-5.375h2.94a.57.57 0 0 0 .49-.283l1.634-2.828a.55.55 0 0 0-.004-.568M8.733.686l1.634 2.828-1.634 2.828H21.8L20.164 9.17H7.425L5.63 6.06Zm1.306 19.801-6.205-.002 1.634-2.83h3.265L2.201 6.344h3.267q3.182 5.517 6.367 11.032zm10.124-5.66L18.53 12l-6.532 11.315-1.634-2.83c2.129-3.673 4.25-7.351 6.373-11.028h3.592l3.102 5.374z',
       // simple-icons/moonshotai.svg
       kimi: 'm1.053 16.91 9.538 2.55a21 20.981 0 0 0 .06 2.031l5.956 1.592a12 11.99 0 0 1-15.554-6.172m-1.02-5.79 11.352 3.035a21 20.981 0 0 0-.469 2.01l10.817 2.89a12 11.99 0 0 1-1.845 2.004L.658 15.918a12 11.99 0 0 1-.625-4.796m1.593-5.146L13.573 9.17a21 20.981 0 0 0-1.01 1.874l11.297 3.02a21 20.981 0 0 1-.67 2.362l-11.55-3.087L.125 10.26a12 11.99 0 0 1 1.499-4.285ZM6.067 1.58l11.285 3.016a21 20.981 0 0 0-1.688 1.719l7.824 2.091a21 20.981 0 0 1 .513 2.664L2.107 5.218a12 11.99 0 0 1 3.96-3.638M21.68 4.866 7.222 1.003A12 11.99 0 0 1 21.68 4.866',
-      // simple-icons/bytedance.svg（豆包属字节系，品牌方未单独发布豆包矢量）
-      doubao: 'M19.8772 1.4685L24 2.5326v18.9426l-4.1228 1.0563V1.4685zm-13.3481 9.428l4.115 1.0641v8.9786l-4.115 1.0642v-11.107zM0 2.572l4.115 1.0642v16.7354L0 21.428V2.572zm17.4553 5.6205v11.107l-4.1228-1.0642V9.2568l4.1228-1.0642z',
+      // doubao：@lobehub/icons-static-svg 的 doubao.svg（0.19.35 换源，见 SITE_ICON_TIER）
+      // https://unpkg.com/@lobehub/icons-static-svg@latest/icons/doubao.svg
+      // 3 条路径（含浅色层 fill-opacity）；见 SiteGlyph 的多路径分支。
+      doubao: [
+        { d: 'M5.31 15.756c.172-3.75 1.883-5.999 2.549-6.739-3.26 2.058-5.425 5.658-6.358 8.308v1.12C1.501 21.513 4.226 24 7.59 24a6.59 6.59 0 002.2-.375c.353-.12.7-.248 1.039-.378.913-.899 1.65-1.91 2.243-2.992-4.877 2.431-7.974.072-7.763-4.5l.002.001z', opacity: 0.5 },
+        { d: 'M22.57 10.283c-1.212-.901-4.109-2.404-7.397-2.8.295 3.792.093 8.766-2.1 12.773a12.782 12.782 0 01-2.244 2.992c3.764-1.448 6.746-3.457 8.596-5.219 2.82-2.683 3.353-5.178 3.361-6.66a2.737 2.737 0 00-.216-1.084v-.002zM14.303 1.867C12.955.7 11.248 0 9.39 0 7.532 0 5.883.677 4.545 1.807 2.791 3.29 1.627 5.557 1.5 8.125v9.201c.932-2.65 3.097-6.25 6.357-8.307.5-.318 1.025-.595 1.569-.829 1.883-.801 3.878-.932 5.746-.706-.222-2.83-.718-5.002-.87-5.617h.001z' },
+        { d: 'M17.305 4.961a199.47 199.47 0 01-1.08-1.094c-.202-.213-.398-.419-.586-.622l-1.333-1.378c.151.615.648 2.786.869 5.617 3.288.395 6.185 1.898 7.396 2.8-1.306-1.275-3.475-3.487-5.266-5.323z', opacity: 0.5 },
+      ],
       // ---- 0.16.37：GLM 与 Z.ai 终于也有真实矢量了（用户：「z.ai 和 glm 看搜索 zcode
       // 看看有没有图标」）-----------------------------------------------------------
       //
@@ -3634,10 +4216,18 @@ window.__ModuleLoader__.load({
       // 是权衡后的选择而不是忽略——用户明确要求这两站也要有图标，而官方渠道
       // 确实没有可直接引用的透明底符号。逐行 `title` 里照实写「来源 lobehub」。
       //
-      // 取件 2026-09-21，URL 前缀 `https://unpkg.com/@lobehub/icons-static-svg@latest/icons/`：
-      //   zai.svg（Z.ai）· chatglm.svg（智谱清言 / GLM）
+      // 取件 2026-09-21（zai）/ 2026-09-27（glm 改 qingyan），URL 前缀
+      // `https://unpkg.com/@lobehub/icons-static-svg@latest/icons/`：
+      //   zai.svg（Z.ai）· qingyan.svg（智谱清言——0.19.35 前用的是 chatglm.svg，
+      //   那是底层 GLM 模型的标，不是这个应用的标）
       zai: 'M12.105 2L9.927 4.953H.653L2.83 2h9.276zM23.254 19.048L21.078 22h-9.242l2.174-2.952h9.244zM24 2L9.264 22H0L14.736 2H24z',
-      glm: 'M9.917 2c4.906 0 10.178 3.947 8.93 10.58-.014.07-.037.14-.057.21l-.003-.277c-.083-3-1.534-8.934-8.87-8.934-3.393 0-8.137 3.054-7.93 8.158-.04 4.778 3.555 8.4 7.95 8.332l.073-.001c1.2-.033 2.763-.429 3.1-1.657.063-.031.26.534.268.598.048.256.112.369.192.34.981-.348 2.286-1.222 1.952-2.38-.176-.61-1.775-.147-1.921-.347.418-.979 2.234-.926 3.153-.716.443.102.657.38 1.012.442.29.052.981-.2.96.242C17.226 19.632 13.833 22 9.918 22 3.654 22 0 16.574 0 11.737 0 5.947 4.959 2 9.917 2zM9.9 5.3c.484 0 1.125.225 1.38.585 3.669.145 4.313 2.686 4.694 5.444.255 1.838.315 2.3.182 1.387l.083.59c.068.448.554.737.982.516.144-.075.254-.231.328-.47a.2.2 0 01.258-.13l.625.22a.2.2 0 01.124.238 2.172 2.172 0 01-.51.92c-.878.917-2.757.664-3.08-.62-.14-.554-.055-.626-.345-1.242-.292-.621-1.238-.709-1.69-.295-.345.315-.407.805-.406 1.282L12.6 15.9a.9.9 0 01-.9.9h-1.4a.9.9 0 01-.9-.9v-.65a1.15 1.15 0 10-2.3 0v.65a.9.9 0 01-.9.9H4.8a.9.9 0 01-.9-.9l.035-3.239c.012-1.884.356-3.658 2.47-4.134.2-.045.252.13.29.342.025.154.043.252.053.294.701 3.058 1.75 4.299 3.144 3.722l.66-.331.254-.13c.158-.082.25-.131.276-.15.012-.01-.165-.206-.407-.464l-1.012-1.067a8.925 8.925 0 01-.199-.216c-.047-.034-.116.068-.208.306-.074.157-.251.252-.272.326-.013.058.108.298.362.72.164.288.22.508-.31.343-1.04-.8-1.518-2.273-1.684-3.725-.004-.035-.162-1.913-.162-1.913a1.2 1.2 0 011.113-1.281L9.9 5.3zm12.994 8.68c.037.697-.403.704-1.213.591l-1.783-.276c-.265-.053-.385-.099-.313-.147.47-.315 3.268-.93 3.31-.168zm-.915-.083l-.926.042c-.85.077-1.452.24.338.336l.103.003c.815.012 1.264-.359.485-.381zm1.667-3.601h.01c.79.398.067 1.03-.65 1.393-.14.07-.491.176-1.052.315-.241.04-.457.092-.333.16l.01.005c1.952.958-3.123 1.534-2.495 1.285l.38-.148c.68-.266 1.614-.682 1.666-1.337.038-.48 1.253-.442 1.493-.968.048-.106 0-.236-.144-.389-.05-.047-.094-.094-.107-.148-.073-.305.7-.431 1.222-.168zm-2.568-.474c-.135 1.198-2.479 4.192-1.949 2.863l.017-.042c.298-.717.376-2.221 1.337-3.221.25-.26.636.035.595.4zm-7.976-.253c.02-.694 1.002-.968 1.346-.347.01-1.274-1.941-.768-1.346.347z',
+      // glm：@lobehub/icons-static-svg 的 qingyan.svg
+      // https://unpkg.com/@lobehub/icons-static-svg@latest/icons/qingyan.svg
+      // 2 条路径；见 SiteGlyph 的多路径分支。
+      glm: [
+        { d: 'M6.075 10.494C7.6 9.446 9.768 8.759 12.222 8.759c2.453 0 4.622.687 6.147 1.735.77.53 1.352 1.133 1.74 1.77C20 10 20 10 20.687 9.362a9.276 9.276 0 00-1.008-.8c-1.958-1.347-4.598-2.143-7.457-2.143-2.858 0-5.499.796-7.457 2.144-1.955 1.345-3.325 3.322-3.325 5.647 0 2.326 1.37 4.303 3.322 5.646C6.721 21.205 9.362 22 12.22 22c2.859 0 5.5-.795 7.457-2.144C21.63 18.513 23 16.538 23 14.21c0-1.48-.554-2.817-1.46-3.94-.046 1.036-.41 2.03-1.012 2.937.099.325.149.663.15 1.003 0 1.33-.782 2.664-2.313 3.717-1.524 1.048-3.692 1.735-6.146 1.735-2.453 0-4.623-.687-6.147-1.735C4.544 16.874 3.76 15.54 3.76 14.21c.003-1.33.785-2.663 2.315-3.716z' },
+        { d: 'M3.747 11.494c-.62 1.77-.473 3.365.332 4.51.806 1.144 2.254 1.813 4.117 1.813 1.86 0 4.029-.68 6.021-2.1 1.993-1.42 3.35-3.251 3.967-5.017.62-1.769.473-3.364-.332-4.51-.806-1.143-2.254-1.812-4.117-1.812-1.86 0-4.029.68-6.021 2.099-1.993 1.42-3.35 3.252-3.967 5.017zm-2.228-.79c.8-2.28 2.487-4.498 4.83-6.167C8.691 2.866 11.33 2 13.734 2c2.4 0 4.678.874 6.045 2.817 1.366 1.943 1.431 4.394.633 6.674-.8 2.282-2.487 4.499-4.83 6.168-2.344 1.67-4.981 2.536-7.387 2.537-2.4 0-4.678-.874-6.045-2.817-1.368-1.943-1.431-4.396-.633-6.674h.002z' },
+      ],
     };
     /**
      * 站点 id → { tier, why }。tier 只有 'official' 与 'missing' 两态，没有中间态。
@@ -3662,7 +4252,13 @@ window.__ModuleLoader__.load({
       grok: { tier: 'official', why: 'simple-icons/x.svg（CC0-1.0，取件 2026-09-20）' },
       qwen: { tier: 'official', why: 'simple-icons/qwen.svg（CC0-1.0，取件 2026-09-20）' },
       kimi: { tier: 'official', why: 'simple-icons/moonshotai.svg（CC0-1.0，取件 2026-09-20）' },
-      doubao: { tier: 'official', why: 'simple-icons/bytedance.svg（CC0-1.0，取件 2026-09-20）' },
+      // 0.19.35：豆包从「字节跳动的 bytedance 标记」换成**豆包自己的品牌矢量**。
+      // 用户原话：「右侧面板智谱清言、豆包的矢量图错误了……请你下载替换为正确矢量图」。
+      // 上一版用 bytedance 是当时的诚实权衡（simple-icons 确实没有 doubao 条目），
+      // 但它画出来的是**字节跳动**的标，不是豆包——用户一眼就看出不对。
+      // 现在改取 lobehub 的 doubao.svg，与 GLM / Z.ai 同一档 'vector'（社区图集，
+      // 非品牌方发布）；这一档的存在就是为了不把来源含糊掉。
+      doubao: { tier: 'vector', why: '真实矢量，来源 @lobehub/icons-static-svg 的 doubao.svg（社区图集，非品牌方发布；simple-icons 无此条目），取件 2026-09-27' },
       // 0.16.37：这两行从 'missing' 改成 'official' 之外的新档 'vector'——**档位名不能骗人**。
       //
       // 'official' 在本文件里的含义一直是「磁盘上有真实品牌矢量」，而它此前只覆盖
@@ -3670,11 +4266,18 @@ window.__ModuleLoader__.load({
       // 真实、透明底、随 currentColor，但**不是品牌方发布、也不是 CC0**。
       // 把它并进 'official' 会把「来源等级」这件事含糊掉（而这一档的全部价值就是
       // 让用户一眼看出图标从哪来），因此单开一档，逐行 title 里写明来源。
-      glm: { tier: 'vector', why: '真实矢量，来源 @lobehub/icons-static-svg（社区图集，非品牌方发布；simple-icons 实测无此条目），取件 2026-09-21' },
+      // 0.19.35：智谱清言从 **chatglm.svg** 换成 **qingyan.svg**。两者都在 lobehub 里，
+      // 但 chatglm 是底层 GLM 模型的标，qingyan 才是**智谱清言这个应用**的标——用户
+      // 看到的就是「应用图标不对」。取件 2026-09-27。
+      glm: { tier: 'vector', why: '真实矢量，来源 @lobehub/icons-static-svg 的 qingyan.svg（智谱清言应用标，社区图集，非品牌方发布；simple-icons 实测无此条目），取件 2026-09-27' },
       zai: { tier: 'vector', why: '真实矢量，来源 @lobehub/icons-static-svg（社区图集，非品牌方发布；simple-icons 实测无此条目），取件 2026-09-21' },
     };
     const siteTier = sid => SITE_ICON_TIER[sid]?.tier || 'missing';
-    const siteIconWhy = sid => SITE_ICON_TIER[sid]?.why || '官方矢量图标未找到';
+    // 0.19.35：`siteIconWhy` 已删。用户原话：「右侧鼠标悬浮在矢量图时候会有的说明
+    // 去除显示」——档位说明此前既挂在站点目录行、也挂在右栏工具条的图标上，都是
+    // `title`（悬浮提示）。删的是**显示**，不是**记录**：`SITE_ICON_TIER[].why` 逐条
+    // 保留（谁画的、从哪取的、什么许可、取件日期），它仍是「图标从哪来」的唯一正本，
+    // 由 test/client-render.test.mjs 在**源码层**核验。把记录一起删掉才是真的丢了信息。
     /**
      * 该站点是否有**真实品牌矢量**（official 或 vector 两档都算）。
      *
@@ -3716,19 +4319,29 @@ window.__ModuleLoader__.load({
           transform: 'translate(' + ((box - drawW) / 2) + ' ' + ((box - drawH) / 2) + ') scale(' + scale + ')',
         }));
       }
-      // simple-icons 取回的 24×24 单路径图标（0.16.36）：原样放进方形画布居中。
+      // simple-icons / lobehub 取回的 24×24 图标：原样放进方形画布居中。
       // 与鲸鱼那条分支**同一套尺寸口径**（box = size + 8、currentColor），因此同一
       // 排里光学大小一致——两种来源的图标混排时不会一大一小。
+      //
+      // 0.19.35：值可以是**单条 d 字符串**，也可以是 `{d, opacity}[]`。豆包的品牌
+      // 矢量本身就是多路径带浅色层（两条 fill-opacity=.5），只画一条会得到半个图形
+      // ——这正是用户报的「豆包矢量图错误」。两条分支共用同一个 transform，因此
+      // 多路径之间的相对位置逐字保持源文件里的关系。
       const scIcon = SITE_ICON_PATHS[sid];
       if (scIcon) {
         const pad = (box - size) / 2;
+        const tf = 'translate(' + pad + ' ' + pad + ') scale(' + (size / 24) + ')';
+        const parts = Array.isArray(scIcon) ? scIcon : [{ d: scIcon, opacity: 1 }];
         return h('svg', {
           className: 'hwb-glyph-svg', width: box, height: box, viewBox: '0 0 ' + box + ' ' + box,
           'aria-hidden': 'true', focusable: 'false',
-        }, h('path', {
-          d: scIcon, fill: 'currentColor',
-          transform: 'translate(' + pad + ' ' + pad + ') scale(' + (size / 24) + ')',
-        }));
+        }, parts.map((p, i) => h('path', {
+          key: i, d: p.d, fill: 'currentColor',
+          // 只有真源里写了 fill-opacity 的路径才带这个属性：给它补 1 会凭空多出一个
+          // 与源文件不同的属性，而「逐字照抄源矢量」是这一节的验收口径。
+          ...(p.opacity === undefined || p.opacity === 1 ? {} : { 'fill-opacity': p.opacity }),
+          transform: tf,
+        })));
       }
       // 文字标记：品牌名缩写。**不是**「找不到图标就用首字母凑合」——它是有意
       // 为之的占位表达，`title` 里会写明矢量尚未取得，用户一眼能看出区别。
@@ -3994,7 +4607,6 @@ window.__ModuleLoader__.load({
             // 最容易露馅的正是这些细节。
             const main = h(Button, {
               variant: 'ghost', className: 'hwb-site-main',
-              title: siteName(sid) + ' · ' + siteIconWhy(sid),
               onClick: () => open(sid, ''),
             },
               h('span', { className: 'hwb-catalog-ico' + (hasBrandVector(sid) ? ' official' : '') },
@@ -4328,7 +4940,6 @@ window.__ModuleLoader__.load({
             // 文字标记」），与站点目录里的同一套 SiteGlyph 口径一致。
             h('span', {
               className: 'hwb-glyph' + (hasBrandVector(siteId) ? ' official' : ''),
-              title: siteName(siteId) + ' · ' + siteIconWhy(siteId),
             }, h(SiteGlyph, { sid: siteId, size: 16 })),
             h('span', { className: 'hwb-toolbar-name' }, siteName(siteId)),
             statusDot(siteStatus),
@@ -4448,11 +5059,26 @@ window.__ModuleLoader__.load({
         ".hwb-settings h2{font-size:20px;font-weight:500;line-height:28px;letter-spacing:0;margin:0 0 2px}",
         // 标题行：h2 在左、项目链接在右。`margin:0 0 2px` 移到 h2 上（上面那条），
         // 这里只负责两端对齐，避免 h2 的 margin 把这一行撑高。
-        ".hwb-settings-head{display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:4px}",
+        ".hwb-settings-head{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:4px}",
         ".hwb-settings-head h2{margin:0}",
+        // 0.19.39：品牌标记 + 名称 + 版本 + 更新 + GitHub 一行（用户要的顶部形态）。
+        ".hwb-brand{display:inline-flex;align-items:center;gap:8px;min-width:0}",
+        ".hwb-brand-mark{display:inline-flex;align-items:center;justify-content:center;flex:none;color:var(--dsw-alias-brand-primary,#3b82f6)}",
+        ".hwb-head-actions{display:inline-flex;align-items:center;gap:8px;flex:none;flex-wrap:wrap}",
+        ".hwb-version{font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary,inherit);font-variant-numeric:tabular-nums;white-space:nowrap}",
+        ".hwb-update-btn{height:28px;padding:0 12px;font:inherit;font-size:12px;line-height:26px;color:var(--dsw-alias-label-primary,inherit);background:var(--dsw-alias-bg-layer-1,transparent);border:.5px solid var(--dsw-alias-border-l3,#8885);border-radius:14px;cursor:pointer;white-space:nowrap;transition:background .12s ease}",
+        ".hwb-update-btn:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover,#8882)}",
+        ".hwb-update-btn:disabled{opacity:.45;cursor:default}",
+        // 「有新版」时才用主色底：常态是一颗安静的次级按钮，有更新才成为主动作。
+        ".hwb-update-btn.primary{background:var(--dsw-alias-button-info-fill,#3b82f6);color:var(--dsw-alias-label-primary-foreground,#fff);border-color:transparent}",
+        ".hwb-update-btn.primary:hover:not(:disabled){background:var(--dsw-alias-button-info-hover,#2f6fe4)}",
+        // 重启提醒：装完必须重启才生效，因此这条**不能**是一条灰色小字。
+        ".hwb-update-notice{margin:6px 0 0;padding:8px 10px;border-radius:8px;font-size:12px;line-height:18px;max-width:100%;overflow-wrap:anywhere}",
+        ".hwb-update-notice.ok{color:var(--dsw-alias-label-primary,inherit);background:var(--dsw-alias-interactive-bg-hover,#8881);border:.5px solid var(--dsw-alias-state-success-primary,#2e7d32)}",
+        ".hwb-update-notice.bad{color:var(--dsw-alias-state-error-primary,#93443e);background:var(--dsw-alias-interactive-bg-hover,#8881);border:.5px solid var(--dsw-alias-state-error-primary,#93443e)}",
         ".hwb-repo-link{flex:none;font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary,#6b7280);text-decoration:none;padding:2px 8px;border:.5px solid var(--dsw-alias-border-l3,#8885);border-radius:12px;transition:background .12s ease,color .12s ease}",
         ".hwb-repo-link:hover{color:var(--dsw-alias-label-primary,inherit);background:var(--dsw-alias-interactive-bg-hover,#8882)}",
-        ".hwb-lead{font-size:13px;line-height:22px;color:var(--dsw-alias-label-tertiary,#8a8f98);margin:0}",
+        ".hwb-lead{font-size:13px;line-height:22px;color:var(--dsw-alias-label-tertiary,#8a8f98);margin:0;max-width:100%;overflow-wrap:anywhere}",
         ".hwb-build{font-size:11px;line-height:16px;color:var(--dsw-alias-label-caption,#9aa0a6);margin:-6px 0 0;font-variant-numeric:tabular-nums}",
         // ---- 0.14.9 去臃肿：按调研出来的 token 表收紧 --------------------
         // 用户原话：「做到简洁高效美观，而不是现在的臃肿」。数值不是拍脑袋，
@@ -4477,18 +5103,61 @@ window.__ModuleLoader__.load({
         //                      WebKit/Chromium 的 ::-webkit-scrollbar）。
         // 下边距 12px：分隔线由 border-bottom 提供，卡片与它之间必须留一口气，否则
         //「下面隔行的线」会贴着卡片边框，看着像两条重复的线。
-        ".hwb-settings-tabs{display:flex;gap:2px;align-items:flex-end;flex-wrap:nowrap;overflow-x:auto;overflow-y:hidden;scrollbar-width:none;border-bottom:.5px solid var(--dsw-alias-border-l2,#e5e7eb);margin:4px 0 12px}",
+        //
+        // ── 0.19.31（用户 2026-09-27 原话）：「设置界面：全局/deepseek 这样，他的按钮
+        //     底部和一条分割线重合……解决为下移一点」────────────────────────────────
+        // 成因：`align-items:flex-end` 把每个 tab 的**底边**对齐到容器内容盒底边，
+        // 而选中态那条 2px 指示线就画在 tab 的底边上；容器的 `.5px` 分隔线由
+        // `border-bottom` 画在内容盒**紧下面** ⇒ 蓝线下面直接贴着灰线，看起来「重合」。
+        // 修法：容器加 `padding-bottom:4px` —— 分隔线（border）随内容盒一起下移 4px，
+        // 与指示线之间留出可见间隙。不动 tab 自身的内边距，因此选中态不会跳、
+        // 整排高度也不变（这 4px 本来就落在原来的 12px 下边距里）。
+        // ── 0.19.31（用户 2026-09-27 原话）：「不应该是点击后按钮内部底面有个白色底线，
+        //     改为官方常见的……切换标签页里面切『全局』那些」────────────────────────
+        //
+        // 旧形态是「透明下边框 + 选中时 2px 下划线」，线色取 `--dsw-alias-brand-primary`。
+        // 这条线在深色主题下**就是近白的**：官方主题里 `--dsw-alias-brand-primary`
+        // 深色取 `--dsw-static-neutral-bluish-50`、浅色取 `neutral-bluish-1000`。
+        // 因此「点击后底面出现白色底线」不是画错了，是那支色本身在深色下接近白。
+        //
+        // 改成**浅色胶囊**（用户选定的形态）：
+        //   · 去掉 `border-bottom`（含那条 transparent 占位）与下划线选中态；
+        //   · 常态无底；hover 升一档 `interactive-bg-hover`；
+        //   · 选中态用 `interactive-bg-active`（比 hover 再实一档）+ 主字色 + 600 字重。
+        //     两者分档是为了**同时看得见 hover 与选中** —— 若两态同色，鼠标划过未选中的
+        //     tab 会让人以为它已被选中。
+        //   · `align-items` 从 flex-end 改回 center：没有下划线要对齐了，胶囊居中即可。
+        // ── 0.19.38（用户 2026-09-27 原话）：「切换设置标签页时候，这一行离分割线的
+        //     距离不够，参考官方 dsh 常见的文字和线的分隔做好框与线的距离」───────
+        //
+        // 实测官方同类「文字 + 底线」的分隔栏（逐字取自本机已装包）：
+        //   dsh-client-ui-settings-plugins 的 .pbvGtq_tabs{border-bottom:.5px solid
+        //     var(--dsw-alias-border-l2); align-items:flex-end; gap:22px}
+        //   …/                  .pbvGtq_tab{padding:7px 1px 9px; font-size:13px}
+        //   即**文字底边到线 = 9px**，且 tab 是**纯文字**（background:0 0; border:0）。
+        //
+        // 我们的数字本来也是 9px（tab 的 padding 5px + 容器 padding-bottom 4px），
+        // 但形态不同：本实现是**浅色胶囊**（0.19.31 用户选定的形态），于是贴线的
+        // 不是文字而是一块**有色块的矩形** —— 色块底边到线只剩 4px，看起来就「太近」。
+        // 所以修的不是「把 9 调大一点」，而是**按色块重新定距**：容器 padding-bottom
+        // 4 → 10px（色块底到线 10px，文字底到线 5+10 = 15px）。
+        // 两处间距都大于官方的 9px —— 色块比文字更「重」，需要更多呼吸空间才不显得挤。
+        //
+        // `overscroll-behavior-x:contain`（同一条的用户第二问）：见下面滚轮监听的说明。
+        ".hwb-settings-tabs{display:flex;gap:4px;align-items:center;flex-wrap:nowrap;overflow-x:auto;overflow-y:hidden;scrollbar-width:none;overscroll-behavior-x:contain;padding-bottom:10px;border-bottom:.5px solid var(--dsw-alias-border-l2,#e5e7eb);margin:4px 0 12px}",
         ".hwb-settings-tabs::-webkit-scrollbar{display:none;width:0;height:0}",
-        ".hwb-settings-tab{flex:none;border:none;background:none;font:inherit;font-size:13px;line-height:20px;color:var(--dsw-alias-label-secondary,#6b7280);padding:7px 12px;cursor:pointer;border-bottom:2px solid transparent;white-space:nowrap;display:inline-flex;align-items:center;gap:6px}",
-        ".hwb-settings-tab:hover{color:var(--dsw-alias-label-primary,inherit)}",
-        ".hwb-settings-tab.on{color:var(--dsw-alias-brand-primary,#4f6ef7);border-bottom-color:var(--dsw-alias-brand-primary,#4f6ef7);font-weight:600}",
+        ".hwb-settings-tab{flex:none;border:none;background:none;font:inherit;font-size:13px;line-height:20px;color:var(--dsw-alias-label-secondary,#6b7280);padding:5px 12px;border-radius:999px;cursor:pointer;white-space:nowrap;display:inline-flex;align-items:center;gap:6px;transition:background .12s ease,color .12s ease}",
+        ".hwb-settings-tab:hover{background:var(--dsw-alias-interactive-bg-hover,#8882);color:var(--dsw-alias-label-primary,inherit)}",
+        ".hwb-settings-tab.on{background:var(--dsw-alias-interactive-bg-active,#8883);color:var(--dsw-alias-label-primary,inherit);font-weight:600}",
         ".hwb-settings-tab-count{font-size:11px;line-height:16px;padding:0 6px;border-radius:8px;border:.5px solid var(--dsw-alias-border-l3,#8885);color:var(--dsw-alias-label-tertiary,#8a8f98);font-weight:400}",
-        ".hwb-group{font-size:14px;font-weight:500;line-height:22px;color:var(--dsw-alias-label-primary,inherit);margin:16px 0 4px}",
+        ".hwb-group{font-size:14px;font-weight:500;line-height:22px;color:var(--dsw-alias-label-primary,inherit);margin:16px 0 4px;max-width:100%;overflow-wrap:anywhere}",
         ".hwb-group.first{margin-top:16px}",
+        // 0.19.37：标题行（站点名在左、健康度圆点在右上角）。用户指定的圆点位置。
+        ".hwb-group-row{display:flex;align-items:center;justify-content:space-between;gap:8px}",
         // 分隔靠间距：行间距 8px（§4.4）取代原来的 1px 底线。
         // gap 同时承担「分组内行距」，因此这里用 row-gap 让相邻两行分开。
         ".hwb-row{display:flex;align-items:flex-start;gap:16px;flex-wrap:wrap;padding:8px 0}",
-        ".hwb-row-label{flex:0 0 96px;min-width:96px;font-size:13px;line-height:20px;padding-top:6px;color:var(--dsw-alias-label-secondary,inherit)}",
+        ".hwb-row-label{flex:0 0 96px;min-width:96px;max-width:100%;font-size:13px;line-height:20px;padding-top:6px;color:var(--dsw-alias-label-secondary,inherit);overflow-wrap:anywhere}",
         ".hwb-row-main{flex:1;min-width:240px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}",
         ".hwb-row button,.hwb-settings button{height:32px;padding:0 14px;font:inherit;font-size:13px;line-height:30px;color:var(--dsw-alias-label-primary,inherit);background:var(--dsw-alias-bg-layer-1,transparent);border:.5px solid var(--dsw-alias-border-l3,#8885);border-radius:12px;cursor:pointer;transition:background .12s ease}",
         ".hwb-row button:hover:not(:disabled),.hwb-settings button:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover,#8882)}",
@@ -4505,8 +5174,23 @@ window.__ModuleLoader__.load({
         ".hwb-prompt-input{max-width:100%;min-height:96px;line-height:1.5;font-family:inherit;resize:vertical}",
         // 提示词文件路径（0.16.38）：等宽、单行、超长靠省略号，完整路径在 title 里。
         // 它是**只读读数**，因此不进输入框样式族；点击打开走旁边那颗按钮。
-        ".hwb-filepath{flex:1 1 auto;min-width:0;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;line-height:18px;padding:2px 8px;border-radius:8px;background:var(--dsw-alias-interactive-bg-hover,#8881);color:var(--dsw-alias-label-secondary,inherit);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}",
-        ".hwb-hint{font-size:12px;line-height:18px;color:var(--dsw-alias-label-tertiary,#8a8f98);margin:4px 0 0}",
+        //
+        // ── 0.19.31（用户 2026-09-27 原话）：「就是提示词模板那里，他的框都超出来了」──
+        // 成因与 0.19.7 的输入框**同一个**：`.hwb-site-prompt-path` 是 `display:block;
+        // width:100%`，而这里缺 `box-sizing:border-box` ⇒ `width:100%` 按**内容盒**算，
+        // 再加左右 padding 各 8px 就比 `.hwb-site-prompt` 卡片的内容盒宽 16px。
+        // 卡片没有 `overflow:hidden`，于是那条路径框**探出卡片右缘**。
+        // 这条规则在仓库里已经写死过一次（见上面 `.hwb-model-select` 那段注释的
+        // 「输入框超出卡片框！」），这次是同一个盒子模型缺陷在路径读数上复发。
+        ".hwb-filepath{box-sizing:border-box;flex:1 1 auto;min-width:0;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;line-height:18px;padding:2px 8px;border-radius:8px;background:var(--dsw-alias-interactive-bg-hover,#8881);color:var(--dsw-alias-label-secondary,inherit);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}",
+        // 0.19.36：`.hwb-hint` 加换行保护（用户：「完全没有适配好边框！请你全局检测
+        // 哪里的报错会突破所在元素范围的一并修复」）。
+        //
+        // 它是**所有行内提示与报错的公共载体**（80+ 处调用），而此前没有任何换行规则：
+        // 一句长报错（如带完整路径的 JSON）会整行撑出卡片右缘。`overflow-wrap:anywhere`
+        // 而不是 `word-break:break-all`：前者优先在词边界断，只在**没有可断点**时才硬断
+        // （Windows 路径、JSON、URL 正是那种没有空格的长串），可读性更好。
+        ".hwb-hint{font-size:12px;line-height:18px;color:var(--dsw-alias-label-tertiary,#8a8f98);margin:4px 0 0;min-width:0;max-width:100%;overflow-wrap:anywhere}",
         ".hwb-hint.indent{margin:6px 0 8px}",
         ".hwb-hint.ok{color:var(--dsw-alias-state-success-primary,#2e7d32)}",
         ".hwb-hint.bad{color:var(--dsw-alias-state-error-primary,#93443e)}",
@@ -4518,12 +5202,16 @@ window.__ModuleLoader__.load({
         ".hwb-site-row{display:flex;align-items:center;gap:12px;padding:4px 0;flex-wrap:wrap}",
         ".hwb-site-row.busy{opacity:.55}",
         ".hwb-site-identity{flex:1;display:inline-flex;align-items:center;gap:8px;min-width:140px;font-size:13px}",
-        ".hwb-site-name{font-size:13px;line-height:20px;color:var(--dsw-alias-label-primary,inherit)}",
+        ".hwb-site-name{font-size:13px;line-height:20px;color:var(--dsw-alias-label-primary,inherit);max-width:100%;overflow-wrap:anywhere}",
         ".hwb-row-actions{display:inline-flex;align-items:center;gap:6px;margin-left:auto;flex-wrap:wrap}",
         ".hwb-row-actions button{height:28px;line-height:26px;padding:0 12px;font-size:12px;border-radius:14px}",
         ".hwb-dot{width:8px;height:8px;border-radius:50%;flex:none;display:inline-block;background:var(--dsw-alias-label-tertiary,#9aa0a6)}",
         ".hwb-dot.ok{background:var(--dsw-alias-state-success-primary,#2e7d32)}",
         ".hwb-dot.bad{background:var(--dsw-alias-state-error-primary,#93443e)}",
+        // 0.19.37：黄色档（部分账户可用）。用户原话「黄就是有可以有不可以」。
+        // token 取自官方白名单里的 --dsw-alias-state-warn-primary（见 test/client-render
+        // 的官方 token 家族断言），不凭直觉编名字。
+        ".hwb-dot.warn{background:var(--dsw-alias-state-warn-primary,#a16207)}",
         // 账户头像（0.14.8）：28×28 圆框 + 外圈状态环。
         // 尺寸取自 doc/research/agent-ui-design-references.md §4.4「账户头像 28×28 圆」
         // （与图标按钮同尺寸，视觉对齐）。圆角用 50% 而非固定 px——等比圆框。
@@ -4539,12 +5227,13 @@ window.__ModuleLoader__.load({
         // 因此必须是 inline-flex 居中，而不是靠 font-size/line-height 摆一个字符。
         // 两者对文字标记同样成立（SiteGlyph 的文字分支也是 svg），所以这一条
         // 同时覆盖有官方矢量与只有文字标记的站点，不需要第二条规则。
+        ".hwb-avatar-img{width:100%;height:100%;border-radius:50%;object-fit:cover;flex:none}",
         ".hwb-avatar-glyph{display:inline-flex;align-items:center;justify-content:center;font-size:12px;line-height:1;color:var(--dsw-alias-label-secondary,inherit);pointer-events:none}",
         // 花名册那组 `.hwb-roster*` 类名随设置页「正在运行（子代理 / Team）」卡
         //（0.19.x）一并删除——它们的唯一消费者是 AgentRoster，留着就是没人用的样式。
-        ".hwb-site-state{font-size:12px;line-height:18px;padding:1px 8px;border-radius:10px;border:.5px solid var(--dsw-alias-border-l3,#8885);color:var(--dsw-alias-label-secondary,inherit)}",
-        ".hwb-site-state.ok{color:var(--dsw-alias-state-success-primary,#2e7d32);border-color:var(--dsw-alias-state-success-primary,#2e7d32)}",
-        ".hwb-site-state.bad{color:var(--dsw-alias-state-error-primary,#93443e);border-color:var(--dsw-alias-state-error-primary,#93443e)}",
+        // 0.19.37：`.hwb-site-state` 三条已删。它画的「已登录 / 未登录 / 待检查」
+        // 徽章被用户要求改成标题行右上角的**三色圆点**（.hwb-dot.ok/.warn/.bad）。
+        // 留着规则而调用点已删 = 死 CSS，下一个人会以为还能从某处渲染出来。
         ".hwb-metrics{display:flex;flex-direction:column;gap:6px;width:100%}",
         ".hwb-metrics-head{font-size:12px;line-height:18px;color:var(--dsw-alias-label-tertiary,#8a8f98);margin-bottom:2px}",
         ".hwb-badge{display:inline-block;font-size:11px;line-height:16px;padding:0 8px;margin-right:6px;border-radius:8px;border:.5px solid var(--dsw-alias-border-l3,#8885);color:var(--dsw-alias-label-secondary,inherit)}",
@@ -4607,6 +5296,20 @@ window.__ModuleLoader__.load({
         // 底下，向下会盖住输入框——官方那两枚药丸同样朝上开。
         // 0.16.39：面板改成**官方 stat-dialog 的定位口径**（用户报的「现在是右边缘对齐」）。
         //
+        // ── 0.19.31（用户 2026-09-27 原话）：「等待时间展开的面板错误的透明修复，和官方一样」──
+        // 面板底色 `var(--dsw-specific-menu)` **本身是半透明的**（浅色 #f8f9fa94、深色
+        // #30313680，见官方主题 design-platform 段），官方同一块面板之所以看起来是实体，
+        // 靠的是**两条同进同出的配套声明**，而本插件上一版两条都漏了：
+        //   · `backdrop-filter:var(--dsw-menu-backdrop-filter)` —— blur(40px) saturate(150%)，
+        //     把背后的聊天文字糊掉。**漏掉它，半透明底就等于「直接透字」**，这正是用户
+        //     看到的「错误的透明」。
+        //   · `--dsw-elevation-stroke-color:var(--dsw-alias-border-l1)` —— 官方高层级表面
+        //     设 `border:0`，那道 0.5px 发丝边由 elevation 的描边档画出来。
+        // 取证（逐字比对，不是照截图量的）：官方
+        // `dsh-client-ui-chat/lib/client.js` 的 `css$4`（stat-dialog.module.css 的
+        // `.bRhRbq_panel`）与 `dsh-client-ui-conversation` 的 `.lXshSW_root`、
+        // `._7yHdaG_panel:before` 三处写法一致；官方主题 README 亦记明这一约定。
+        //
         // 逐项对照官方 `@deepseek-ai/dsh-client-ui-chat/stat-dialog.module.css` 的 `.panel`：
         //   position:fixed  ← 旧值 absolute。坐标由官方 useAnchoredPosition 给（左对齐
         //                     药丸左缘 + 视口 12px 夹紧），因此不能再自己写 right/bottom。
@@ -4616,7 +5319,7 @@ window.__ModuleLoader__.load({
         // 字号走 token（`--dsh-content-font-size-secondary` / `--dsh-content-font-delta`）：
         // 官方这套弹层在字体缩放时会跟着变，写死 12px 的话放大字体后弹层会比药丸小一圈。
         // 面板在 portal 里（body 下），所以 fixed 不再被右栏面板的 transform 包含块劫持。
-        ".hwb-waitpanel{position:fixed;z-index:1100;box-sizing:border-box;width:max-content;min-width:min(300px,100vw - 24px);max-width:min(440px,100vw - 24px);padding:16px;border-radius:12px;border:0;background:var(--dsw-specific-menu,var(--dsw-alias-bg-layer-1,#fff));box-shadow:var(--dsw-elevation-prominent,0 8px 24px #0003);color:var(--dsw-alias-label-secondary,inherit);font-size:var(--dsh-content-font-size-secondary,12px);line-height:calc(18px + var(--dsh-content-font-delta-secondary,0px));cursor:default;text-align:left}",
+        ".hwb-waitpanel{position:fixed;z-index:1100;box-sizing:border-box;width:max-content;min-width:min(300px,100vw - 24px);max-width:min(440px,100vw - 24px);padding:16px;border-radius:12px;border:0;background:var(--dsw-specific-menu);backdrop-filter:var(--dsw-menu-backdrop-filter);--dsw-elevation-stroke-color:var(--dsw-alias-border-l1);box-shadow:var(--dsw-elevation-prominent);color:var(--dsw-alias-label-secondary);font-size:var(--dsh-content-font-size-secondary,12px);line-height:calc(18px + var(--dsh-content-font-delta-secondary,0px));cursor:default;text-align:left}",
         ".hwb-waitpanel-head{display:flex;justify-content:space-between;align-items:center;gap:16px;margin-bottom:8px;color:var(--dsw-alias-label-primary,inherit);font-weight:500}",
         ".hwb-waitpanel-title{display:inline-flex;align-items:center;gap:6px;min-width:0}",
         ".hwb-waitpanel-title svg{flex:none;width:14px;height:14px}",
@@ -4647,12 +5350,35 @@ window.__ModuleLoader__.load({
         // 圆角/边框/字号沿用 .hwb-card 的 token 档位，不引第二个视觉体系。
         ".hwb-site-prompt{display:flex;flex-direction:column;gap:6px;border:.5px solid var(--dsw-alias-border-l4,#8884);border-radius:12px;padding:8px 10px}",
         ".hwb-site-prompt-head{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}",
-        ".hwb-site-prompt-name{font-size:13px;line-height:20px;color:var(--dsw-alias-label-primary,inherit)}",
-        ".hwb-site-prompt-variant{font-size:12px;line-height:18px;color:var(--dsw-alias-label-tertiary,#8a8f98)}",
-        ".hwb-site-prompt-path{flex:none;display:block;width:100%}",
+        ".hwb-site-prompt-name{font-size:13px;line-height:20px;color:var(--dsw-alias-label-primary,inherit);max-width:100%;overflow-wrap:anywhere}",
+        ".hwb-site-prompt-variant{font-size:12px;line-height:18px;color:var(--dsw-alias-label-tertiary,#8a8f98);max-width:100%;overflow-wrap:anywhere}",
+        ".hwb-site-prompt-pathrow{display:flex;align-items:center;gap:8px;min-width:0}",
+        // 0.19.31：路径与「查看」同一行 —— 路径**可伸缩**（flex:1 1 auto + min-width:0
+        // 才能被压缩，`white-space:nowrap` + `text-overflow:ellipsis` 才会真的出省略号），
+        // 按钮固定不缩。旧写法 `flex:none;width:100%` 是「独占一行」时的口径，
+        // 放进 flex 行里会把按钮挤出去。
+        ".hwb-site-prompt-path{flex:1 1 auto;display:block;min-width:0;max-width:100%}",
+        // 「查看」按钮：跟账户行那套 28px 小按钮同一刻度（`.hwb-row-actions button`），
+        // 不参与收缩、不换行 —— 否则窄面板下它会被压成两个字挤在一起。
+        ".hwb-filepath-open{flex:none;white-space:nowrap;height:28px;line-height:26px;padding:0 12px;font:inherit;font-size:12px;color:var(--dsw-alias-label-primary,inherit);background:var(--dsw-alias-bg-layer-1,transparent);border:.5px solid var(--dsw-alias-border-l3,#8885);border-radius:14px;cursor:pointer;transition:background .12s ease}",
+        // 站点页那颗按钮在 `.hwb-row` 里，而 `.hwb-row button` / `.hwb-settings button`
+        // 是 32px 高。两者的特指度相同（都 0,1,1），因此靠**同选择器形状 + 更靠后**
+        // 覆盖：`button.hwb-filepath-open` 与它们同权，位置在后即胜。
+        // 不这样写就会变成「全局页 28px、站点页 32px」两颗不一样高的同款按钮。
+        "button.hwb-filepath-open{height:28px;line-height:26px;padding:0 12px;font-size:12px;border-radius:14px}",
+        ".hwb-filepath-open:hover{background:var(--dsw-alias-interactive-bg-hover,#8882)}",
+        ".hwb-filepath-open:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#3b82f6);outline-offset:1px}",
         ".hwb-site-prompt details{margin-top:0}",
         ".hwb-site-prompt summary{cursor:pointer;font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary,inherit)}",
         ".hwb-site-prompt pre{max-height:240px;margin-top:6px}",
+        // 0.19.31（用户 2026-09-27）：「…让增量也通过上面一样的框展示，然后两框注意间隔」。
+        // 「框」本身复用 `.hwb-import pre`（两块正文都是 <pre>，不另立一套样式）；这里只
+        // 负责**间隔**：`gap:8px` 与 `.hwb-import` / `.hwb-site-prompt` 同一档。
+        // 标题行在框内（`.hwb-prompt-frame`）清零自己的 `margin-top`，否则
+        // `.hwb-hint` 的 `margin:4px 0 0` 会与 gap 叠加，两框之间的间距就不是这一个数了。
+        ".hwb-site-prompt-frames{display:flex;flex-direction:column;gap:8px}",
+        ".hwb-prompt-frame{display:flex;flex-direction:column;gap:4px;min-width:0}",
+        ".hwb-prompt-frame>.hwb-hint{margin:0}",
         ".hwb-conversation{position:relative;display:flex;flex-direction:column;width:100%;height:100%;min-height:0}",
         // 0.16.34：原先这里还有一条注释，解释站点栏为什么 flex:none + z-index
         //（用户报过「有一点遮挡」，根因是旧实现里网页区在层叠上压过了标签条）。
@@ -4670,6 +5396,9 @@ window.__ModuleLoader__.load({
         // 旧值 36px + padding 0 8px 与官方差 2px 高、左右各多 2px，与右栏标签条
         // 相邻时能看出不齐。
         ".hwb-toolbar{flex:none;position:relative;z-index:3;display:flex;align-items:center;gap:4px;height:38px;padding:5px 6px;background:var(--dsw-alias-bg-base,transparent)}",
+        ".hwb-tab-title{display:inline-flex;align-items:center;gap:5px;min-width:0}",
+        ".hwb-tab-title-glyph{display:inline-flex;align-items:center;justify-content:center;flex:none}",
+        ".hwb-tab-title-text{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}",
         ".hwb-toolbar-id{display:flex;align-items:center;gap:6px;min-width:0;flex:1}",
         ".hwb-toolbar-name{font-size:13px;line-height:20px;color:var(--dsw-alias-label-primary,inherit);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}",
         ".hwb-toolbar-state{font-size:12px;line-height:18px;color:var(--dsw-alias-label-tertiary,#8a8f98);white-space:nowrap;flex:none}",
@@ -4756,7 +5485,7 @@ window.__ModuleLoader__.load({
         ".hwb-browser-frame{display:block;width:100%;height:100%;min-height:0;border:0;background:#fff}",
         ".hwb-frame-status{position:absolute;inset:0;display:grid;place-items:center;background:var(--dsw-alias-bg-base,#fff);color:var(--dsw-alias-label-tertiary,#7a8494);font-size:12px;pointer-events:none}",
         ".hwb-error,.hwb-guide{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;padding:24px;text-align:center;background:var(--dsw-alias-bg-base,#fff);color:var(--dsw-alias-label-secondary,#394150)}",
-        ".hwb-error p,.hwb-guide p{font-size:12px;line-height:1.7;margin:0;color:var(--dsw-alias-label-tertiary,#8a8f98)}",
+        ".hwb-error p,.hwb-guide p{font-size:12px;line-height:1.7;margin:0;color:var(--dsw-alias-label-tertiary,#8a8f98);max-width:100%;overflow-wrap:anywhere}",
         ".hwb-retry{height:30px;padding:0 14px;font:inherit;font-size:12px;color:var(--dsw-alias-label-primary,inherit);background:var(--dsw-alias-bg-layer-1,transparent);border:.5px solid var(--dsw-alias-border-l3,#8885);border-radius:15px;cursor:pointer}",
         ".hwb-retry:hover{background:var(--dsw-alias-interactive-bg-hover,#8882)}",
         ".hwb-corner-btn{width:28px;height:28px;display:grid;place-items:center;color:var(--dsw-alias-label-secondary,inherit);background:transparent;border:.5px solid var(--dsw-alias-border-l4,#8884);border-radius:7px;cursor:pointer;padding:0}",
@@ -4787,7 +5516,7 @@ window.__ModuleLoader__.load({
         ".hwb-panel-stat.ok{color:var(--dsw-alias-state-success-primary,#2e7d32);border-color:var(--dsw-alias-state-success-primary,#2e7d32)}",
         ".hwb-panel-stat.bad{color:var(--dsw-alias-state-error-primary,#93443e);border-color:var(--dsw-alias-state-error-primary,#93443e)}",
         ".hwb-panel-group{display:flex;flex-direction:column;gap:4px}",
-        ".hwb-panel-head{font-size:12px;line-height:18px;margin:0 0 4px;color:var(--dsw-alias-label-tertiary,#8a8f98)}",
+        ".hwb-panel-head{font-size:12px;line-height:18px;margin:0 0 4px;color:var(--dsw-alias-label-tertiary,#8a8f98);max-width:100%;overflow-wrap:anywhere}",
         ".hwb-panel-head.bad{color:var(--dsw-alias-state-error-primary,#93443e)}",
         // 行：状态点 + 标题 + 若干小标签 + 状态词。
         // 标题 flex:1 且允许省略号——任务标题可能很长，而右侧的状态/归属必须
@@ -4880,8 +5609,8 @@ window.__ModuleLoader__.load({
         ".hwb-kanban-card:hover{border-color:var(--dsw-alias-border-l2,#8885);box-shadow:var(--dsw-elevation-prominent,0 2px 8px rgba(0,0,0,.08))}",
         ".hwb-kcard-head{display:flex;align-items:center;justify-content:space-between;font-size:11px}",
         ".hwb-kcard-id{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:var(--dsw-alias-label-tertiary,#888)}",
-        ".hwb-kcard-title{font-size:13px;font-weight:500;line-height:1.4;color:var(--dsw-alias-label-primary,inherit)}",
-        ".hwb-kcard-desc{font-size:12px;color:var(--dsw-alias-label-tertiary,#666);line-height:1.4}",
+        ".hwb-kcard-title{font-size:13px;font-weight:500;line-height:1.4;color:var(--dsw-alias-label-primary,inherit);max-width:100%;overflow-wrap:anywhere;max-width:100%;overflow-wrap:anywhere}",
+        ".hwb-kcard-desc{font-size:12px;color:var(--dsw-alias-label-tertiary,#666);line-height:1.4;max-width:100%;overflow-wrap:anywhere}",
         ".hwb-kcard-footer{display:flex;align-items:center;flex-wrap:wrap;gap:4px;margin-top:4px}",
         ".hwb-tag{font-size:11px;padding:1px 6px;border-radius:8px;background:var(--dsw-alias-border-l4,#8883);color:var(--dsw-alias-label-secondary,inherit)}",
         ".hwb-comment-badge{font-size:11px;color:var(--dsw-alias-label-secondary,inherit)}",
@@ -4894,7 +5623,7 @@ window.__ModuleLoader__.load({
         ".hwb-notice.bad{color:var(--dsw-alias-state-error-primary,#93443e);border-color:var(--dsw-alias-state-error-primary,#93443e)}",
         // 字段级校验错误：逐项对照参考实现的 `.formError`
         // （12px / 零边距 / `--dsw-alias-state-error-primary`）。
-        ".hwb-form-error{margin:0;font-size:12px;line-height:18px;color:var(--dsw-alias-state-error-primary,#93443e)}",
+        ".hwb-form-error{margin:0;font-size:12px;line-height:18px;color:var(--dsw-alias-state-error-primary,#93443e);max-width:100%;overflow-wrap:anywhere}",
         // 表单输入走官方输入底与聚焦色（参考实现 `.input` / `.input:focus`）。
         ".hwb-modal-form .hwb-input,.hwb-modal-form .hwb-textarea,.hwb-modal-form .hwb-select{background:var(--dsw-specific-input-major,transparent);border:.5px solid var(--dsw-alias-border-l2,#8885)}",
         ".hwb-modal-form .hwb-input:focus,.hwb-modal-form .hwb-textarea:focus,.hwb-modal-form .hwb-select:focus{outline:none;border-color:var(--dsw-alias-state-business-primary,#3b82f6)}",
@@ -4930,13 +5659,13 @@ window.__ModuleLoader__.load({
         ".hwb-prop-name{color:var(--dsw-alias-label-tertiary,#888)}",
         ".hwb-session-key{font-family:monospace;font-size:11px;color:var(--dsw-alias-label-secondary,inherit);max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}",
         ".hwb-notion-section{display:flex;flex-direction:column;gap:10px}",
-        ".hwb-section-title{margin:0;font-size:14px;font-weight:600;color:var(--dsw-alias-label-primary,inherit)}",
+        ".hwb-section-title{margin:0;font-size:14px;font-weight:600;color:var(--dsw-alias-label-primary,inherit);max-width:100%;overflow-wrap:anywhere}",
         ".hwb-notion-desc-textarea{width:100%;box-sizing:border-box;font:inherit;font-size:13px;line-height:1.6;padding:10px;border-radius:6px;border:.5px solid var(--dsw-alias-border-l3,#8885);background:var(--dsw-alias-bg-base,#fff);color:inherit;resize:vertical}",
         ".hwb-comments-list{display:flex;flex-direction:column;gap:10px}",
         ".hwb-comment-card{padding:10px 12px;border-radius:6px;border:.5px solid var(--dsw-alias-border-l3,#8884);background:var(--dsw-alias-bg-layer-1,#fafafa);display:flex;flex-direction:column;gap:6px}",
         ".hwb-comment-card.resolved{opacity:.65;border-style:dashed}",
         ".hwb-comment-quote{margin:0;padding-left:8px;border-left:3px solid var(--dsw-alias-brand-primary,#3b82f6);font-size:12px;color:var(--dsw-alias-label-secondary,#555);font-style:italic}",
-        ".hwb-comment-text{font-size:13px;line-height:1.5;color:var(--dsw-alias-label-primary,inherit)}",
+        ".hwb-comment-text{font-size:13px;line-height:1.5;color:var(--dsw-alias-label-primary,inherit);max-width:100%;overflow-wrap:anywhere}",
         ".hwb-comment-footer{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:11px}",
         ".hwb-comment-time{color:var(--dsw-alias-label-tertiary,#888)}",
         ".hwb-comment-form{display:flex;flex-direction:column;gap:8px;margin-top:8px}",
@@ -4987,8 +5716,9 @@ window.__ModuleLoader__.load({
         //      是纯局部覆盖，不动官方任何样式。
         "[data-conversation-scroll]:has(.hwb-compare-view)>[data-composer-seat]{display:none}",
         ".hwb-compare-view{display:flex;flex-direction:column;gap:12px;width:100%;flex:1 1 auto;min-height:0;overflow:hidden;padding:12px 12px 0;box-sizing:border-box}",
-        ".hwb-compare-header{display:flex;flex-direction:column;gap:4px;flex:none}",
-        ".hwb-compare-title{margin:0;font-size:18px;font-weight:600}",
+        // ── 0.19.31：`.hwb-compare-header` / `.hwb-compare-title` 两条规则**已删除**。
+        // 规则随被描述的节点一起删（0.19.29 立下的规矩：用例与样式不留在已删对象上）。
+        // 视图内部不再有标题 —— 名字改由顶栏「并发」承载，中心上方不再占高度。
         // ── 0.19.29（用户第 3 点）：固定列宽 + 观察窗平移 ──────────────────────
         //
         // 旧写法是 grid 等分（`repeat(N,minmax(0,1fr))`）—— 那是「列数越多列越窄」，
@@ -5007,11 +5737,34 @@ window.__ModuleLoader__.load({
         // 尊重「减少动态效果」偏好：平移是纯装饰性的，不该强迫用户接受动画。
         "@media (prefers-reduced-motion:reduce){.hwb-compare-columns{transition:none}}",
         // 左右切换按钮（用户：「绝对定位在中间区左右边缘垂直居中（贴在中间区边界内侧）」）。
-        // 外观对齐官方那套圆形图标按钮：28px、50% 圆角、二级字色、hover 才现形。
+        // 外观对齐官方那套圆形图标按钮：28px、50% 圆角、二级字色。
         // `z-index` 与官方 DragHandle 同层（11），保证浮在列体之上可点。
-        ".hwb-compare-pan{position:absolute;top:50%;transform:translateY(-50%);z-index:11;width:28px;height:28px;padding:0;display:grid;place-items:center;font:inherit;font-size:16px;line-height:1;cursor:pointer;border:none;border-radius:50%;color:var(--dsw-alias-label-secondary,#666);background:var(--dsw-specific-input-major,#fff);box-shadow:var(--dsw-elevation-soft,0 1px 6px #00000014);opacity:0;transition:opacity .12s,background-color .1s}",
-        ".hwb-compare-viewport:hover .hwb-compare-pan,.hwb-compare-pan:focus-visible{opacity:1}",
-        ".hwb-compare-pan:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover-solid,#eceff3);color:var(--dsw-alias-label-primary)}",
+        //
+        // ── 0.19.31（用户 2026-09-27 原话，逐字）：
+        //   「展开的等待时间：1.面板透明？--这个用在并发中面板一直悬浮的左右按键上，
+        //     然后这个面板改为和 dsh 官方别的胶囊面板同步的不透明」
+        //
+        // 两处一起改，因为它们是同一个「按钮压在内容上却看不清」的问题：
+        //
+        //   ① **底色**：原先写 `var(--dsw-specific-input-major)`。它长得像输入框底色，
+        //      实际是主题里那支**每主题只有两个取值**的专用色（浅色 = neutral-bluish-00、
+        //      深色 = neutral-bluish-8xx），并不是官方胶囊面板的底色。官方别的浮动胶囊
+        //      （会话进度浮层 `.lXshSW_root`、折叠面板 `._7yHdaG_panel`）走的是
+        //      `background:var(--dsw-specific-menu)` + `backdrop-filter:var(--dsw-menu-backdrop-filter)`
+        //      —— 这两条同进同出（见 dsh-client-ui-theme README：画 specific-menu 的
+        //      高层级表面都会应用 menu backdrop-filter）。本按钮改为同一对，于是与
+        //      官方胶囊同色、同样的毛玻璃，而**不再**是那个「看起来发虚」的底色。
+        //
+        //   ② **透明度**：原先按钮常态 `opacity:0`，只有鼠标移进**整个视口**才现形；
+        //      触屏、键盘、以及鼠标停在按钮上却没进视口的路径都看不到它。用户要的是
+        //      「一直悬浮」—— 因此常态 `opacity:1`，不再靠 hover 才现身。
+        //      hover / 聚焦 / 按下仍各升一档底色，反馈不丢。
+        ".hwb-compare-pan{position:absolute;top:50%;transform:translateY(-50%);z-index:11;width:28px;height:28px;padding:0;display:grid;place-items:center;font:inherit;font-size:16px;line-height:1;cursor:pointer;border:none;border-radius:50%;color:var(--dsw-alias-label-secondary);background:var(--dsw-specific-menu);backdrop-filter:var(--dsw-menu-backdrop-filter);box-shadow:var(--dsw-elevation-soft);opacity:1;transition:background-color .1s}",
+        // hover / 聚焦时升一档：官方圆按钮用的是 interactive-bg-hover-solid。
+        // 不移除任何「现形」逻辑 —— 0.19.31 起按钮本来就一直可见。
+        ".hwb-compare-pan:hover:not(:disabled),.hwb-compare-pan:focus-visible:not(:disabled){background:var(--dsw-alias-interactive-bg-hover-solid);color:var(--dsw-alias-label-primary)}",
+        // 到头（没有更多列）时按钮消失而不是留一个点不动的圈：这不是「透明度」问题，
+        // 是「这个方向已经没有内容」—— 因此连 hover 都不该把它召回来。
         ".hwb-compare-pan:disabled{opacity:0;pointer-events:none}",
         ".hwb-compare-pan.left{left:6px}",
         ".hwb-compare-pan.right{right:6px}",
@@ -5045,6 +5798,11 @@ window.__ModuleLoader__.load({
         // 列头那一整行（`.hwb-compare-col-head`）已随用户第 1 点删除，
         // 其四个控件移进每列对话框工具栏（`.hwb-col-composer-tools` / `-trailing`）。
         ".hwb-col-idx{font-weight:600;font-size:12px}",
+        // 会话身份那行**不再是常驻的一条分界线**（用户第 1 点：「去除每列对话的对话框
+        // 分界」）。它仍存在（能力不丢：用户要能核这一列续在哪条会话上），但平时隐形，
+        // hover / 键盘进入本列才随那点光一起现形——与列的 hover 光同一条节律。
+        ".hwb-compare-session{flex:none;padding:0 12px 4px;font-size:11px;line-height:16px;color:var(--dsw-alias-label-caption,#888);opacity:0;transition:opacity .12s ease;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}",
+        ".hwb-compare-col:hover .hwb-compare-session,.hwb-compare-col:focus-within .hwb-compare-session{opacity:1}",
         // `min-height:0` 是 flex 子项能真正滚动的**必要条件**：没有它，flex 项的
         // 最小高度是内容高度，`overflow-y:auto` 永远不触发，长回复会把列撑破。
         // 旧版缺这一条，长会话下三列会被顶出可视区（与「被下面原生挤了」叠加）。
@@ -5053,20 +5811,51 @@ window.__ModuleLoader__.load({
         // 刻度全部取自官方 `.uV2eYG_*`（见渲染处的对照表）。刻意**不**用本插件
         // 自己的 `.hwb-input`（那是设置页表单的形态，圆角 8px、灰底），
         // 因为用户要的是「和对话里的官方一样」。
-        ".hwb-col-composer{display:flex;flex-direction:column;align-items:center;padding:0 6px 6px;flex:none}",
-        ".hwb-col-composer-card{box-sizing:border-box;width:100%;background:var(--dsw-specific-input-major,#fff);box-shadow:var(--dsw-elevation-soft,0 1px 6px #00000014);border-radius:22px;display:flex;flex-direction:column;padding-top:8px;position:relative}",
-        ".hwb-col-composer-input{box-sizing:border-box;display:block;width:100%;min-height:36px;max-height:var(--dsh-composer-text-max-height,336px);resize:none;border:none;background:transparent;font:inherit;font-size:var(--dsh-content-font-size,14px);line-height:24px;white-space:pre-wrap;word-break:break-word;overflow-wrap:anywhere;color:var(--dsw-alias-label-primary);caret-color:var(--dsw-alias-state-business-primary,#4f6ef7);outline:none;padding:4px 8px 0 14px;overflow-y:auto}",
-        ".hwb-col-composer-input::placeholder{color:var(--dsw-alias-label-caption,#888)}",
-        ".hwb-col-composer-row{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:12px;min-width:0;padding:2px 8px 6px}",
+        // 官方 `.uV2eYG_root`：`display:flex;flex-direction:column;align-items:center`，
+        // 左右内边距吃 `--dsh-composer-side-clearance`（官方 16px），底部 4px。
+        // 这一条 + 卡片的 `max-width` 共同把对话框**居中收窄**成官方那样。
+        ".hwb-col-composer{display:flex;flex-direction:column;align-items:center;padding:0 var(--dsh-composer-side-clearance,16px) 4px;flex:none}",
+        // 官方 `.uV2eYG_card` 逐字：`gap:12px`、`max-width:var(--dsh-composer-card-max-width)`、
+        // `padding-top:8px`、`border:0` + `--dsw-elevation-stroke-color:border-l2`、
+        // `border-radius:22px`、`background:specific-input-major`、`box-shadow:elevation-soft`。
+        //
+        // `max-width` 这一条是**关键**：没有它，卡片被拉满整列，每列看起来仍是一个
+        // 贴着列边的「框」—— 而官方是**居中收窄**的一张卡片。列宽的上下限与这条
+        // 共同决定「看起来像不像官方」：官方列宽 952 = 内容 920 + 卡片余量 32。
+        ".hwb-col-composer-card{box-sizing:border-box;position:relative;display:flex;flex-direction:column;gap:12px;width:100%;max-width:var(--dsh-composer-card-max-width,952px);padding-top:8px;border:0;border-radius:22px;background:var(--dsw-specific-input-major,#fff);box-shadow:var(--dsw-elevation-soft,0 1px 6px #00000014);font-size:var(--dsh-content-font-size,14px);line-height:24px}",
+        // 官方 `.uV2eYG_scroll` 是**唯一**滚动盒（`max-height` 与 `overflow-y` 都在它身上），
+        // `.uV2eYG_grow` 只是自增高锚点（`position:relative`）。此前把两者并成一层，
+        // 于是占位文字无法像官方那样与文本面同层绝对定位。
+        ".hwb-col-composer-scroll{max-height:var(--dsh-composer-text-max-height,336px);overflow-y:auto;margin-right:4px}",
+        ".hwb-col-composer-grow{position:relative}",
+        ".hwb-col-composer-input{box-sizing:border-box;display:block;width:100%;min-height:36px;resize:none;border:none;background:transparent;font:inherit;font-size:inherit;line-height:inherit;white-space:pre-wrap;word-break:break-word;overflow-wrap:anywhere;color:var(--dsw-alias-label-primary);caret-color:var(--dsw-alias-state-business-primary,#4f6ef7);outline:none;padding:4px 8px 0 14px}",
+        // 官方 `.uV2eYG_placeholder`：`inset:4px 8px auto 14px`（镜像 .input 的内边距）、
+        // 单行省略、`pointer-events:none`、`user-select:none`。
+        ".hwb-col-composer-placeholder{position:absolute;inset:4px 8px auto 14px;color:var(--dsw-alias-label-caption,#888);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;pointer-events:none;user-select:none}",
+        // 官方 `.uV2eYG_row`：`flex-wrap:wrap`、`justify-content:space-between`、`gap:12px`、
+        // `padding:2px 8px 6px`、`min-width:0`，并且是 **inline-size 容器**（官方靠它
+        // 让内部 chip 在卡片变窄时降级）。
+        ".hwb-col-composer-row{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:12px;min-width:0;padding:2px 8px 6px;container-type:inline-size}",
         // 官方 `.uV2eYG_row` 是三段：`.tools`（左）/ `.modes` / `.trailing`（右，
         // `margin-left:auto`）。本列按这个结构放：左 = 站点选择，右 = 状态与列操作。
         // `@container` 那条降级（官方窄到 560px 时 gap 12→8）也照抄。
-        ".hwb-col-composer-tools{display:flex;align-items:center;gap:12px;min-width:0}",
+        // 官方 `.uV2eYG_tools` / `.modes` / `.trailing` 三段，gap 都是 12。
+        // 官方 `.trailing` 是 `flex:none` + `margin-left:auto`（同一行时靠 space-between
+        // 已经把它推到右端，auto 是为了**换行后**仍贴右）。
+        ".hwb-col-composer-tools,.hwb-col-composer-modes{display:flex;align-items:center;gap:12px;min-width:0}",
         ".hwb-col-composer-trailing{display:flex;align-items:center;gap:6px;min-width:0;flex:none;margin-left:auto}",
-        // 站点选择器 = 官方 `.uV2eYG_select` 的刻度（高 28 / 字号 13 / 圆角 8 /
-        // 右侧 20px 内边距给官方那条 12px 的 SVG 下拉箭头）。
-        ".hwb-col-composer-select{max-width:150px;height:28px;color:var(--dsw-alias-label-secondary,#666);white-space:nowrap;cursor:pointer;appearance:none;background-color:transparent;background-image:url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12' fill='none'%3E%3Cpath d='M3 4.5L6 7.5L9 4.5' stroke='%2381858C' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E\");background-position:right 4px center;background-repeat:no-repeat;background-size:12px 12px;border:none;border-radius:8px;outline:none;padding:0 20px 0 8px;font:inherit;font-size:13px;font-weight:500;line-height:20px}",
-        ".hwb-col-composer-select:hover{background-color:var(--dsw-alias-interactive-bg-hover,#00000008)}",
+        // 官方 `.uV2eYG_add`：28px 圆形图标按钮，`specific-selector` 底、`label-primary` 字。
+        ".hwb-col-composer-add{display:grid;place-items:center;flex:none;width:28px;height:28px;border:none;border-radius:999px;background:var(--dsw-specific-selector,#00000008);color:var(--dsw-alias-label-primary);cursor:pointer}",
+        ".hwb-col-composer-add:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover-solid,#00000012)}",
+        ".hwb-col-composer-add:disabled{opacity:.5;cursor:default}",
+        // 站点/模型/模式选择器 = 官方 `.uV2eYG_select` 的刻度，逐字：
+        // `max-width:220px` / `height:28px` / `padding:0 20px 0 8px` / `border-radius:8px` /
+        // 12px 的 SVG 箭头 + `right 4px center` / 字号 13 / 行高 20 / 字重 500 /
+        // 字色 label-secondary / hover 升 `interactive-bg-hover`。
+        ".hwb-col-composer-select{max-width:220px;height:28px;padding:0 20px 0 8px;border:none;border-radius:8px;outline:none;background-color:transparent;background-image:url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12' fill='none'%3E%3Cpath d='M3 4.5L6 7.5L9 4.5' stroke='%2381858C' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E\");background-repeat:no-repeat;background-position:right 4px center;background-size:12px 12px;color:var(--dsw-alias-label-secondary,#666);font-size:13px;line-height:20px;font-weight:500;white-space:nowrap;cursor:pointer;appearance:none;font-family:inherit}",
+        ".hwb-col-composer-select:hover:not(:disabled){background-color:var(--dsw-alias-interactive-bg-hover,#00000008)}",
+        // 官方那条 `@container (max-width:560px)` 降级：窄卡片里三个 gap 一起 12→8。
+        "@container (max-width:560px){.hwb-col-composer-tools,.hwb-col-composer-modes,.hwb-col-composer-trailing{gap:8px}}",
         // 状态文字：退到 caption 档，不再抢视觉（用户第 1 点要求上方不再占位）。
         ".hwb-col-composer-hint{font-size:12px;line-height:20px;color:var(--dsw-alias-label-caption,#888);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}",
         ".hwb-col-composer-hint.error{color:var(--dsw-alias-state-error-primary,#e5484d)}",
@@ -5294,9 +6083,25 @@ window.__ModuleLoader__.load({
         });
       };
       /** 标签标题：站点名（无 params 时回落成类型名，而不是空标题）。 */
+      /**
+       * 站点标签页的 chip 内容：**dwb 标记 + 站点名**（0.19.39）。
+       *
+       * 用户要「右侧 tab 界面两个：标签页和主界面大图标」。这里有一点必须说清楚：
+       * 官方 `SidebarRightTabDefinition` **没有 `icon` 字段**（见 tab-registry.d.ts）
+       * ——类型定义里的图标只出现在 `guide[].icon`。所以标签页 chip 本身不能
+       * 「注册一个图标」，**能挂的是它的标题内容**：`sidebar.right.pane.tab.title`
+       * 是 keyed 槽，返回什么节点就画什么。因此这里把标记画进标题行，得到同样的
+       * 视觉效果，且**没有偏离官方契约**（不改 shell、不注入 DOM）。
+       *
+       * 标记与文字同色（`currentColor`），随选中态一起变——写死颜色会在选中时
+       * 露出一块不协调的灰。
+       */
       const SiteTabTitle = (props) => {
         const sid = siteTabParams(props).siteId;
-        return sid ? siteName(sid) : 'Web 站点';
+        const label = sid ? siteName(sid) : 'Web 站点';
+        return h('span', { className: 'hwb-tab-title' },
+          h('span', { className: 'hwb-tab-title-glyph', 'aria-hidden': 'true' }, h(DwbMark, { size: 13 })),
+          h('span', { className: 'hwb-tab-title-text' }, label));
       };
 
       // 「Web Bridge」＝站点目录（一级页面，不绑地址）。
@@ -5311,6 +6116,10 @@ window.__ModuleLoader__.load({
               order: 55,
               title: () => 'Web Bridge',
               description: () => '按站点打开网页，一个站点一个标签，可并列多个',
+              // 右栏 guide 的**主界面大图标**（用户要的第 2 处）。
+              // 契约：`SidebarRightGuideEntry.icon?: ComponentType<IconProps>`——
+              // 不给时官方画一个立方体占位符，那正是「默认图标」的来源。
+              icon: DwbMark,
             }],
           });
         } catch (e) { warn('sidebarRightTabs.register', e); }
@@ -5498,15 +6307,23 @@ window.__ModuleLoader__.load({
       // 0.19.0 删除（理由见上方注册处）。
       //
       // `label` 必须与真实能力一致：列数由 `MultiModelCompareView` 的数组状态驱动，
-      // 支持 2~4 列（`MIN_COLS`/`MAX_COLS`）。旧标签「三列模型对比」在用户加到
-      // 第四列时就是一句假陈述，故改为「并列多会话」。
+      // 支持 2~4 列（`MIN_COLS`/`MAX_COLS`）。
+      //
+      // 名字三易（每一版都记下来，免得后人以为是笔误）：
+      //   「三列模型对比」→「并列多会话」→「**并发**」。
+      // 前两次的理由分别是「加到第四列时『三列』是假陈述」「用户要的词就是它」；
+      // 这一版是用户 2026-09-27 的原话（逐字）：
+      //   「请你是把『对话』/『轨迹』并列的『并列多对话改为』-『并发』，去除界面内的
+      //     中心上方占用位置的『并列』两个字」
+      // ⇒ 官方顶栏那一行是「对话 / 轨迹 / …」，本插件这一项**与它们并列**；
+      //  用户要的词是「并发」，且视图内部那处标题已同时删除（见 `MultiModelCompareView`）。
       own(() => {
         try {
           return ctx.slots.inject('conversation.view', () => ctx.slots.register({
             name: 'conversation.view',
             id: 'webcode-compare-view',
             order: 15,
-            label: () => '并列多会话',
+            label: () => '并发',
           }, MultiModelCompareView));
         } catch (e) { warn('conversation.view compare', e); }
       });

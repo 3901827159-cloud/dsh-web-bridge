@@ -28,8 +28,15 @@ test('「0 = 关闭」的语义逐字保住：只收紧，绝不开启', () => {
   assert.equal(effectiveAttachInlineLimit('deepseek', undefined), 0);
 });
 
-test('未列出的站点逐字维持旧行为（能力边界：只改 deepseek）', () => {
-  for (const site of ['glm', 'kimi', 'chatgpt', 'qwen', 'doubao', 'grok', 'gemini', 'zai', '', undefined]) {
+test('kimi 的站点上限同样收紧（2026-09-25：38,807 字符轮被输入框静默截断）', () => {
+  const limit = effectiveAttachInlineLimit('kimi', 60_000);
+  assert.ok(limit < 20_000, `kimi 输入框实测上限 ~20K，阈值必须低于它（当前 ${limit}）`);
+  assert.ok(limit < 38_807, '事故轮 38,807 字符必须走附件');
+  assert.equal(limit, SITE_ATTACH_INLINE_LIMIT.kimi);
+});
+
+test('未列出的站点逐字维持旧行为（能力边界：只改 deepseek 与 kimi）', () => {
+  for (const site of ['glm', 'chatgpt', 'qwen', 'doubao', 'grok', 'gemini', 'zai', '', undefined]) {
     assert.equal(effectiveAttachInlineLimit(site, 60_000), 60_000, `${site} 不得被本次改动影响`);
   }
 });

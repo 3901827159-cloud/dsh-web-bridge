@@ -816,7 +816,28 @@ export function apply(ctx, config = {}) {
   // defaultModel 里的模型。解析点唯一，见 buildTurn 的 effectiveDefault 注释。
   // extraPromptBySite（0.16.38）：**该站点专属的 [本网站指令]**，与全局 extraPrompt
   // 同轮注入（全局在前）。默认空对象 = 行为与 0.16.37 逐字相同。
-  const defaultConfig = { extraPrompt: '', extraPromptBySite: {}, defaultModel: 'deepseek', defaultModelBySite: {}, previewRefreshRate: 5000, thinkMode: 'on', subAgentMode: 'own', subAgentSite: 'follow', sendGapMs: 0, sendGapBasis: 'send-to-send', accounts: [], sendGapMsBySlot: {} };
+  // promptTransportBySite（0.19.32）：**该站点专属的投递形态**。用户要求「提示词投递：
+  // 给每个模型站点都做到和『发送间隔（全局）』一样的逻辑：全局设置一个，但是针对每个
+  // 单独网站设置能够单独设置」。回落链与 sendGapMsBySlot 逐字同构：
+  // 站点档（本站点显式值）→ 全局档（promptTransport）→ 插件 config → 'attach'。
+  // 默认空对象 = 行为与 0.19.31 逐字相同（每个站点都跟随全局）。
+  const defaultConfig = { extraPrompt: '', extraPromptBySite: {}, defaultModel: 'deepseek', defaultModelBySite: {}, previewRefreshRate: 5000, thinkMode: 'on', subAgentMode: 'own', subAgentSite: 'follow', sendGapMs: 0, sendGapBasis: 'send-to-send', accounts: [], sendGapMsBySlot: {}, promptTransport: 'attach', promptTransportBySite: {} };
+  // 设置**修订号**（0.19.33）：单调递增的进程内计数器，每次 set() 自增。
+  //
+  // 为什么必须有它：设置面有多处读数（提示词模板 / 再教学 / 投递形态生效值）是从
+  // **服务端现算**出来的，而客户端的拉取时机此前是「挂载时一次」——用户在站点页改完
+  // 投递形态，那些读数既不知道要重拉、也没有任何依据判断「该不该重拉」，于是
+  // 「改了设置、提示词读数跟不上」就成了必然（真机复现：站点页保存后，'当前生效：'
+  // 那一行仍停在旧值，站点的只读模板与增量再教学也不动）。
+  //
+  // 修法不是让客户端猜（轮询间隔、mtime、内容比对都会造出第二套判据），而是让
+  // **写入侧**给出一个权威的「设置变了」信号：任何一次成功落盘都让这个号 +1，客户端
+  // 把它当依赖，号一变就重拉。
+  //
+  // 为什么放在 configManager 而不是 web-control：这里才是**唯一**的落盘点。
+  // web-control 的 POST settings 与 POST account-add 都走 set()，放在路由里就会漏掉
+  // account-add（它同样改变设置）。
+  let settingsRevision = 0;
   const configManager = {
     get() {
       // settingsService 已在初始化时校验 get/set 双全；此处仍防御式包裹
@@ -831,8 +852,18 @@ export function apply(ctx, config = {}) {
         return { ...defaultConfig, ...data };
       } catch { return { ...defaultConfig }; }
     },
+    /**
+     * 当前设置修订号（0.19.33）。
+     *
+     * 语义只有一条：**只要它变了，读设置读出来的东西就可能变了**，客户端据此重拉。
+     * 它是进程内的：进程重启后从 0 重新开始。这不构成缺陷——客户端的依赖比较是
+     * 「不相等即重拉」，号从 5 变回 1 同样会触发，而页面重新加载时本来就会重读一次
+     * GET settings 拿到当时的号。
+     */
+    getRevision() { return settingsRevision; },
     set(newConfig) {
       const merged = { ...defaultConfig, ...newConfig };
+      settingsRevision += 1;
       // settingsService 初始化时已确认可写；运行期异常仍回落文件，绝不让保存 502
       if (settingsService) {
         try { settingsService.set('webcode', merged); return merged; } catch (err) { warn('host settings set failed:', err?.message); }
@@ -1420,7 +1451,9 @@ export function apply(ctx, config = {}) {
           const delivered = continueCounter.bump(sessionKey);
           const cont = parseAgentReply(text, { tools, jsonQuoteRepair: cfg.jsonQuoteRepair === true });
           // 续跑轮的原始回复同样全量落盘（0.16.17 同一纪律：没有原文就无法离线归因）。
+          // 0.19.30：siteId 进 meta —— 落盘按站点分文件（见 lib/reply-log.js）。
           appendReplyLog(text, {
+            siteId,
             sessionId: options?.sessionId ?? null,
             chars: text.length,
             calls: cont.calls.length,
@@ -1709,7 +1742,9 @@ export function apply(ctx, config = {}) {
       // 日志」走 console.warn，只到 DSH 进程 stderr、运行时不持久化——run-8 扣留
       // 1474 字符后磁盘上只剩提示里的 200 字符头，归因第三次断链（用户明确要求
       // 保留原接收内容日志）。写失败静默（模块内吞掉），绝不影响回合交付。
+      // 0.19.30：siteId 进 meta —— 落盘按站点分文件（见 lib/reply-log.js）。
       const replyLogPath = appendReplyLog(finalText, {
+        siteId: turn?.meta?.siteId ?? null,
         sessionId: options?.sessionId ?? null,
         chars: finalText.length,
         calls: calls.length,
@@ -1721,6 +1756,7 @@ export function apply(ctx, config = {}) {
       // 归因第四次断链。思考全文是与正文同级的取证数据，必须一并留存。
       if (thinkAcc) {
         appendReplyLog(thinkAcc, {
+          siteId: turn?.meta?.siteId ?? null,
           sessionId: options?.sessionId ?? null,
           chars: thinkAcc.length,
           calls: 0,
@@ -2472,6 +2508,13 @@ function imageMarkdown(images) {
     // 传快照就等于「设置页选了纯文本、实际仍走附件」。函数每次投递前现读，
     // 未设置时回落插件 config（cfg.promptTransport，默认 'attach'）。
     getPromptTransport: () => configManager.get().promptTransport ?? cfg.promptTransport,
+    // 站点级覆盖（0.19.32）：与上面那条并列的第二档。驱动按**自己的站点**问这一档，
+    // 命中就用它、没命中（或值非法）自动落回全局档（见 browser-driver 的
+    // promptTransportNow）。这里只负责「读出来」，归一化在 web-control 的写入侧。
+    getPromptTransportForSite: (siteId) => {
+      const bySite = configManager.get().promptTransportBySite;
+      return bySite && typeof bySite === 'object' ? bySite[siteId] : undefined;
+    },
     logger: console,
   });
 
@@ -2531,6 +2574,12 @@ function imageMarkdown(images) {
         // 否则「账户2 选了纯文本」与「默认槽选了纯文本」会走出两种行为——
         // 两个槽走的是同一份代码。
         getPromptTransport: () => configManager.get().promptTransport ?? cfg.promptTransport,
+        // 同默认 driver：第二个账户槽也必须拿到站点级这一档，否则「账户2 的站点」与
+        // 「默认槽的站点」会走出两种投递形态——两个槽走的是同一份代码。
+        getPromptTransportForSite: (siteId) => {
+          const bySite = configManager.get().promptTransportBySite;
+          return bySite && typeof bySite === 'object' ? bySite[siteId] : undefined;
+        },
         logger: console,
       });
       try { d.setImageLimitsProvider?.(imageLimitsProvider); } catch { /* 同上 */ }
@@ -3261,7 +3310,10 @@ function imageMarkdown(images) {
           // 槽身份三个字段（slot / accountKey / profileDir）在**两条分支里都要有**：
           // 前端把 sites 当同一个列表渲染，缺字段的行会让「未初始化」的槽无法显示成
           // 「glm (账户2)」而退化成裸 siteId，两行看起来一模一样。
-         return { siteId: st.id, siteName: st.name, origin: st.origin, slot: acc.slot, accountKey: acc.key, displayName: accountLabel(st.name, acc.slot), profileDir: slotDir, initialized: false, running: false, busy: false, loggedIn: has ? cached.loggedIn : null, loggedInCached: has && cached.loggedIn === true, loginBasis: trusted ? cached.basis : (cached ? 'stale' : null), loginCheckedAt: cached ? cached.at : null, needLogin: has && cached.loggedIn === false, selectedModel: null, window: null, loginState: 'idle', lastLogin: null, sessionLostCount: 0, lastSessionLost: null };
+         return { siteId: st.id, siteName: st.name, origin: st.origin, slot: acc.slot, accountKey: acc.key, displayName: accountLabel(st.name, acc.slot), profileDir: slotDir, initialized: false, running: false, busy: false, loggedIn: has ? cached.loggedIn : null, loggedInCached: has && cached.loggedIn === true, loginBasis: trusted ? cached.basis : (cached ? 'stale' : null), loginCheckedAt: cached ? cached.at : null, needLogin: has && cached.loggedIn === false, selectedModel: null, window: null, loginState: 'idle', lastLogin: null, sessionLostCount: 0, lastSessionLost: null,
+            // 真实昵称/头像（0.19.37）：**未初始化的槽一定读不到**，如实给 null，
+            // 由前端回落站点矢量标记——不拿槽名冒充昵称。
+            accountName: null, avatarUrl: null };
         }
         // status() 可能是 null——「取不到现场」在契约里是合法返回值（懒驱动还没建起来、
         // 测试替身、或本进程尚未观测到任何东西）。旧写法紧接着就读 `s.profileDir`，
@@ -3277,7 +3329,16 @@ function imageMarkdown(images) {
         // 靠 loggedIn 猜，或者干脆写死一个假状态（那是用户明确不要的）。
         // 未初始化的槽给 0/null（不是 omit）：前端按键索引，缺字段会让该行
         // 退化成「undefined 次」，看起来像读数坏了。
-        return { siteId: st.id, siteName: st.name, origin: st.origin, slot: acc.slot, accountKey: acc.key, displayName: accountLabel(st.name, acc.slot), profileDir: s.profileDir ?? null, initialized: true, running: s.running === true, busy: s.busy === true, loggedIn: s.loggedIn ?? null, loggedInCached: s.loggedInCached === true, loginBasis: s.loginBasis ?? null, loginCheckedAt: s.loginCheckedAt ?? null, needLogin: s.needLogin === true, selectedModel: s.selectedModel ?? null, window: s.window ?? null, loginState: s.loginState ?? 'idle', lastLogin: s.lastLogin ?? null, sessionLostCount: s.sessionLostCount ?? 0, lastSessionLost: s.lastSessionLost ?? null };
+        return { siteId: st.id, siteName: st.name, origin: st.origin, slot: acc.slot, accountKey: acc.key, displayName: accountLabel(st.name, acc.slot), profileDir: s.profileDir ?? null, initialized: true, running: s.running === true, busy: s.busy === true, loggedIn: s.loggedIn ?? null, loggedInCached: s.loggedInCached === true, loginBasis: s.loginBasis ?? null, loginCheckedAt: s.loginCheckedAt ?? null, needLogin: s.needLogin === true, selectedModel: s.selectedModel ?? null, window: s.window ?? null, loginState: s.loginState ?? 'idle', lastLogin: s.lastLogin ?? null, sessionLostCount: s.sessionLostCount ?? 0, lastSessionLost: s.lastSessionLost ?? null,
+          // 真实昵称/头像（0.19.37）：**必须在这里转发**。
+          //
+          // 缺陷形状（与上面那两处注释警告过的是同一个）：`browser-driver.status()`
+          // 早就透出了 accountName/avatarUrl（0.19.4），`web-control` 的 login-sites
+          // 也带了它们，但本函数两个分支都没转发 ⇒ 前端读 /status 拿到的永远是
+          // undefined ⇒ 「拉取账户名称和图像」在界面上**结构性不可能生效**。
+          // 这正是「后端算好了、中间层丢掉、前端显示默认值」那条老路。
+          // 护栏 test/account-identity-wiring.test.mjs 按四跳逐跳钉住。
+          accountName: s.accountName ?? null, avatarUrl: s.avatarUrl ?? null };
       }
     },
     loginTrigger: (accountKey) => driverFor(accountKey || 'deepseek').openLogin(),
@@ -3396,6 +3457,11 @@ function imageMarkdown(images) {
     // bridge last sent (or the static skeleton before any turn)
     presetInfo: () => lastPresetInfo,
     settingsStore: configManager,
+    // 设置修订号（0.19.33）：控制面把它随 settings / attach-status / prompt-variants
+    // 一起回给客户端，让「设置变了 ⇒ 读数要重拉」有一个**服务端权威**的判据，
+    // 而不是让浏览器侧按轮询间隔或内容比对去猜。取值函数来自 configManager 这个
+    // 唯一落盘点，因此 POST settings 与 account-add 两条写路径都会让它前进。
+    settingsRevision: () => configManager.getRevision(),
     // B-3：把「声明窗口」的取值函数交给控制面，让 /__webcode/context-windows
     // 列出的值与 resolveModel 声明的、预算闸比的是**同一个数**。
     contextWindowOf: (m) => contextWindowFor(m),

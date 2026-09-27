@@ -210,12 +210,40 @@ test('context-windows 分开投影 displayContext 与 sendBudget（B-3 → Task 
   }
 });
 
+// 0.19.39：更新栏的三跳必须齐全（用户：「设计好本插件的更新和只做提醒重启操作，
+// 替换现在空白的单独 github 按钮」）。
+//
+// 与账户身份那条同型：单看每一跳都「有代码」，断一跳就整块失效。
+//   ① lib/update.js  —— 判据纯函数（由 update.test.mjs 覆盖）
+//   ② web-control    —— GET update-status（只读）与 POST update（真装）
+//   ③ client.cjs     —— 顶部渲染版本 + 按钮 + 重启提醒
+// 本文件钉第 ②，第 ③ 由 client-render 钉。
+//
+// 「只提醒重启」这条纪律也在判据里：安装动作**不得**自己重启进程
+//（重启会终止在跑的会话），因此 runInstall 只回 needsRestart。
+test('★ 0.19.39 更新：控制面必须同时有只读的 update-status 与真装的 update', async () => {
+  const src = fs.readFileSync(new URL('../lib/web-control.js', import.meta.url), 'utf8');
+  assert.match(src, /'GET update-status'/, '必须有 GET update-status（设置页挂载时读版本，只读）');
+  assert.match(src, /'POST update'/, '必须有 POST update（唯一有副作用的那个）');
+  // 版本号形状必须被校验：spec 会被拼进命令行，放开等于开一个任意参数入口。
+  assert.match(src, /版本号形状不合法/, 'POST update 必须校验版本号形状（它会进命令行）');
+  // profile 必须由服务端从 profileDir 推出来——浏览器侧不知道自己在哪个 profile 里跑。
+  assert.match(src, /path\.basename\(String\(config\.profileDir/, 'profile 名必须由服务端从 profileDir 推出');
+  // 装完必须清缓存：current 变了，旧的检查结果不再成立。
+  assert.match(src, /updateCache = null/, '装完必须清掉检查缓存');
+  // 「只提醒重启」的落点在 lib/update.js：装完只回 needsRestart，不代重启。
+  const upd = fs.readFileSync(new URL('../lib/update.js', import.meta.url), 'utf8');
+  assert.match(upd, /needsRestart: true/, 'runInstall 必须回 needsRestart（不代重启）');
+  assert.ok(!/process\.exit|restart\(\)|spawn\('dsh',\s*\['web'/.test(upd),
+    '更新模块不得自己重启进程（重启会终止在跑的会话）');
+});
+
 // 0.16.24：在途等待必须经**真实 HTTP 载荷**透出（药丸按它决定显示什么、多久问一次）。
 //
 // 这层是 index.js 与 client.cjs 之间的唯一接口，而它此前只被「响应体非空」那条
 // 泛化护栏扫过——字段名写错（liveValue / live / now）在泛化护栏下完全无声：药丸
 // 只会安静地回落到账本，观感退化成「等完才跳一下」，而那正是本轮要修的东西。
-test('POST wait-stats：在途等待透出 live/now/liveValue，且药丸文案取正在涨的那个数', async () => {
+test('POST wait-stats：在途等待透出 live/now/projectedValue，且药丸文案取正在涨的那个数', async () => {
   const NOW = 1_789_000_003_000;
   const control = createWebControl({
     driver: { status: () => ({}) }, relay: { status: () => ({}) },
@@ -237,9 +265,14 @@ test('POST wait-stats：在途等待透出 live/now/liveValue，且药丸文案�
   // 0.16.26：药丸是「本会话等待发送总量」的投影 = 账本 12 秒 + 在途 3 秒 = 15 秒。
   // 0.17.0：格式调整为「15 秒 · 等待占比 25%」（总耗时 15s wait + 45s duration = 60s）。
   assert.equal(body.label, '15 秒 · 等待占比 25%');
-  // 面板那一行**仍然只给在途那一段**：它是「正在等待发送」这个标签下的增量，
-  // 与药丸的会话总量是两个不同的问题，各自如实回答。
-  assert.equal(body.liveValue, '3 秒', '面板的「正在等待发送」行取同一套边界');
+  // 0.19.34：面板标题右侧那个数改成**与药丸同源的投影**（账本 12 秒 + 在途 3 秒
+  // = 15 秒），而不是只在途那一段。旧形态里标题右侧钉着不动的 sessionValue，
+  // 在途那一段另起一行「正在等待发送 3 秒」——用户要求把那一行移除、由标题实时更新。
+  assert.equal(body.projectedValue, '15 秒', '面板标题右侧必须是在途期间逐秒前进的投影');
+  // 账本口径的 sessionValue 仍在载荷里（公开只读面），但不再上标题。
+  assert.equal(body.sessionValue, '12 秒', 'sessionValue 仍是账本口径，供 curl 与旧前端核对');
+  // 旧字段必须彻底消失：留着它，某个旧渲染路径就可能把它又画回面板上。
+  assert.equal(body.liveValue, undefined, 'liveValue 已由 projectedValue 取代，不得复活');
   // 客户端据此判断要不要把轮询提到 1 秒；缺了它就只能 10 秒一问。
   assert.ok(body.live && typeof body.live === 'object', '在途时必须给 live 供客户端判断');
   assert.equal(body.live.startedAt, NOW - 3000);
@@ -247,7 +280,7 @@ test('POST wait-stats：在途等待透出 live/now/liveValue，且药丸文案�
   assert.equal(body.now, NOW);
 });
 
-test('POST wait-stats：无在途时 live/liveValue 为 null（回落账本，不留幽灵读数）', async () => {
+test('POST wait-stats：无在途时 live 为 null、标题回落到账本（不留幽灵读数）', async () => {
   const control = createWebControl({
     driver: { status: () => ({}) }, relay: { status: () => ({}) },
     config: {}, host: {}, logger,
@@ -263,7 +296,8 @@ test('POST wait-stats：无在途时 live/liveValue 为 null（回落账本，�
   const r = await call(control, 'POST', '/__webcode/wait-stats', { sessionId: 'sess-1' });
   const body = JSON.parse(r.text);
   assert.equal(body.live, null, '等待结束后必须清掉 live，否则药丸会停在冻结值上');
-  assert.equal(body.liveValue, null);
+  // 0.19.34：live 消失后标题右侧回落到账本本身（12 秒），读数连续、不跳变。
+  assert.equal(body.projectedValue, '12 秒');
   // 结算后回落到账本（12 秒）——不能出现「等待结束了药丸反而变空」。
   // 0.17.0：格式改为「12 秒 · 等待占比 20%」（12s / (12s + 48s) = 20%）。
   assert.equal(body.label, '12 秒 · 等待占比 20%');

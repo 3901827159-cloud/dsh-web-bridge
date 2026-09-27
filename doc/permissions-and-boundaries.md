@@ -83,7 +83,7 @@ $f = Get-ChildItem 'package\dsh-webcode-bridge\lib','package\dsh-webcode-bridge\
 | --- | --- | --- |
 | 写 | `~/.dsh/webcode-edge-profile/`（可用设置覆盖） | 浏览器持久 profile：登录态、缓存。**由桥自持**，不碰你日常在用的 Edge User Data |
 | 写 | `<工作区>/.webcode-tasks/ledger.json` | 任务板台账 |
-| 写 | `~/.dsh/logs/webcode-bridge-replies.log` | 每轮网页原始回复全文（用于协议漂移取证，见 `lib/reply-log.js`） |
+| 写 | `~/.dsh/logs/webcode-bridge-replies[.<site>].log` | 每轮网页原始回复全文（用于协议漂移取证，见 `lib/reply-log.js`；0.19.30 起带站点标识的轮次按站点分文件，未标识站点落默认名） |
 | 读写 | DSH profile 的插件目录与设置 | 由官方 `dsh plugin` 与官方设置服务承载，桥不自己写 profile 依赖 |
 | 读 | 当前工作目录（经 DSH 工具调用） | 工具调用由 **DSH 原生权限系统**执行，不是桥直接读盘 |
 

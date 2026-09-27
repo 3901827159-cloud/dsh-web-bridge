@@ -295,8 +295,8 @@ async function renderPane({ payloads, which = 'pane', sites = [], roster = null,
             { id: 'official', label: 'DeepSeek 官方模板（原生工具调用格式）', note: 'n3', text: 'OFFICIAL-PROMPT-TEXT', trainNote: 'tn3', siteIds: ['deepseek'], excludes: [] },
           ],
           sites: [
-            { siteId: 'deepseek', siteName: 'DeepSeek 网页版', variantId: 'official', variantLabel: 'DeepSeek 官方模板（原生工具调用格式）', text: 'OFFICIAL-PROMPT-TEXT' },
-            { siteId: 'glm', siteName: '智谱清言 (GLM)', variantId: 'glm', variantLabel: 'GLM 代码块（```json 代码块）', text: 'GLM-PROMPT-TEXT' },
+            { siteId: 'deepseek', siteName: 'DeepSeek 网页版', variantId: 'official', variantLabel: 'DeepSeek 官方模板（原生工具调用格式）', text: 'OFFICIAL-PROMPT-TEXT', file: '/tmp/webcode/prompts/deepseek.md' },
+            { siteId: 'glm', siteName: '智谱清言 (GLM)', variantId: 'glm', variantLabel: 'GLM 代码块（```json 代码块）', text: 'GLM-PROMPT-TEXT', file: '/tmp/webcode/prompts/glm.md' },
           ],
         };
       }
@@ -315,6 +315,9 @@ async function renderPane({ payloads, which = 'pane', sites = [], roster = null,
         line: '本次会话等待发送 3 秒',
         label: '3 秒 · 等待占比 30%',
         sessionValue: '3 秒',
+        // 0.19.34：无在途时投影就等于账本本身，服务端照此输出——夹具必须逐字忠实，
+        // 否则「标题那个数从哪来」在护栏里是假的。
+        projectedValue: '3 秒',
         detailRows: [
           { label: '本次会话等待发送', value: '3 秒' },
           { label: '本次会话占比', value: '30%' },
@@ -571,8 +574,12 @@ test('设置面板：首轮提示词默认就显示，且**按网站逐行**列�
   // （deepseek 走官方模板、glm 走代码块——若 UI 拿同一份文本填所有行，这里会红。）
   assert.ok(text.includes('DeepSeek 网页版'), '未按网站列出 deepseek 行');
   assert.ok(text.includes('智谱清言 (GLM)'), '未按网站列出 glm 行');
-  assert.ok(text.includes('OFFICIAL-PROMPT-TEXT'), 'deepseek 行未渲染它自己的模板');
-  assert.ok(text.includes('GLM-PROMPT-TEXT'), 'glm 行未渲染它自己的模板');
+  // 0.19.31（用户 2026-09-27）：「所有界面的查看提示词里面的『查看完整模板』改为不是
+  // 展开而是直接打开默认的程序打开文件」—— 模板正文不再渲染进界面，改由路径 +
+  // 「查看」按钮打开文件。因此这里不再断言两段模板全文，改钉**每行各自的路径**
+  //（若 UI 拿同一份路径填所有行，这条照样会红——它测的是「逐站点行」这件事本身）。
+  assert.ok(text.includes('deepseek.md'), 'deepseek 行未渲染它自己的提示词文件路径');
+  assert.ok(text.includes('glm.md'), 'glm 行未渲染它自己的提示词文件路径');
   // 「实际使用」标注必须在（用户要能分辨「预览」与「生效」）。
   assert.ok(/实际使用：/.test(text), '每行必须标出该网站实际在用的协议');
   // 协议名要能在行内读到（0.16.38 去掉了「预览下拉」——它从来只能预览，用户
@@ -663,9 +670,24 @@ test('★ 0.19.x 设置页文案：解释性长句与开发者自用读数不得
   assert.equal(count(text, '追加一段 [全局指令] 注入每个新网页会话的首条消息。'), 1,
     '全局指令说明重复出现');
   // 5.8 首轮提示词只读卡的信息面不因美化而丢。
-  for (const keep of ['DeepSeek 网页版', '实际使用：', 'OFFICIAL-PROMPT-TEXT', '本会话工具：', '查看完整模板']) {
+  // 0.19.31（用户 2026-09-27）：「查看完整模板」不再原地展开，改为打开默认程序，
+  // 按钮改名「查看」且放在路径右边 —— 因此模板正文**本来就不该**再出现在界面上
+  //（它只在文件里，那是唯一正本）；这里改钉「路径 + 查看按钮」这一对新信息面。
+  for (const keep of ['DeepSeek 网页版', '实际使用：', '本会话工具：', '查看']) {
     assert.ok(text.includes(keep), '首轮提示词卡丢了信息：' + keep);
   }
+  assert.ok(!/查看完整模板/.test(text),
+    '「查看完整模板」必须消失 —— 用户要求改为直接打开文件、按钮改名「查看」');
+  // 判据只看 PromptPanel（全局页那张卡）的函数体：站点页那张卡仍保留
+  // 「查看该站点此刻的只读模板」的 <details>（用户只要求全局页那处改为打开文件），
+  // 因此按整文件断言会误伤它 —— 这是本仓库反复记过的「判据范围过宽」
+  const pAt = src.indexOf('function PromptPanel(');
+  assert.ok(pAt > 0, '找不到 PromptPanel（改名则本护栏失效，需同步）');
+  const pBody = src.slice(pAt, src.indexOf('\n    function ', pAt + 10));
+  assert.ok(!/hwb-site-prompt-details/.test(pBody),
+    '全局页的提示词行不得再有原地展开的 <details>（用户要求改为打开默认程序）');
+  assert.ok(!/row\.text/.test(pBody),
+    '全局页不得再渲染模板正文 —— 它只在文件里（那是唯一正本）');
 });
 
 /**
@@ -710,6 +732,85 @@ test('★ 0.19.7 设置页控件不得探出卡片：控件规则必须带 box-s
   assert.match(src, /\.hwb-repo-link\{/, '缺少项目链接的样式规则');
 });
 
+/**
+ * 提示词模板那条路径读数不得探出卡片（0.19.31）。
+ *
+ * 用户原话（2026-09-27）：「…的一行显示路径的，就是提示词模板那里，他的框都超出来了」。
+ *
+ * 根因与上面 0.19.7 那条**逐字相同**，只是这次落在另一条规则上：
+ * `.hwb-site-prompt-path` 是 `display:block;width:100%`，而 `.hwb-filepath`
+ * 当时没有 `box-sizing:border-box` ⇒ `width:100%` 按**内容盒**算，再加左右各 8px
+ * padding 就比 `.hwb-site-prompt` 卡片的内容盒宽 16px；卡片没有 `overflow:hidden`，
+ * 于是路径框从卡片右缘探出。
+ *
+ * 为什么单独一条、不并进上面那条：上面按选择器枚举**控件族**（model-select /
+ * prompt-input / input / select / textarea），而路径读数是**只读读数**、刻意不进输入框
+ * 样式族；塞进那个列表会让两条判据的语义互相污染。反向验证很直接：删掉
+ * `box-sizing:border-box`，本条立刻变红。
+ */
+test('★ 0.19.31 提示词路径读数不得探出卡片（同一个盒子模型缺陷不得复发）', () => {
+  const src = bridgeSrcFrom('client.cjs');
+
+  // ① 基础读数规则必须定死盒子模型。
+  const base = src.match(/"(\.hwb-filepath)\{([^}]*)\}"/);
+  assert.ok(base, '找不到 .hwb-filepath 规则（改类名则本护栏失效，需同步）');
+  assert.match(base[2], /box-sizing:border-box/,
+    '.hwb-filepath 缺 box-sizing:border-box —— padding 会让它比容器宽 16px 并探出卡片');
+
+  // ② 撑满一行的那条必须同时封顶，不得只靠 `width:100%` 单撑。
+  const path = src.match(/"(\.hwb-site-prompt-path)\{([^}]*)\}"/);
+  assert.ok(path, '找不到 .hwb-site-prompt-path 规则');
+  assert.match(path[2], /width:100%/, '路径读数应当撑满所在卡片一行');
+  assert.match(path[2], /max-width:100%/,
+    '.hwb-site-prompt-path 必须有 max-width:100% 兜底 —— 只写 width:100% 时一旦盒子模型被改回内容盒就会探出卡片');
+});
+
+/**
+ * 站点提示词卡：模板正文与增量再教学必须是**同一种框**，且两框有间隔（0.19.31）。
+ *
+ * 用户原话（2026-09-27）：「各个站点的：『查看该站点此刻的只读模板 / 实际使用：DeepSeek
+ * 官方模板（原生工具调用格式）』区域，让增量也通过上面一样的框展示，然后两框注意间隔」。
+ *
+ * 判据分两半，因为这两个事实在不同层：
+ *   · 「都用一样的框」是**结构**事实——两块正文都得是 `<pre>`，样式才会同时落在
+ *     `.hwb-import pre` 那条规则上（同一条规则 = 逐项相同，不靠两处手抄）；
+ *   · 「两框有间隔」是**CSS** 事实——`.hwb-site-prompt-frames` 的 `gap`，渲染树里读不到。
+ * 上一版增量只是一行 `.hwb-hint`（没有框），所以这一条的反向验证很直接：
+ * 把第二块改回 `<p className="hwb-hint">` 或删掉 gap，本用例立刻变红。
+ */
+test('★ 0.19.31 站点提示词卡：模板与增量轮再教学同框展示，且两框有间隔', async () => {
+  const { errors, tree } = await renderPane({
+    payloads: [emptyWindows], which: 'settings', settingsTab: 'deepseek',
+    sites: [{ siteId: 'deepseek', siteName: 'DeepSeek 网页版', accountKey: 'deepseek', displayName: 'DeepSeek 网页版', initialized: true, loggedIn: true }],
+  });
+  assert.deepEqual(errors, [], '站点页渲染抛错：' + errors.map(e => e.message).join('; '));
+  const text = treeText(tree);
+  // 两段正文都真的渲染到了（夹具：deepseek 走 official，trainNote = 'tn3'）。
+  assert.ok(text.includes('实际使用：DeepSeek 官方模板（原生工具调用格式）'),
+    '模板框缺「实际使用」读数：' + text.slice(0, 400));
+  assert.ok(text.includes('OFFICIAL-PROMPT-TEXT'), '模板框缺模板正文');
+  assert.ok(text.includes('增量轮再教学'), '增量框不见了（用户要求它也用框展示）');
+  assert.ok(text.includes('tn3'), '增量框缺该站点自己那一支的再教学正文');
+
+  // 结构：两块正文都必须是 <pre> —— 否则「一样的框」就不成立。
+  const src = bridgeSrcFrom('client.cjs');
+  const at = src.indexOf('function SitePromptCard(');
+  assert.ok(at > 0, '找不到 SitePromptCard（改名则本护栏失效，需同步）');
+  const body = src.slice(at, src.indexOf('\n    function ', at + 10));
+  const pres = [...body.matchAll(/h\('pre'/g)];
+  assert.equal(pres.length, 2,
+    '只读模板与增量再教学必须各有一个 <pre> 框（当前 ' + pres.length + ' 个）');
+  assert.match(body, /hwb-site-prompt-frames/,
+    '两框必须装在同一个容器里 —— 间隔由容器的 gap 给，不靠相邻元素 margin 的巧合');
+
+  // CSS：容器真的声明了 gap，且框内标题行不得再加自己的 margin-top（会与 gap 叠加）。
+  const frames = src.match(/"(\.hwb-site-prompt-frames)\{([^}]*)\}/);
+  assert.ok(frames, '找不到 .hwb-site-prompt-frames 规则');
+  assert.match(frames[2], /gap:8px/, '.hwb-site-prompt-frames 必须显式给 8px 间隔');
+  assert.match(src, /"\.hwb-prompt-frame>\.hwb-hint\{margin:0\}"/,
+    '框内标题行必须清零 margin-top —— 否则它与容器 gap 叠加，两框间距就不是 8px 了');
+});
+
 test('★ 0.16.35 站点目录：从上往下列出全部站点，且不显示登录态', async () => {
   // 用户原话：「文件夹，新建终端，浏览器，这几个是怎么排列？从上往下！我希望是点击
   // web bridg 后能够实现，一样的 deepseek，智谱，等这样排列」「登录态不要看」。
@@ -741,11 +842,16 @@ test('★ 0.16.35 站点目录：从上往下列出全部站点，且不显示�
   for (const s of ['已登录', '未登录', '待检查']) {
     assert.ok(!text.includes(s), '站点目录里不该出现登录态「' + s + '」——用户要求「登录态不要看」');
   }
-  // 但图标挂点必须在，而且档位说明不能丢（「官方矢量 / 文字标记」是如实标注）。
+  // 但图标挂点必须在。
   const html = JSON.stringify(full.tree);
   assert.ok(html.includes('hwb-catalog-ico'), '站点目录行缺少图标挂点');
-  const titles = treeAttrs(full.tree, ['title']).join(' | ');
-  assert.ok(titles.includes('官方鲸鱼矢量'), 'DeepSeek 的档位说明未出现在目录 title 中');
+  // 0.19.35（用户原话）：「右侧鼠标悬浮在矢量图时候会有的说明去除显示」。
+  // 这条**反转**了 0.16.36 的方向：此前要求档位说明必须出现在 title 里，现在要求
+  // 悬浮不弹说明。判据按「这个挂点上没有 title」写，而不是删掉整条用例——
+  // 删掉就等于「以后再挂回来也没人知道」。
+  const glyphTitles = treeAttrs(full.tree, ['title'])
+    .filter(t => typeof t === 'string' && /矢量|图标|来源|鲸鱼|lobehub|simple-icons/.test(t));
+  assert.deepEqual(glyphTitles, [], '矢量图挂点上不得再有悬浮说明，实得：' + glyphTitles.join(' | '));
 });
 
 /**
@@ -907,17 +1013,23 @@ test('★ 站点图标与一级选择框（0.16.23 接手网页会话半成品�
   // 与占位文字标记），不是某一个 DOM 位置。
   const catalog = await renderPane({ payloads: [emptyWindows], sites: ten, which: 'catalog' });
   assert.deepEqual(catalog.errors, [], '站点目录渲染抛错：' + catalog.errors.map(e => e.message).join('; '));
-  const titles = treeAttrs(catalog.tree, ['title']).join(' | ');
-  assert.ok(titles.includes('官方鲸鱼矢量'), 'DeepSeek 的 official 档位说明未出现在 title 中');
-  // 0.16.37：GLM / Z.ai 也有真实矢量了（来源 lobehub），因此 title 里的说明从
-  // 「simple-icons 无此条目，暂用文字标记」改成**来源声明**。钉的仍然是「如实说明
-  // 图标从哪来」，而不是某一句固定文案。
-  assert.ok(titles.includes('lobehub'), 'GLM/Z.ai 的图标来源说明未出现在 title 中');
+  // 0.19.35：档位说明**不再上界面**（用户要求去悬浮提示），但「图标从哪来」这件事
+  // 必须有地方可核对——它改在源码层核验：`SITE_ICON_TIER` 的 `why` 逐条仍在。
+  // 这条同时是「不得因为去掉提示就把来源记录一起删掉」的钉子。
+  const tierSrc = bridgeSrcFrom('client.cjs');
+  assert.ok(/const SITE_ICON_TIER = \{/.test(tierSrc), '档位/来源表被删了——去掉悬浮提示不等于删掉来源记录');
+  assert.ok(tierSrc.includes('官方鲸鱼矢量'), 'DeepSeek 的来源记录丢了');
+  assert.ok(tierSrc.includes('lobehub'), 'GLM/Z.ai/豆包的来源记录丢了');
+  assert.ok(!/siteIconWhy\s*\(/.test(tierSrc.replace(/const siteIconWhy[\s\S]{0,40}/, '')),
+    'siteIconWhy 已被删除（悬浮说明的唯一来源），不得复活');
   // 图标挂点：工具条站点图标（.hwb-glyph）与目录行图标（.hwb-catalog-ico）各一处。
   const html = JSON.stringify(catalog.tree);
-  // 0.16.37：GLM 的矢量必须真的画出来（这是「z.ai 和 glm 也要有图标」的验收点）。
-  assert.ok(/M9\.917 2c4\.906/.test(html), 'GLM 的品牌矢量没被渲染（仍是文字标记？）');
+  // 0.19.35：GLM 换成了**智谱清言应用标**（qingyan.svg）——旧断言钉的是 chatglm.svg
+  // 那条路径（底层 GLM 模型的标），正是用户报的「矢量图错误」。
+  assert.ok(/M6\.075 10\.494C7\.6 9\.446/.test(html), 'GLM 的智谱清言矢量没被渲染（仍是 chatglm 那条？）');
   assert.ok(/M12\.105 2L9\.927/.test(html), 'Z.ai 的品牌矢量没被渲染（仍是文字标记？）');
+  // 0.19.35：豆包换成豆包自己的标（doubao.svg 三条路径，含两条浅色层）。
+  assert.ok(/M5\.31 15\.756c\.172-3\.75/.test(html), '豆包的品牌矢量没被渲染（仍是 bytedance 那条？）');
   assert.ok(html.includes('hwb-catalog-ico'), '站点目录行缺少图标挂点');
   assert.ok(!html.includes('hwb-menu-glyph'), '已删除的站点菜单挂点又出现了');
   assert.ok(!html.includes('hwb-tab-glyph'), '已删除的横向站点标签挂点又出现了');
@@ -1037,7 +1149,8 @@ const liveWaitPayload = {
   rows: [{ label: '累计等待发送', value: '20 秒' }],
   label: '3 秒 · 等待占比 6%',
   sessionValue: '12 秒',
-  liveValue: '3 秒',
+  // 0.19.34：面板标题右侧读的是账本 12 秒 + 在途 3 秒 = 15 秒（与药丸的投影同源）。
+  projectedValue: '15 秒',
   detailRows: [
     { label: '本次会话等待发送', value: '12 秒' },
     { label: '本次会话占比', value: '20%' },
@@ -1067,17 +1180,23 @@ test('★ 等待药丸：在途时轮询提到 1 秒（10 秒一问等于没在�
   assert.ok(!idle.intervalDelays.includes(1000), '静止时不该每秒轮询');
 });
 
-test('★ 等待药丸：展开面板含「正在等待发送」行（与药丸同源同数）', async () => {
+test('★ 0.19.34 等待面板：在途读数上标题，且「正在等待发送」行不得复活', async () => {
+  // 用户原话：「移除突然出现的：正在等待发送 Ns，改为实时更新面板顶部『等待发送统计』」。
+  //
   // 展开态的内容由本条源码护栏 + wait-stats 单测覆盖（同 0.15.11 的既有做法：
   // 本 harness 的 setState 不触发重渲染，点开态无法在渲染树里直接观察）。
   const src = bridgeSrcFrom('client.cjs');
-  // 药丸文案与面板行都取服务端算好的字段，客户端不自己算时长——
-  // 否则「两个数字迟早对不上」（见 wait-stats.js 开头的口径说明）。
-  assert.ok(/data\?\.liveValue/.test(src), '展开面板必须渲染 liveValue（在途那一段）');
-  assert.ok(src.includes('正在等待发送'), '展开面板必须有「正在等待发送」行');
-  // 空态判定要把 liveValue 算进去：在途但账本还空时（首次等待）不能落到
+  // 标题右侧读的必须是**投影**（账本 + 在途），不是只读账本的 sessionValue——
+  // 后者在途期间不动，正是用户看到的「面板顶部的数不实时更新」。
+  assert.ok(/data\?\.projectedValue/.test(src), '面板标题右侧必须渲染 projectedValue（在途期间逐秒前进）');
+  assert.ok(!/data\?\.liveValue/.test(src), 'liveValue 已由 projectedValue 取代，不得复活');
+  // 判据盯**渲染表达式**而不是整份源码：那句文案在注释里出现是正常的（本仓库注释密度极高，
+  // 且注释要解释「为什么删掉它」）——扫整份源码只会把注释当成缺陷。
+  assert.ok(!/h\('dt', null, '正在等待发送'\)/.test(src), '「正在等待发送 N 秒」那一行必须移除（用户明确要求）');
+  assert.ok(!/hwb-waitpanel-row live/.test(src), '在途那一行的专用 class 必须一并消失');
+  // 空态判定要把投影算进去：在途但账本还空时（首次等待）不能落到
   // 「本会话尚无等待记录」——那正是「首次等待整枚药丸不渲染」的同族缺陷。
-  assert.ok(/\(data\?\.liveValue \|\| rows\.length\)/.test(src), '空态判定必须包含 liveValue');
+  assert.ok(/\(data\?\.projectedValue \|\| rows\.length\)/.test(src), '空态判定必须包含 projectedValue');
 });
 
 test('★ 0.19.2：药丸在 primitives 改名后（0.1.7-alpha.2）仍必须渲染出来', async () => {
@@ -1393,7 +1512,10 @@ test('★ 0.19.0 Team：并列多会话必须注册在 conversation.view（用�
   const labelText = String(entry.label());
   assert.ok(!/三列/.test(labelText),
     'label 仍写着「三列」而实际支持 2~4 列——名称与能力不符即假陈述：' + labelText);
-  assert.match(labelText, /并列多会话/, 'label 必须表达「并列多会话」这一真实语义');
+  // 0.19.31：名字由用户 2026-09-27 定为「并发」（逐字原话：「『并列多对话改为』-『并发』，
+  // 去除界面内的中心上方占用位置的『并列』两个字」）。用户要的词是判据，不改成同义词。
+  assert.equal(labelText, '并发',
+    'conversation.view 的 label 必须逐字是「并发」（用户点名的词）：' + labelText);
 });
 
 // 0.19.0 删除：三条「官方花名册 Team 面板」用例（成员角色/状态/模型渲染、inactive
@@ -1794,9 +1916,46 @@ test('★ 0.16.37 站点目录：官方「新建终端」同款胶囊 + 右侧�
 test('★ 设置页站点 tab：形态对齐 dsh-market，且排队间隔走后端既有档位', async () => {
   const src = bridgeSrcFrom('client.cjs');
   assert.ok(/\.hwb-settings-tabs\{/.test(src), 'tab 条样式缺失');
-  assert.ok(/\.hwb-settings-tab\.on\{/.test(src), 'tab 选中态样式缺失（下边框高亮）');
-  assert.ok(/border-bottom:2px solid transparent/.test(src),
-    'tab 缺少透明下边框 —— 选中时整排会跳一下（边框参与布局）');
+  assert.ok(/\.hwb-settings-tab\.on\{/.test(src), 'tab 选中态样式缺失');
+  // 0.19.31（用户 2026-09-27 原话）：「不应该是点击后按钮内部底面有个白色底线，
+  // 改为官方常见的……切换标签页里面切『全局』那些」。
+  //
+  // 旧形态是「透明下边框 + 选中时 2px 下划线」，线色取 `--dsw-alias-brand-primary`
+  // —— 这支色在**深色主题下接近白**（官方主题：深色 = neutral-bluish-50，
+  // 浅色 = neutral-bluish-1000），用户看到的就是「底面一条白色底线」。
+  // 现改为浅色胶囊，因此判据必须**成对**：下划线那套不得复活，胶囊那套必须在。
+  assert.ok(!/border-bottom:2px solid transparent/.test(src),
+    'tab 不得再画下划线 —— 那条线在深色主题下就是用户报的「白色底线」');
+  assert.match(src, /\.hwb-settings-tab\{[^}]*border-radius:999px/,
+    'tab 必须是胶囊形（用户选定的形态）');
+  assert.match(src, /\.hwb-settings-tab\.on\{background:var\(--dsw-alias-interactive-bg-active/,
+    '选中态必须是浅色胶囊底（interactive-bg-active），不得回到下划线或 brand 色');
+  // hover 与选中必须**分档**：同色会让人把鼠标划过的 tab 当成已选中。
+  assert.match(src, /\.hwb-settings-tab:hover\{background:var\(--dsw-alias-interactive-bg-hover/,
+    'hover 必须是比选中态浅一档的 interactive-bg-hover —— 两态同色则分不清「划过」与「选中」');
+  // 0.19.31（用户 2026-09-27 原话）：「他的按钮底部和一条分割线重合……解决为下移一点」。
+  // 成因是 `align-items:flex-end` 让 tab 底边（选中态那 2px 指示线就画在这里）
+  // 紧贴容器的 border-bottom（那条 .5px 灰线）。判据：容器必须有 padding-bottom，
+  // 把分隔线推离指示线 —— 只删不改（比如把 border-bottom 删掉）不算修好，
+  // 那会让整排失去与下方卡片的分隔。
+  // 0.19.38（用户 2026-09-27 原话）：「切换设置标签页时候，这一行离分割线的距离
+  // 不够，参考官方 dsh 常见的文字和线的分隔做好框与线的距离」——4px → 10px。
+  //
+  // 为什么不是「把 9px 调大」：官方同类分隔栏（dsh-client-ui-settings-plugins 的
+  // `.pbvGtq_tabs` + `.pbvGtq_tab{padding:7px 1px 9px}`）文字底边到线 = 9px，
+  // 而本实现是**浅色胶囊**——贴线的是色块不是文字，同一数字下观感近得多。
+  // 因此判据按**色块到线**写（10px），并同时钉住：分隔线不得被删（删了就没有
+  // 「文字与线的分隔」可言了，那是把问题绕过去而不是修好）。
+  assert.match(src, /\.hwb-settings-tabs\{[^}]*padding-bottom:10px[^}]*border-bottom:\.5px solid/,
+    'tab 条必须用 padding-bottom:10px 把分隔线推离胶囊底边（色块比文字更重，需要更多呼吸空间）');
+  // 滚轮到边不得继续把页面带走（用户第二问）——两条判据成对：
+  //   ① 横向 overscroll 必须被 contain 住；
+  //   ② 监听里必须按「这条栏真的有可滚内容」拦默认行为，而不是只判「这一下滚动了没有」
+  //      （后者在到边时恒为 false，于是滚轮继续冒泡去滚页面 = 用户报的缺陷）。
+  assert.match(src, /\.hwb-settings-tabs\{[^}]*overscroll-behavior-x:contain/,
+    'tab 条必须 contain 横向 overscroll，否则滚到头会带动外层');
+  assert.match(src, /el\.scrollWidth > el\.clientWidth\) e\.preventDefault\(\)/,
+    '滚轮到边必须拦默认行为（只判「这一下滚动了没有」在到边时恒假 ⇒ 页面继续下滑）');
   // 站点级间隔必须写 sendGapMsBySlot：这一档 0.14.7 起就在 lib/accounts.js 的
   // 回落链里（槽显式值 → 站点级键 → 全局值），界面只是把它接出来。
   assert.ok(/sendGapMsBySlot: next/.test(src),
@@ -1961,6 +2120,19 @@ const OFFICIAL_DSW_TOKENS = new Set([
   // 取证：官方主题的 design-platform.css 第 211 行（浅色）与第 311 行（深色）
   // 各有定义；官方用法见 dsh-client-ui-conversation 里 `.uV2eYG_add` 的 hover 规则。
   'dsw-alias-interactive-bg-hover-solid',
+  // 0.19.30（并列 composer 照抄官方那颗 + 圆按钮）：官方 `+` 按钮的**常态底色**
+  // 用的就是这一档，而不是我们另挑一个近似色。
+  // 取证：官方主题 `ui-theme/src/styles/design-platform.css` 第 256 行（浅色）
+  // 与第 356 行（深色）各有定义。
+  'dsw-specific-selector',
+  // 0.19.31（并列左右切换按钮改为官方胶囊面板同款）：底色用 `--dsw-specific-menu` 的
+  // 表面必须同时上 menu 毛玻璃，而 `--dsw-menu-backdrop-filter` 就是官方那一支。
+  // 取证：官方主题 `ui-theme/lib/client.js` 的 design-platform 段有
+  // `--dsw-menu-backdrop-filter:blur(40px) saturate(150%)`（浅/深各一份）；
+  // 官方用法见 `dsh-client-ui-conversation` 的 `.lXshSW_root` 与 `._7yHdaG_panel:before`
+  // ——两者都是 `background:var(--dsw-specific-menu)` + `backdrop-filter:var(--dsw-menu-backdrop-filter)`
+  // 成对出现（`dsh-client-ui-theme/README.md` 亦记明这一约定）。
+  'dsw-menu-backdrop-filter',
 ]);
 
 test('★ 0.19.0 任务板审美：CSS 只许用官方已有的 dsw token（不得凭直觉编 token 名）', () => {
@@ -1969,6 +2141,132 @@ test('★ 0.19.0 任务板审美：CSS 只许用官方已有的 dsw token（不�
   const unknown = [...new Set(used)].filter((t) => !OFFICIAL_DSW_TOKENS.has(t));
   assert.deepEqual(unknown, [],
     '这些 token 不在官方 token 家族里，写出来会静默回落（换主题时暴露）：' + unknown.join(', '));
+});
+
+/**
+ * ★ 0.19.36：「查看提示词文件」失败时必须给**短文案**，不得把整段 JSON 当错误显示。
+ *
+ * 用户实报：`打开失败：HTTP 200 OK：{"ok":false,"code":"PROMPT_FILE_MISSING","file":
+ * "C:\\Users\\...\\doubao.md","storeDir":"C:\\Users\\..."}`。
+ *
+ * 成因是一处**静默的逻辑短路**：`api()` 在 `ok:false` 时直接抛（见 request() 的 failure
+ * 判据），于是下面那张 `codes` 映射表**永远走不到**——它本就是为这条路写的。
+ * 两个后果同时发生：映射表形同虚设；整段 JSON（含完整路径）成了界面文案。
+ *
+ * 判据按「这个动作不得再用会抛的 api()」写，而不是断言某句文案——文案会改，
+ * 「异常路径不该抢走已知错误码的处理权」才是要钉的东西。
+ */
+test('★ 0.19.36 打开提示词文件：必须走 apiSoft（否则报码映射表走不到，整段 JSON 当文案）', () => {
+  const src = bridgeSrcFrom('client.cjs');
+  // 两处调用点（站点页 SitePromptCard / 全局页 PromptPanel）都要走不抛的那条。
+  const softCalls = (src.match(/apiSoft\('prompt-file'/g) || []).length;
+  assert.equal(softCalls, 2, '两处「查看」都必须用 apiSoft，实得 ' + softCalls + ' 处');
+  assert.ok(!/api\('prompt-file'/.test(src), '不得再用会抛的 api() 调 prompt-file（报码映射表会被短路）');
+  // 映射表必须真的在（它是给用户看的短文案来源）。
+  for (const code of ['PROMPT_FILE_MISSING', 'PROMPT_STORE_OFF', 'OPEN_UNAVAILABLE', 'OPEN_FAILED']) {
+    assert.ok(src.includes(code), '缺少错误码 ' + code + ' 的短文案映射');
+  }
+  // 失败分支不得再把 file 拼进界面文案——完整路径正是撑破元素的那一段。
+  assert.ok(!/codes\[[^\]]*\][^)]*\+[^)]*r\.file/.test(src),
+    '失败文案不得再拼接完整路径（那一段就是撑破卡片的元凶）');
+});
+
+/**
+ * ★ 0.19.36：承载报错/长文本的规则必须能换行（用户：「全局检测哪里的报错会突破
+ * 所在元素范围的一并修复」）。
+ *
+ * 这是一个**会复发的盒子模型族缺陷**：本仓库已两次修过同类（`.hwb-model-select`
+ * 与 `.hwb-site-prompt-path` 的 `box-sizing`），而这一族在「文字换行」上同样成立——
+ * Windows 路径 / JSON / URL 都是**没有可断点**的长串。
+ */
+test('★ 0.19.36 报错与长文本载体必须带换行保护（没有可断点的长串不得撑破卡片）', () => {
+  const src = bridgeSrcFrom('client.cjs');
+  // 公共提示/报错载体：`.hwb-hint` 被 80+ 处复用，它必须有。
+  assert.match(src, /\.hwb-hint\{[^}]*overflow-wrap:anywhere/,
+    '.hwb-hint 是所有行内报错的公共载体，必须有 overflow-wrap:anywhere');
+  // 面板内那两段错误正文。
+  assert.match(src, /\.hwb-guide p\{[^}]*overflow-wrap:anywhere/,
+    '连接失败正文（含 origin 与 HTTP 状态）必须能换行');
+  assert.match(src, /\.hwb-form-error\{[^}]*overflow-wrap:anywhere/,
+    '表单错误必须能换行');
+  // 任务板卡片标题/描述：用户与 AI 写的长标题最常出现在这里。
+  assert.match(src, /\.hwb-kcard-title\{[^}]*overflow-wrap:anywhere/,
+    '任务卡标题必须能换行');
+  assert.match(src, /\.hwb-kcard-desc\{[^}]*overflow-wrap:anywhere/,
+    '任务卡描述必须能换行');
+  // 独立设置页的同一个载体（settings-page.js 是另一份 HTML，不在 client bundle 里）。
+  const page = bridgeSrcFrom('settings-page.js');
+  assert.match(page, /\.hint \{[^}]*overflow-wrap: anywhere/,
+    '独立设置页的 .hint 同样是报错载体，必须能换行');
+});
+
+/**
+ * ★ 0.19.37：账户真实昵称/头像必须**四跳齐全**（用户：「尝试拉取账户名称和图像，
+ * 替代现在的默认头像和非圆框」）。
+ *
+ * 这条钉的是**接线**，不是某一跳的实现——本项目最贵的一类返工正是「后端算好了、
+ * 中间层丢掉、前端显示默认值」。实测该缺陷当时**三跳断两跳**：
+ *   ① browser-driver.status()  透出 accountName/avatarUrl  ← 0.19.4 已有
+ *   ② index.js 的 siteStatusRow 两个分支都**没转发**   ← 断（本次修）
+ *   ③ client 的字段挑选表也没挑进来                    ← 断（本次修）
+ *   ④ 渲染：真实头像优先、抓不到回落站点矢量             ← 断（本次修）
+ * 四跳任一断掉，界面都只剩默认头像+槽名，而每一跳单看都「有代码」。
+ */
+test('★ 0.19.37 账户身份四跳：状态层必须转发，字段挑选不得丢，渲染要有真实头像分支', () => {
+  // ① 驱动层（0.19.4 既有）。
+  const drv = bridgeSrcFrom('browser-driver.js');
+  assert.ok(/accountName:\s*accountIdentity\?\.name/.test(drv), '驱动层必须透出 accountName');
+  assert.ok(/avatarUrl:\s*accountIdentity\?\.avatarUrl/.test(drv), '驱动层必须透出 avatarUrl');
+  // ② index.js 的 siteStatusRow **两个分支**都要转发（已初始化 / 未初始化）。
+  const idx = bridgeSrcFrom('index.js');
+  const forwarded = (idx.match(/accountName:\s*s\.accountName/g) || []).length;
+  assert.ok(forwarded >= 1, 'index.js 的 siteStatusRow 必须把已初始化驱动的 accountName 转发出去（本次缺陷点）');
+  assert.ok(/avatarUrl:\s*s\.avatarUrl/.test(idx), 'index.js 必须转发 avatarUrl');
+  const nulled = (idx.match(/accountName:\s*null,\s*avatarUrl:\s*null/g) || []).length;
+  assert.ok(nulled >= 1, '未初始化的槽必须如实给 null（不拿槽名冒充昵称）');
+  // ③ 客户端字段挑选表不得再丢掉这两个字段（与 sessionLostCount 同型的老坑）。
+  const cli = bridgeSrcFrom('client.cjs');
+  assert.ok(/accountName:\s*s\.accountName\s*\|\|\s*null/.test(cli),
+    'SiteAccounts 的字段挑选表必须带上 accountName（只挑几个字段正是老坑）');
+  assert.ok(/avatarUrl:\s*s\.avatarUrl\s*\|\|\s*null/.test(cli), '字段挑选表必须带上 avatarUrl');
+  // ④ 渲染：真实头像优先 + 抓不到回落；昵称真实优先 + 回落槽名。
+  assert.ok(/s\.avatarUrl\s*$|s\.avatarUrl\s*\?/m.test(cli) || /s\.avatarUrl\s*\.replace|\bs\.avatarUrl\b/.test(cli),
+    '渲染必须消费 avatarUrl');
+  assert.ok(/hwb-avatar-img/.test(cli), '真实头像的 img 分支必须存在');
+  assert.ok(/s\.accountName\s*\|\|\s*s\.displayName/.test(cli),
+    '昵称必须真实优先、回落槽名（不得把槽名伪装成真昵称）');
+});
+
+/**
+ * ★ 0.19.37：站点健康度圆点——三色聚合 + 位置在标题行。
+ *
+ * 用户原话：「『已登录』占位框改为右上角和『智谱清言 的账户与登录』同行合适位置的
+ * 单独绿色圆点状态指示：红就是全部不行了，绿就是全部可以，黄就是有可以有不可以，
+ * 只需要通过颜色圆点显示，然后所有网站都需要应用，deepseek 一样」。
+ *
+ * 判据是**跨该站点全部账户**的聚合，不是单账户那一行——这是「全部/部分/全不行」
+ * 三个词的字面含义，也正是它区别于旧「已登录」徽章的地方。
+ */
+test('★ 0.19.37 站点健康度圆点：三色聚合判据 + 挂在标题行 + 颜色不是唯一载体', () => {
+  const src = bridgeSrcFrom('client.cjs');
+  // 聚合判据：全绿 / 全红 / 部分黄。
+  assert.ok(/const siteHealthOf/.test(src), '必须有站点级聚合函数（单账户那一行不足以回答「全部」）');
+  assert.ok(/return 'ok'/.test(src) && /return 'bad'/.test(src) && /return 'warn'/.test(src),
+    '三档都要在：ok / bad / warn');
+  assert.ok(/hwb-dot\.warn\{background:var\(--dsw-alias-state-warn-primary/.test(src),
+    '黄色档必须走官方 warn token（不得凭直觉编 token 名）');
+  // 位置：标题行（.hwb-group-row）的右上角。
+  assert.ok(/hwb-group-row/.test(src), '标题行必须能两端对齐（圆点在右上角）');
+  assert.ok(/siteHealthOf\(settingsTab\)/.test(src), '圆点必须挂在当前站点 tab 的标题行上');
+  // 颜色是唯一视觉载体 ⇒ 读屏必须有含义（用户要求只用颜色，但可访问性不能一起丢）。
+  assert.ok(/aria-label.*账户状态/.test(src), '圆点必须有 aria-label 说明含义（颜色不是唯一载体）');
+  // 旧「已登录」占位框必须消失。
+  //
+  // 判据盯**渲染表达式与 CSS 规则**，不扫整份源码——这条注释本身就要写出
+  // `.hwb-site-state` 这个名字来解释「它被删了」，扫整份源码会把注释当成缺陷
+  //（本文件 0.19.34 那条护栏刚踩过同一个坑）。
+  assert.ok(!/className:\s*'hwb-site-state/.test(src), '旧的「已登录」占位框渲染点必须移除');
+  assert.ok(!/"\.hwb-site-state/.test(src), '旧的「已登录」占位框 CSS 规则必须一并删除（不留死样式）');
 });
 
 test('★ 0.19.0 任务板审美：按钮走官方 button-info 语义 token，不得写死颜色或整块 opacity', () => {
@@ -1987,6 +2285,42 @@ test('★ 0.19.0 任务板审美：按钮走官方 button-info 语义 token，�
   // 不得再用整块 opacity 做 hover 反馈（会把文字一起调淡）。
   assert.ok(!/\.hwb-btn:hover\{opacity:\.9\}/.test(src),
     '按钮 hover 不得用 opacity:.9 —— 官方只换底色，文字保持全对比');
+});
+
+/**
+ * ★ 0.19.31：「等待发送统计」浮层不得再「透字」（用户报的「面板错误的透明」）。
+ *
+ * 成因不是「底色选错了」，而是**官方那对声明只抄了一半**：
+ * `--dsw-specific-menu` 本身是半透明的（浅色 `#f8f9fa94`、深色 `#30313680`），官方
+ * 每一块用它当底的高层级表面都**同时**上 `backdrop-filter:var(--dsw-menu-backdrop-filter)`
+ * 把背后内容糊掉。漏掉后一条，半透明底就等于「直接看见后面的聊天文字」。
+ *
+ * 因此判据必须**成对**：只测「有 specific-menu」会放过透字，只测「有 backdrop-filter」
+ * 会放过底色被换回不透明实底（那就不是官方材质了）。
+ *
+ * 取证（逐字比对）：官方 `dsh-client-ui-chat/lib/client.js` 的 `css$4`
+ *（stat-dialog.module.css 的 `.bRhRbq_panel`）逐项为
+ * `background:var(--dsw-specific-menu)` + `backdrop-filter:var(--dsw-menu-backdrop-filter)`
+ * + `--dsw-elevation-stroke-color:var(--dsw-alias-border-l1)`；官方
+ * `dsh-client-ui-theme/README.md` 亦记明「绘制 --dsw-specific-menu 的高层级表面还会
+ * 应用 backdrop-filter:var(--dsw-menu-backdrop-filter)」。
+ */
+test('★ 0.19.31 等待统计浮层：半透明底必须配官方毛玻璃，不得再透出背后文字', () => {
+  const src = bridgeSrcFrom('client.cjs');
+  const at = src.indexOf('.hwb-waitpanel{');
+  assert.ok(at > 0, '找不到 .hwb-waitpanel 规则（改类名则本护栏失效，需同步）');
+  const rule = src.slice(at, src.indexOf('}', at) + 1);
+
+  assert.match(rule, /background:var\(--dsw-specific-menu\)/,
+    '浮层底色必须走官方胶囊同款 --dsw-specific-menu（官方 stat-dialog 逐字如此）');
+  assert.match(rule, /backdrop-filter:var\(--dsw-menu-backdrop-filter\)/,
+    '半透明底必须配官方 menu 毛玻璃 —— 缺这一条就等于「背后聊天文字直接透出来」（用户报的缺陷）');
+  assert.match(rule, /--dsw-elevation-stroke-color:var\(--dsw-alias-border-l1\)/,
+    '官方高层级表面设 border:0，发丝边由 elevation 描边档画出，这一条不能少');
+  // 旧形态：底色带一个「不透明回落值」——回落值本身就把官方材质顶掉了，
+  // 而且 `background:var(a,var(b,#fff))` 这种写法让人以为「本来就是不透明的」。
+  assert.ok(!/background:var\(--dsw-specific-menu,/.test(rule),
+    '底色不得再带不透明回落值 —— 官方材质是「半透明底 + 毛玻璃」，回落值会把毛玻璃顶掉');
 });
 
 test('★ 0.19.0 任务板审美：看板列数不得写死（窄面板下必须能收缩）', () => {

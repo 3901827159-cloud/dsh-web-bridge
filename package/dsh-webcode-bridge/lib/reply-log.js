@@ -19,12 +19,34 @@
 //     「正在写的这份」之外的最近历史。
 //   · 内容含用户对话，属本地取证数据：默认落 `~/.dsh/logs/`，不进会话、不外发；
 //     这是它与「只进日志、不进会话」既有纪律（0.15.6 诊断文本同款）的一致延伸。
+//   · 0.19.30：按**站点**分文件。meta.siteId（deepseek/glm/kimi…）时落
+//     `webcode-bridge-replies.<site>.log`，未标识站点保持默认名。多站点/多账号
+//     并跑时各站原文交错在同一文件里，归因要靠头行二次过滤；分文件让「只看
+//     某站点」成为一次文件级选择。站点段只保留 [a-z0-9-]（防文件名注入），
+//     显式 opts.basename 仍是测试通道、胜过站点分文件。
+//   · 0.19.30：头行记**插件版本**（v=0.19.x）。取证时「这条记录是哪个版本的桥
+//     写下的」直接从头行读，不必拿时间戳去比对 git 历史——跨版本对比归因
+//     （协议漂移在某版本前后是否变样）不再需要交叉查证。读不到 package.json
+//     时落 v=?（打包目录被裁剪等场景），绝不因版本读取失败影响落盘本身。
 
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
 export const DEFAULT_REPLY_LOG_DIR = path.join(os.homedir(), '.dsh', 'logs');
+
+// 0.19.30：插件版本，懒读一次。回复日志的取证人常常在另一个工作树/另一台机
+// 器上读文件——「哪个版本的桥写的」必须能从文件自身读出。读失败（打包目录裁
+// 剪、node_modules 安装形态）落 '?'，不影响落盘主路径。
+let pluginVersionCache = null;
+const pluginVersion = () => {
+  if (pluginVersionCache !== null) return pluginVersionCache;
+  try {
+    const pkg = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+    pluginVersionCache = typeof pkg?.version === 'string' && pkg.version ? pkg.version : '?';
+  } catch { pluginVersionCache = '?'; }
+  return pluginVersionCache;
+};
 export const DEFAULT_REPLY_LOG_BASENAME = 'webcode-bridge-replies.log';
 export const DEFAULT_MAX_BYTES = 10 * 1024 * 1024;
 
@@ -35,7 +57,7 @@ const BOUND = '=== webcode-bridge raw reply ===';
  * 把一轮的原始回复全文追加进日志，返回写入的文件路径；任何失败返回 null。
  *
  * @param {string} text 原始回复全文（调用方保证是收到的原样，不做归一化）
- * @param {{sessionId?: string|null, chars?: number, calls?: number, note?: string}} [meta]
+ * @param {{sessionId?: string|null, siteId?: string|null, chars?: number, calls?: number, note?: string}} [meta]
  *   头行元信息；一行管道分隔，供 grep 定位（正文里不写元信息）。
  * @param {{dir?: string, basename?: string, maxBytes?: number, now?: Date}} [opts]
  *   目录 / 文件名 / 轮转阈值 / 时钟，测试用；默认见上。
@@ -49,7 +71,12 @@ export function appendReplyLog(text, meta = {}, opts = {}) {
     const explicit = opts.dir || process.env.WEBCODE_REPLY_LOG_DIR;
     if (!explicit && process.env.NODE_TEST_CONTEXT) return null;
     const dir = explicit || DEFAULT_REPLY_LOG_DIR;
-    const basename = opts.basename || DEFAULT_REPLY_LOG_BASENAME;
+    // 0.19.30：站点段。站点 id 是小写 slug（getSite 校验），这里再收一道
+    // [a-z0-9-] 并截 24 字符，防调用方传入任意字符串拼进文件名。
+    const siteSeg = String(meta.siteId || '').toLowerCase().replace(/[^a-z0-9-]/g, '').slice(0, 24);
+    const basename = opts.basename || (siteSeg
+      ? `webcode-bridge-replies.${siteSeg}.log`
+      : DEFAULT_REPLY_LOG_BASENAME);
     const maxBytes = Number.isFinite(opts.maxBytes) ? opts.maxBytes : DEFAULT_MAX_BYTES;
     fs.mkdirSync(dir, { recursive: true });
     const file = path.join(dir, basename);
@@ -59,6 +86,8 @@ export function appendReplyLog(text, meta = {}, opts = {}) {
     }
     const bits = [
       opts.now instanceof Date ? opts.now.toISOString() : new Date().toISOString(),
+      `v=${pluginVersion()}`,
+      ...(siteSeg ? [`site=${siteSeg}`] : []),
       `session=${meta.sessionId ?? '-'}`,
       `chars=${Number(meta.chars ?? String(text ?? '').length)}`,
       `calls=${Number(meta.calls ?? 0)}`,

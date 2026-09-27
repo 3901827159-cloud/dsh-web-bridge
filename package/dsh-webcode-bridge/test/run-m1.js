@@ -179,8 +179,24 @@ try {
   }
 
   // ---- consent gate + CSRF guards ----
+  // 0.19.31（用户 2026-09-27：「连接自动化设为默认开启」）：全新 profile（无落盘记录）
+  // 下 consent 默认就是**开**。旧断言写的是 false（当时的默认是关）。
   const st0 = await callRoute('/__webcode/status', mockReq('GET'), mockRes());
-  ok('status: consent closed', JSON.parse(st0.body()).relay.consent === false);
+  ok('status: consent default-on with no stored record', JSON.parse(st0.body()).relay.consent === true);
+
+  // 显式关过就必须仍然关：默认值只在「从未做过选择」时生效。
+  // 注意：落盘记录是在 `start()` 里读的（`loadConsent()`），所以必须先 start。
+  {
+    const { default: fsMod } = await import('node:fs');
+    fsMod.writeFileSync(join(consentDir, 'webcode-consent.json'), JSON.stringify({ accepted: false }), 'utf8');
+    const relayMod = await import(pathToFileURL(join(pkg, 'lib', 'relay.js')).href);
+    const r2 = relayMod.createRelay({
+      port: 0, host: '127.0.0.1', requireConsent: true, driver, profileDir: consentDir,
+    });
+    r2.start();
+    ok('explicit stored false still wins over default-on', r2.status().consent === false);
+    r2.stop();
+  }
 
   const csrf = await callRoute('/__webcode/consent', mockReq('POST', { headers: { 'sec-fetch-site': 'cross-site', origin: 'https://evil.example' }, body: JSON.stringify({ accepted: true }) }), mockRes());
   ok('cross-site control rejected (403)', csrf.statusCode === 403, 'status=' + csrf.statusCode);

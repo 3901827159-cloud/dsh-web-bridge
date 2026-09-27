@@ -131,7 +131,16 @@ const CODE_LIKE_RES = [
   /[^=!<>+\-*/%&|^]=[^=].*;\s*$/,                            // 赋值语句：x = …;
   /[A-Za-z_$][\w$.[\]]*\([^;()]*\)\s*;\s*$/,                  // 调用语句：foo(…);
   /=>/,                                                       // 箭头函数
-  /\b(?:const|let|var|function|return|import|export|await|async|throw)\b\s*[A-Za-z_$({[]/, // 关键字后面必须真的跟代码，而不是跟中文或行尾
+  /\b(?:const|let|function|return|import|export|await|async|throw)\b\s*[A-Za-z_$({[]/, // 关键字后面必须真的跟代码，而不是跟中文或行尾
+  // `var` 必须单独一条，不能和上面那族共用「后面跟 `(` 也算代码」的判据：CSS 自定义属性
+  // 取值写作 `var(--x)`，它在注释散文里极常见（本项目大量「逐项对照官方 token」的说明
+  // 正是这个形状），而 `var(` 永远不是合法 JS。2026-09-27 实测：`client.cjs` 里
+  // `…backdrop-filter:var(--dsw-menu-backdrop-filter)…` 与
+  // `…--dsw-elevation-stroke-color:var(--dsw-alias-border-l1)…` 两行被旧判据判成
+  // 「像代码」，把 CS005 从 0 抬到 1 ⇒ 闸门红灯，而它指的那两行都是纯散文——
+  // 假红会让闸门被绕过（§9.1 第 1 条），所以修判据而不是删注释。
+  // 收窄后 `var x = 1;` 仍被抓住（`x` 落在下面这个字符类里），只是不再把 `var(` 当代码。
+  /\bvar\b\s*[A-Za-z_$[{[]/,
   /^\s*\/\/\s*\}\s*(?:else|catch|finally)?\s*\{?\s*$/,        // 只有闭括号（+ 可选 else/catch/finally）的行
   /\b(?:console\.(?:log|error|warn)|require\s*|process\.exit)\s*\(/, // 调用形状
 ];

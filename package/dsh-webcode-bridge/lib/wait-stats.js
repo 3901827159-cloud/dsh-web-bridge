@@ -375,6 +375,27 @@ export function liveWaitMs(live, now = Date.now()) {
 }
 
 /**
+ * 本会话「等待发送」的**当前真值**：账本累计 + 在途增量（0.19.34）。
+ *
+ * 为什么单独成一个函数：这个加法此前散在两处（药丸 `composerWaitPillLabel` 与
+ * 明细 `waitStatDetailRows`），而 0.19.34 起面板标题右侧也要读它。各写一遍
+ * `s.totalWaitMs + liveWaitMs(...)`，迟早会有一处漏掉 `liveWaitMs` 而回落到只读
+ * 账本——那正是「标题上的数在途期间不动」的形状。
+ *
+ * 口径与药丸逐字相同：账本是**本轮之前**的累计，live 是本轮进行中的增量；
+ * live 消失后账本已被本轮结算补上，相加项自然归零，读数不跳变。
+ *
+ * @param {object} session 本会话账本（调用方已 sanitize）
+ * @param {object} [live] 在途等待（见 {@link liveWaitLabel}）
+ * @param {number} [now] 现算时刻
+ * @returns {number} 毫秒
+ */
+export function projectedWaitMs(session, live, now) {
+  const s = session && typeof session === 'object' ? session : emptyWaitStats();
+  return Math.max(0, Math.round(Number(s.totalWaitMs) || 0)) + liveWaitMs(live, now);
+}
+
+/**
  * 输入框底下那枚药丸的**短文案**（0.15.10，0.17.0 对齐「n秒 · 等待占比x%」）。
  *
  * 与 `composerWaitLine` 的区别是长度预算：官方在同一个槽位放的是 13px 单行
@@ -404,7 +425,8 @@ export function composerWaitPillLabel({ session, metrics, live, now } = {}) {
   // 0.16.26：一个数、一个来源。账本是**本轮之前**的累计，live 是本轮进行中的
   // 增量，两者相加才是「本会话等待发送」的当前真值。live 消失后账本已被本轮
   // 结算补上，相加项自然归零，读数不变——这正是它不再跳变的原因。
-  const projectedMs = s.totalWaitMs + liveWaitMs(live, now);
+  // 0.19.34：加法收进 projectedWaitMs（面板标题右侧读的是同一个函数）。
+  const projectedMs = projectedWaitMs(s, live, now);
   if (projectedMs > 0) {
     // 药丸是 13px 单行，只放得下一个数 + 一个后缀。占比只给结论、不附分母口径（用户要求，
     // 见 waitRatio 的说明）：覆盖轮次既无处解释、也不该出现在这里。
@@ -446,14 +468,30 @@ export function waitStatDetailRows({ session, total, metrics, live, now } = {}) 
   const t = total ? sanitizeWaitStats(total) : null;
   const m = metrics || {};
   const rows = [];
-  const projectedMs = s.totalWaitMs + liveWaitMs(live, now);
-  if (projectedMs > 0 || s.turns > 0) {
-    rows.push({ label: '本次会话等待发送', value: formatElapsed(projectedMs) });
+  const projectedMs = projectedWaitMs(s, live, now);
+  // 0.19.35（用户原话）：「『本次会话等待发送』也删除，和顶部重复无意义，
+  // 『本次会话占比』和『平均会话等待时长占比』两栏放在上下近处，『本次会话轮次』
+  // 和『累计已统计会话轮次（加上会话轮次！）』放一起上下两栏，『累计等待发送』放最低栏」。
+  //
+  // 因此这一版**不是**简单加减行，而是把行序改成「同类相邻」：两个占比挨着、
+  // 两个轮次挨着、累计总量压到最底。删掉的那一行是**与面板标题重复**的那一个数——
+  // 标题右侧已经在逐秒显示它，明细里再来一次只是让同一张面板里出现两个同名读数。
+  //
+  // 两个存在性判据分开（hasSession / hasTotal）：本会话与累计各有各的门槛，
+  // 合成一个会让「本会话有等待、累计还没有」这种首轮现场少掉本会话的行。
+  const hasSession = projectedMs > 0 || s.turns > 0;
+  const hasTotal = Boolean(t && t.totalWaitMs > 0);
+  if (hasSession) {
     const sessionRatio = waitRatio({ waitMs: projectedMs, durationMs: s.totalDurationMs, durationTurns: s.durationTurns, turns: s.turns });
     if (sessionRatio) rows.push({ label: '本次会话占比', value: sessionRatio });
-    rows.push({ label: '本次会话轮次', value: s.turns + ' 轮' });
-    if (s.rateLimitRetries > 0) rows.push({ label: '本次会话限流重试', value: s.rateLimitRetries + ' 次' });
   }
+  if (hasTotal) {
+    const totalRatio = waitRatio({ waitMs: t.totalWaitMs, durationMs: t.totalDurationMs, durationTurns: t.durationTurns, turns: t.turns });
+    if (totalRatio) rows.push({ label: '平均会话等待时长占比', value: totalRatio });
+  }
+  if (hasSession) rows.push({ label: '本次会话轮次', value: s.turns + ' 轮' });
+  if (hasTotal) rows.push({ label: '累计已统计会话轮次', value: t.turns + ' 轮' });
+  if (hasSession && s.rateLimitRetries > 0) rows.push({ label: '本次会话限流重试', value: s.rateLimitRetries + ' 次' });
   if (m.gapTargetMs > 0) rows.push({ label: '发送间隔目标', value: formatDuration(m.gapTargetMs) });
   if (m.gapBasis === 'end-to-start') rows.push({ label: '间隔基准', value: '距上次回复完成' });
   else if (m.gapBasis === 'send-to-send') rows.push({ label: '间隔基准', value: '距上次发出' });
@@ -461,12 +499,10 @@ export function waitStatDetailRows({ session, total, metrics, live, now } = {}) 
     const sinceLabel = m.gapBasis === 'end-to-start' ? '距上次回复完成' : '距上次发送';
     rows.push({ label: sinceLabel, value: formatDuration(m.sincePrevSendMs) });
   }
-  if (t && t.totalWaitMs > 0) {
-    rows.push({ label: '累计等待发送', value: formatDuration(t.totalWaitMs) });
-    const totalRatio = waitRatio({ waitMs: t.totalWaitMs, durationMs: t.totalDurationMs, durationTurns: t.durationTurns, turns: t.turns });
-    if (totalRatio) rows.push({ label: '平均会话等待时长占比', value: totalRatio });
-    rows.push({ label: '累计已统计', value: t.turns + ' 轮' });
+  if (hasTotal) {
     if (t.waitedTurns > 0) rows.push({ label: '平均每次等待', value: formatDuration(Math.round(t.totalWaitMs / t.waitedTurns)) });
+    // **最低栏**：累计总量压在最后一行（用户指定的位置）。
+    rows.push({ label: '累计等待发送', value: formatDuration(t.totalWaitMs) });
   }
   return rows;
 }

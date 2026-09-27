@@ -72,7 +72,18 @@ body {
   align-items: center;
 }
 label { font-size: 14px; font-weight: 500; color: #1d1d1f; margin: 0; }
-.hint { font-size: 12px; line-height: 1.45; color: #86868b; margin-top: 2px; }
+.hint {
+  font-size: 12px;
+  line-height: 1.45;
+  color: #86868b;
+  margin-top: 2px;
+  /* 0.19.36：报错文案的承载者（含完整 Windows 路径与文件名），必须能换行。
+     与 client.cjs 的 .hwb-hint 同一个修复：没有它，一句带路径的报错会整行撑出
+     .section-group 的右缘（该容器是 overflow:hidden，于是被裁掉一半）。 */
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
 
 textarea, select, input {
   width: 100%;
@@ -344,6 +355,17 @@ pre.preset {
         <div class="hint">长文本改走附件上传，避免超大正文灌入输入框引起页面卡死或截断。</div>
         <div id="transportLine" class="hint">投递状态加载中…</div>
       </div>
+      <!-- 站点级投递形态（0.19.32）。
+           用户要求：「提示词投递：给每个模型站点都做到和「发送间隔（全局）」一样的逻辑：
+           全局设置一个，但是针对每个单独网站设置能够单独设置」。
+           回落链与 sendGapMsBySlot 逐字同构：站点档 → 全局档 → 插件 config → 'attach'。
+           默认「跟随全局」= 设置文件里**没有这个键**（不是写一个第三值），于是
+           「没配」与「配成跟随全局」在同一份设置里始终可区分。 -->
+      <div class="form-row">
+        <label>各站点投递形态</label>
+        <div class="hint">默认跟随上面的全局投递形态；需要时可为单个站点单独指定。</div>
+        <div id="siteTransports">加载中…</div>
+      </div>
     </div>
 
     <!-- 分组 3: 速度与排队 -->
@@ -456,14 +478,93 @@ pre.preset {
       const transport = data.promptTransport === 'inline' ? 'inline' : 'attach';
       const radio = document.querySelector('input[name="promptTransport"][value="' + transport + '"]');
       if (radio) radio.checked = true;
+      renderSiteTransports(data.promptTransportBySite || {});
+      // 每个站点的**生效读数**逐站现读（0.19.33）：下拉只说明「存了什么」，
+      // 读数才说明「这一档会让该站点走哪条路」。两者都由服务端算，前端不合并。
+      refreshSiteTransportLines();
     } catch (e) {
       statusEl.textContent = '加载设置失败: ' + e.message;
       statusEl.className = 'error';
     }
   }
 
-  // ---- 首轮提示词（按网站逐行，只读，默认显示） ------------------------------ 
-  // 模板由 GET /__webcode/prompt-variants 现算（与真正发出去的那一份同源）。
+  /**
+   * 各站点投递形态的**选择状态**（0.19.32）。
+   *
+   * 与 sitePick（协议预览）同样的「本页只持草稿、保存时统一提交」纪律：本页的
+   * 保存是**一个表单一个按钮**，逐个站点即时落盘会造出两种交互。
+   *
+   * 值域：空串 = 跟随全局（提交时**删键**）；'attach' / 'inline' = 本站点覆盖。
+   * 为什么空串而不是 undefined 做「跟随全局」：它要能当 select 的 value。
+   * 注意：本文件整体是一个模板字符串，注释里**不得出现反引号**（会截断它，见下方
+   * 同一条纪律的既有注释）。
+   */
+  let siteTransportDraft = {};
+  /** 站点清单（服务端 models 里出现过的站点），按 SITE_IDS 顺序。 */
+  function renderSiteTransports(bySite) {
+    const host = document.getElementById('siteTransports');
+    if (!host) return;
+    siteTransportDraft = {};
+    if (!SITE_IDS.length) { host.textContent = '没有可用站点。'; return; }
+    host.innerHTML = SITE_IDS.map((sid) => {
+      const cur = bySite[sid] === 'inline' || bySite[sid] === 'attach' ? bySite[sid] : '';
+      siteTransportDraft[sid] = cur;
+      return '<div class="site-prompt-head" style="margin-top:6px;">'
+        + '<span class="site-prompt-name" style="flex:0 0 140px;">' + sid + '</span>'
+        + '<select data-site-transport="' + sid + '" style="flex:0 0 200px;">'
+        + '<option value=""' + (cur === '' ? ' selected' : '') + '>跟随全局</option>'
+        + '<option value="attach"' + (cur === 'attach' ? ' selected' : '') + '>附件投递</option>'
+        + '<option value="inline"' + (cur === 'inline' ? ' selected' : '') + '>纯文本</option>'
+        + '</select>'
+        + '<span class="hint" id="siteTransportLine-' + sid + '" style="margin-left:8px;"></span>'
+        + '</div>';
+    }).join('');
+    // 事件绑定放在 innerHTML 之后（重建过节点，旧引用会失效）——与 renderSiteRows 同一条纪律。
+    host.querySelectorAll('[data-site-transport]').forEach((sel) => {
+      sel.addEventListener('change', () => {
+        const sid = sel.getAttribute('data-site-transport');
+        const v = sel.value === 'inline' || sel.value === 'attach' ? sel.value : '';
+        siteTransportDraft[sid] = v;
+      });
+    });
+  }
+
+  /**
+   * 每个站点的**生效读数**（0.19.33）。
+   *
+   * 为什么要逐站点问服务端、而不是在前端自己合并：回落链只有一处真相
+   *（站点档 → 全局档 → 插件 config → 'attach'），而它在服务端（GET attach-status 的
+   * 文档字符串里已写明「两处的一致性由 test/site-prompt-transport.test.mjs 钉住」）。
+   * 前端再写一遍合并，就是本项目反复记过的「第二套判据」——迟早与驱动分叉。
+   *
+   * 只读、无副作用：不写设置、不上传、不发送。读数拿不到就如实留空，
+   * 不编一句看起来正常的默认值。
+   */
+  async function refreshSiteTransportLines() {
+    const ids = SITE_IDS || [];
+    await Promise.all(ids.map(async (sid) => {
+      const el = document.getElementById('siteTransportLine-' + sid);
+      if (!el) return;
+      try {
+        // 用 POST 而不是 GET + query：与原生面板同一条路由形态（客户端带 body
+        // 就是 POST，服务端两个方法都注册了），避免各写一种调用形状。
+        const r = await fetch(API_BASE + '/attach-status', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ siteId: sid }),
+        });
+        const d = await r.json();
+        if (!d || !d.ok) { el.textContent = '读数不可用'; return; }
+        // 只显示「本站点这一档」的结论，不重复全局那一行的长文案。
+        el.textContent = d.sitePick
+          ? '当前：' + (d.sitePick === 'inline' ? '纯文本' : '附件投递') + '（本站点单独设置）'
+          : '当前：跟随全局（' + (d.effective === 'inline' ? '纯文本' : '附件投递') + '）';
+      } catch (e) {
+        el.textContent = '读数读取失败：' + (e && e.message ? e.message : e);
+      }
+    }));
+  }
+
+  // ---- 首轮提示词（按网站逐行，只读，默认显示） ------------------------------   // 模板由 GET /__webcode/prompt-variants 现算（与真正发出去的那一份同源）。
   // 服务端的 sites 数组已把「每个网站 → 它实际会用的协议 + 该协议的模板全文」
   // 算好；本页只渲染与切换预览，不提供编辑——可编辑的只有上面的「全局指令」。
   //
@@ -809,7 +910,9 @@ pre.preset {
   setInterval(refreshSubAccount, 20000);
   // 投递读数轮询（15s）：真机出问题时用户往往就停在这一页上，读数必须自己更新，
   // 不能要求他手动刷新（旧版本这一页对附件投递完全沉默）。
-  setInterval(loadTransportStatus, 15000);
+  // 逐站点那一组读数同频（0.19.33）：它们是同一件事的两种粒度，一个更新一个不更新
+  // 会让用户以为站点档没生效——而「谁对」在这页上无从判断。
+  setInterval(() => { loadTransportStatus(); refreshSiteTransportLines(); }, 15000);
 
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -827,6 +930,10 @@ pre.preset {
       // 投递形态（0.16.3）：只有逐字 'inline' 才是「永远纯文本」；服务端在写入侧
       // 还会再归一化一次（见 web-control 的 POST settings），两处判据同源。
       promptTransport: (document.querySelector('input[name="promptTransport"]:checked') || {}).value === 'inline' ? 'inline' : 'attach',
+      // 站点级投递形态（0.19.32）：整个字典**一次提交**。
+      // 「跟随全局」用**删键**表达——写一个第三值会让「没配」与「配成跟随全局」
+      // 在设置文件里变成同一件事，而它们语义不同（同 extraPromptBySite 的空串删键）。
+      promptTransportBySite: Object.fromEntries(Object.entries(siteTransportDraft).filter(([, v]) => v)),
     };
     try {
       const res = await fetch(API_BASE + '/settings', {
@@ -840,6 +947,11 @@ pre.preset {
       statusEl.className = 'success';
       // 全局指令改了 → 上方模板的文本也跟着变；不重拉的话用户会以为没生效。
       loadVariants();
+      // 投递形态 / 各站点形态也可能刚被改过（它们都在同一个表单里提交），而
+      // 「当前生效：」那一行是用户核对「我设的站点档到底生效没有」的唯一入口——
+      // 只重拉模板会让那一行停在旧值（真机症状：保存成功、读数不变）。
+      // 服务端在同一次 POST 的响应里回 settingsRevision，但这页只需要重读一次读数。
+      loadTransportStatus();
     } catch (e) {
       statusEl.textContent = '❌ ' + e.message;
       statusEl.className = 'error';

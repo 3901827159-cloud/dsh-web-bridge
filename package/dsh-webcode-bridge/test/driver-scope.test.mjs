@@ -193,6 +193,31 @@ function freeBaseRefs(code, bound) {
 
 const RUN_TURN = functionBodyOf(SRC, 'runTurn');
 
+/**
+ * 用于**绑定表**收集的源码：模板串里的字面文本被抹掉，只保留 `${…}` 里的表达式。
+ *
+ * ## 为什么必须有这一层（0.19.33 真缺陷暴露出的建模失真）
+ *
+ * 判据②原先直接在 `SRC`（原始源码）上跑正则收集绑定。而本文件里有大量
+ * **注入模板串**（`DOM_CAPTURE` / `captureInit()` 的返回值 / 各站点脚本），它们
+ * 是喂给 `page.evaluate` 在**浏览器**里执行的代码，与 Node 模块作用域毫无关系——
+ * 可它们的内容照样会被 `const\s+(\w+)` 这类正则匹配到。
+ *
+ * 后果是一次真实的漏报：`DOM_CAPTURE` 里有
+ *
+ *     const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+ *
+ * 于是 `sleep` 被当成了「模块级绑定」，而 `runTurn` 里那句
+ * `await sleep(1500)`（Node 侧，必然抛 `ReferenceError: sleep is not defined`）
+ * 因此**被判为合法**。这正是本文件头注里写明的「只会漏报、不会误报」那个宽松
+ * 方向的一次真实兑现——而漏报的代价与没有护栏完全相同。
+ *
+ * 抹掉模板串字面文本之后，绑定表只收**真正的 Node 侧声明**，判据②对这类缺陷
+ * 才真正有效。`${…}` 里的表达式仍是代码（`codeOnly` 会保留），因此真正的模块级
+ * 表达式不会被误删。
+ */
+const BINDING_SRC = codeOnly(SRC);
+
 // ── 自检：扫描器必须真的看得见跨作用域引用、且不误报 ────────────────────────────
 
 test('⓪ 扫描器自检：跨作用域引用必须报出，本作用域内与内建全局不得误报', () => {
@@ -259,7 +284,10 @@ test('② runTurn 体内不得出现跨作用域的自由标识符（0.15.2–0.
     if (/^[A-Za-z_$][\w$]*$/.test(name)) bound.add(name);
   }
   // 模块级绑定：顶格（行首无缩进）的 const/let/var/function/class/import
-  for (const m of SRC.matchAll(/^(?:import\s+([\s\S]*?)\s+from|(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)|(?:export\s+)?const\s+([A-Za-z_$][\w$]*)|(?:export\s+)?let\s+([A-Za-z_$][\w$]*)|(?:export\s+)?class\s+([A-Za-z_$][\w$]*))/gm)) {
+  // ⚠ 跑在 **BINDING_SRC**（模板串字面文本已抹除）上，不是原始 SRC：
+  // 在 SRC 上跑会把注入模板串里的 `const sleep = …` 收成模块级绑定，
+  // 于是 Node 侧那句 `await sleep(1500)` 被判为合法（0.19.33 的真实漏报）。
+  for (const m of BINDING_SRC.matchAll(/^(?:import\s+([\s\S]*?)\s+from|(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)|(?:export\s+)?const\s+([A-Za-z_$][\w$]*)|(?:export\s+)?let\s+([A-Za-z_$][\w$]*)|(?:export\s+)?class\s+([A-Za-z_$][\w$]*))/gm)) {
     if (m[2]) bound.add(m[2]);
     if (m[3]) bound.add(m[3]);
     if (m[4]) bound.add(m[4]);
@@ -272,9 +300,10 @@ test('② runTurn 体内不得出现跨作用域的自由标识符（0.15.2–0.
     }
   }
   // 内层函数声明与块内 const（粗粒度补一批：把文件里任何 `function X(` / `const X =` 都算上，
-  // 仍然只影响"误报"方向 ⇒ 保守）
-  for (const m of SRC.matchAll(/(?:function\s+|const\s+|let\s+|var\s+)([A-Za-z_$][\w$]*)/g)) bound.add(m[1]);
-  for (const m of SRC.matchAll(/function\s+\w+\s*\(([\s\S]*?)\)\s*\{/g)) {
+  // 仍然只影响"误报"方向 ⇒ 保守）。**同样跑在 BINDING_SRC 上**——模板串里的
+  // 同名声明一旦被收进来，判据就对这个名字失效（0.19.33 的 `sleep` 就是这样漏的）。
+  for (const m of BINDING_SRC.matchAll(/(?:function\s+|const\s+|let\s+|var\s+)([A-Za-z_$][\w$]*)/g)) bound.add(m[1]);
+  for (const m of BINDING_SRC.matchAll(/function\s+\w+\s*\(([\s\S]*?)\)\s*\{/g)) {
     for (const piece of m[1].replace(/[{}\[\]]/g, ' ').split(',')) {
       const name = piece.trim().split(':')[0].split('=')[0].trim().replace(/^\.\.\./, '');
       if (/^[A-Za-z_$][\w$]*$/.test(name)) bound.add(name);
@@ -314,4 +343,77 @@ test('④ 注释里对该缺陷的说明必须在位（避免下次有人「顺�
     + '本仓库的纪律是把「为什么不这么写」留在代码里（见 doc/comment-style.md），'
     + '删掉它，下一个人会把 `nav.reason` 当成一个显然的补充再加回去。',
   );
+});
+
+// ── 同族第二例：注入模板串里的名字不得当成 Node 侧绑定（0.19.33）───────────────
+
+test('⑤ 回归钉：runTurn 体内不得引用 sleep（模板串作用域的逐字形态）', () => {
+  // `sleep` 只在本文件的 `DOM_CAPTURE` **注入模板串**里定义（那是给 page.evaluate
+  // 在浏览器里跑的代码）。Node 侧引用它必然抛 `ReferenceError: sleep is not defined`。
+  //
+  // 真机现场与 `nav` 那一例**触发条件完全相同**：`attempt=0` 不进重试支，
+  // 只有第一次导航就没 ready 才踏进来（页面冷加载慢的常见现场），于是被
+  // `runTurn` 的 catch 当成普通失败 —— 用户看到的是「GLM 这一轮整个没回复」。
+  //
+  // 为什么这条钉必须存在：判据②是通用判据，而它此前对 `sleep` **恰好是瞎的**
+  //（绑定表在原始源码上收集，模板串里的 `const sleep = …` 被当成了真绑定）。
+  // 通用判据的建模失真修好之后（见 BINDING_SRC 注释），这条逐字钉仍然要留下 ——
+  // 它不依赖扫描器是否足够聪明，只回答「runTurn 里有没有引用这个浏览器侧的名字」。
+  const code = codeOnly(RUN_TURN.body);
+  assert.ok(
+    !/(?<![.\w$])sleep\s*[.[(]/.test(code),
+    'runTurn 体内出现了 `sleep` 引用：`sleep` 只存在于 DOM_CAPTURE 注入模板串里，'
+    + 'Node 模块作用域没有这个绑定。这一行必然抛 ReferenceError: sleep is not defined。'
+    + 'Node 侧的等待原语是本文件模块级的 `delay(ms)`。',
+  );
+});
+
+test('⑥ 扫描器自检：模板串里的声明**不得**进入绑定表（0.19.33 漏报的根因）', () => {
+  // 没有这条自检，「把绑定表换回原始 SRC」这个动作不会有任何红灯 —— 而那正是
+  // `sleep` 漏报的原因，也意味着下一次同型缺陷照样漏。
+  //
+  // ⚠ 差异在**绑定表怎么建**，不在函数体怎么扫：`codeOnly` 两边都会抹掉模板串
+  // 的字面文本，所以 `freeBaseRefs` 看到的代码永远是一样的。让 `sleep` 逃掉的是
+  // 「建绑定表时**没有**抹模板串」这一步（`const sleep = …` 被收成了模块级绑定）。
+  const sample = [
+    'const MODULE_LEVEL = 1;',
+    'function inject() {',
+    '  return `',
+    '    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));',
+    '    await sleep(1000);',
+    '  `;',
+    '}',
+    'async function target() {',
+    '  await sleep(1500);',   // 模板串里声明过，但 Node 侧没有 ⇒ 必须报
+    '  return MODULE_LEVEL;',
+    '}',
+  ].join('\n');
+
+  /** 与判据②逐字同源的绑定表构造：给定源码，收出模块级与内层声明。 */
+  const collectBindings = (src) => {
+    const bound = new Set(['target']);
+    for (const m of src.matchAll(/^(?:import\s+([\s\S]*?)\s+from|(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)|(?:export\s+)?const\s+([A-Za-z_$][\w$]*)|(?:export\s+)?let\s+([A-Za-z_$][\w$]*)|(?:export\s+)?class\s+([A-Za-z_$][\w$]*))/gm)) {
+      for (const g of [m[2], m[3], m[4], m[5]]) if (g) bound.add(g);
+    }
+    for (const m of src.matchAll(/(?:function\s+|const\s+|let\s+|var\s+)([A-Za-z_$][\w$]*)/g)) bound.add(m[1]);
+    return bound;
+  };
+
+  const body = functionBodyOf(sample, 'target');
+  assert.ok(body, '扫描器自检失败：合成的 target 框不出来');
+  const code = codeOnly(body.body);
+
+  // ① 建模失真（旧写法）：绑定表建在原始源码上 ⇒ `sleep` 被当成已绑定 ⇒ 漏报。
+  //    这条断言把「失真长什么样」钉住：它一旦不再复现，下面那条自检就保护不了任何东西。
+  const naive = freeBaseRefs(code, collectBindings(sample));
+  assert.ok(!naive.has('sleep'),
+    '扫描器自检失败：合成用例没能复现 0.19.33 的漏报条件（`sleep` 在原始源码上建表后 '
+    + '竟然仍被报出）——这条自检已失效，必须重做而不是放宽');
+
+  // ② 本文件的修法：绑定表建在抹掉模板串字面文本的源码上 ⇒ `sleep` 不再被当成绑定
+  //    ⇒ 判据②真的能抓住它。
+  const fixed = freeBaseRefs(code, collectBindings(codeOnly(sample)));
+  assert.ok(fixed.has('sleep'),
+    '扫描器自检失败：抹掉模板串后 `sleep` 仍未被报出 —— 判据②对这类缺陷依然是瞎的');
+  assert.ok(!fixed.has('MODULE_LEVEL'), '扫描器自检失败：真正的模块级绑定被误报');
 });

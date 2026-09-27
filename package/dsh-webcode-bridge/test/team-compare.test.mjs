@@ -154,10 +154,10 @@ test('★ 0.19.0 Team：官方 agentTeams 花名册面板不得复活（用户�
     'label 仍写「三列模型对比」而实际支持 2~4 列 —— 名称与能力不符即假陈述');
 });
 
-test('★ 0.19.29 Team：标题必须自述「并列」，且上方不得再占位置', () => {
+test('★ 0.19.31 Team：视图名改「并发」，且中心上方不再有「并列」标题', () => {
   const raw = clientSrc();
   const body = compareBody(raw);
-  // 判据只看**去掉注释的代码**：本文件的注释会逐字引用用户原话（含「并列多会话 Team」），
+  // 判据只看**去掉注释的代码**：本文件的注释会逐字引用用户原话（含「并列」），
   // 不去注释就会把「解释」当成「旧标题还在」——本仓库反复踩到这个坑
   //（team-compare 与 client-render 都为此立过规矩）。
   // 另注意文件是 **CRLF**：按 `\r?\n` 切分，否则尾部 `\r` 会让 `$` 对不上、整行注释剥不掉。
@@ -167,18 +167,29 @@ test('★ 0.19.29 Team：标题必须自述「并列」，且上方不得再占�
     .join('\n')
     .replace(/\/\*[\s\S]*?\*\//g, '');
 
-  // 标题：用户 2026-09-26 原话「将『并列多会话』改为『并列』」。
-  assert.match(code, /h\('h3', \{ className: 'hwb-compare-title' \}, '并列'\)/,
-    '视图标题必须是「并列」（用户要求把「并列多会话」改为「并列」）');
-  assert.ok(!/并列多会话/.test(code),
-    '「并列多会话」必须从渲染代码里消失 —— 用户要求改名为「并列」并删掉说明');
-  // 那两行说明文字必须删除（用户：「上方不必要占用位置……说明去除」）。
+  // ① 用户 2026-09-27 原话（逐字）：「去除界面内的中心上方占用位置的『并列』两个字」。
+  //    删的必须是**标题节点连同它的容器**，不是只删那两个字 —— 后者会留下一个空的
+  //    高度占位，而「不再占用上方位置」正是用户要的。
+  assert.ok(!/hwb-compare-title/.test(code),
+    '中心上方的标题节点必须删除（用户：「去除界面内的中心上方占用位置的『并列』两个字」）');
+  assert.ok(!/hwb-compare-header/.test(code),
+    '标题的容器也必须删除 —— 只删文字会留下空的高度占位，那仍然「占用中心上方位置」');
+  assert.ok(!/h\('h3'/.test(code), '视图内部不得再渲染 h3 标题');
+  assert.ok(!/并列/.test(code), '渲染代码里不得再出现「并列」二字（改名后它只活在注释里）');
+  // 上一轮（0.19.29）的判据一并保持：说明文字与顶部工具行不得回来。
   assert.ok(!/每列一条独立网页会话/.test(code),
-    '标题下的说明文字必须删除 —— 用户说它「上方不必要占用位置」');
-  assert.ok(!/把某列设为「主审」后/.test(code), '说明文字第二句也必须删除');
+    '标题下的说明文字不得回来 —— 用户说它「上方不必要占用位置」');
+  assert.ok(!/把某列设为「主审」后/.test(code), '说明文字第二句也不得回来');
   assert.ok(!/hwb-compare-tools/.test(code),
-    '顶部工具行（3 列／主审：X／+ 加一列）必须移走 —— 它也是「上方占位置」的一部分');
-  // 加列能力**没有丢**（用户第 2 点：能力不能少）。列数上限必须真的封顶。
+    '顶部工具行（3 列／主审：X／+ 加一列）不得回来 —— 它也是「上方占位置」的一部分');
+
+  // ② 视图名改为「并发」：用户要的词，承载在 `conversation.view` 的 label 上，
+  //    显示位置是中央区顶栏「对话 / 轨迹 / 并发」那一行。
+  assert.match(raw, /label: \(\) => '并发'/,
+    'conversation.view 的 label 必须逐字是「并发」—— 用户点名要的就是这个词');
+  assert.ok(!/label: \(\) => '并列/.test(raw), 'label 不得再叫「并列…」');
+
+  // ③ 能力不得回退：列数上限必须真的封顶（加列按钮到 MAX_COLS 即禁用）。
   assert.match(code, /disabled: cols\.length >= MAX_COLS/,
     '加列按钮必须在达到 MAX_COLS 时禁用 —— 否则用户可以加出布局撑不住的列数');
   // 会话身份可见：用户要能核对「这一列续在哪条网页会话上」。
@@ -268,8 +279,8 @@ test('★ 0.19.29 Team：每列的模型选择必须四跳齐全（渲染 → �
 
   // ④ 后端已有该形参：本改动**不新增后端路径**（用户要求别动真实桥接 web 端）。
   const wc = fs.readFileSync(path.join(root, 'lib', 'web-control.js'), 'utf8');
-  assert.match(wc, /sendTurn\(sessionKey, promptText, \{ fresh, model: body\?\.model \}\)/,
-    'POST chat 必须本来就把 body.model 交给 sendTurn（本改动只接线，不改后端）');
+  assert.match(wc, /sendTurn\(sessionKey, promptText, \{[\s\S]{0,160}?model: body\?\.model/,
+    'POST chat 必须把 body.model 交给 sendTurn（本改动只接线，不改后端）');
 
   // 换站点必须清掉模型（模型清单按站点分组，留着旧 id 会发不动）。
   assert.match(body, /const setColSite = \(key, siteId\) => \{[\s\S]{0,200}?modelId: ''/,
@@ -278,6 +289,57 @@ test('★ 0.19.29 Team：每列的模型选择必须四跳齐全（渲染 → �
   const setModel = body.slice(body.indexOf('const setColModel = '), body.indexOf('const setColModel = ') + 400);
   assert.ok(!/sessionKey: ''|messages: \[\]/.test(setModel),
     '换模型不得清空会话或消息 —— 否则「同一段上下文下比较两个模型」这个用法就没了');
+});
+
+/**
+ * ★ 0.19.30（用户第 2 点）：**模式切换**必须四跳齐全，不能只画一个控件。
+ *
+ * 用户原话（逐字）：「『并列』中每列的对话框改为：官方原生的对话框：保留完整的
+ * 切换模式，模型显示项目等完整能力/UI！直接照抄！」
+ *
+ * 官方 `.uV2eYG_modes` 那两位放的是权限/Plan 两个槽。本插件三列走**网页控制面**，
+ * 桥端既没有「权限」也没有「Plan」，画上去就是撒谎。桥端真正有、且逐字对得上
+ * 「模式切换」的是 `thinkMode`（'auto'|'on'|'off'）。
+ *
+ * 这条判据防的是「把类名改了、控件画了、后端没接线」——那是最像完成、实际最坑
+ * 的一种假修复（界面选得动、服务端收下、生成时不生效，全程无声）。
+ * 因此四跳缺一不可：
+ *   ① 渲染：`.modes` 组里有一个**受控**的选择器；
+ *   ② 下发：选中的值随请求发出；
+ *   ③ 控制面：`POST chat` 把它交给 `sendTurn`（此前正是断在这一跳）；
+ *   ④ 驱动：`sendTurn` 本来就有这个形参（本改动不新增后端能力）。
+ */
+test('★ 0.19.30 Team：模式切换必须四跳齐全（渲染 → 下发 → 控制面 → 驱动已有）', () => {
+  const raw = clientSrc();
+  const body = compareBody(raw);
+  const wc = fs.readFileSync(path.join(root, 'lib', 'web-control.js'), 'utf8');
+  const drv = fs.readFileSync(path.join(root, 'lib', 'browser-driver.js'), 'utf8');
+
+  // ① 渲染：`.modes` 组里的受控选择器（改的是**本列**）。
+  assert.match(body, /className: 'hwb-col-composer-modes'/,
+    '必须有官方 .uV2eYG_modes 那一位的模式切换组');
+  assert.match(body, /onChange: \(e\) => setColThink\(c\.key, e\.target\.value\)/,
+    '模式切换必须受控且只改本列 —— 画一个改不动的控件就是撒谎');
+  // 档位必须与驱动端的三态逐字一致，不得自造第四个值。
+  for (const v of ['auto', 'on', 'off']) {
+    assert.ok(new RegExp("id: '" + v + "'").test(body),
+      "档位必须包含驱动端真实支持的 '" + v + "'（不得自造驱动不认的值）");
+  }
+
+  // ② 下发：只在非默认时才带（'auto' 是出厂态，不带它请求体与上一版逐字相同）。
+  assert.match(body, /\.\.\.\(col\.thinkMode && col\.thinkMode !== 'auto' \? \{ thinkMode: col\.thinkMode \} : \{\}\)/,
+    '选中的思考模式必须随 api(chat) 下发 —— 选了不发就是假功能');
+
+  // ③ 控制面：必须真的交给 sendTurn。这一跳此前是断的。
+  assert.match(wc, /sendTurn\(sessionKey, promptText, \{[\s\S]{0,120}?thinkMode: body\?\.thinkMode/,
+    'POST chat 必须把 thinkMode 交给 sendTurn —— 否则界面选得动、生成时不生效（静默失败）');
+
+  // ④ 驱动本来就有这个形参（本改动只接线，不新增后端能力）。
+  assert.match(drv, /async function sendTurn\(key, message, \{[^}]*thinkMode[^}]*\} = \{\}\)/,
+    'browser-driver 的 sendTurn 必须本来就有 thinkMode 形参（本改动不新增后端路径）');
+  // 驱动认的取值就是那三态：未知值一律退回默认，绝不按真处理。
+  assert.match(drv, /thinkMode === 'on' \? true : thinkMode === 'off' \? false : null/,
+    '驱动的三态判定必须保持原样（本改动不碰它的语义）');
 });
 
 /**
@@ -345,21 +407,32 @@ test('★ 0.19.29 Team：列宽上下限取自官方常量，放不下时左右�
   // viewport×0.7（1440 下右栏最宽 1008），中间区只剩 168px，比下限还小 ⇒ 上下限
   // 整体翻转、列宽被夹成恒定小值、切换按钮永不出现。这条判据就是那次修正的钉子。
   for (const [name, value] of [
-    ['SIDEBAR_MAX', 420], ['RIGHTBAR_MIN', 300],
+    ['SIDEBAR_MAX', 420], ['SIDEBAR_MIN', 264], ['RIGHTBAR_MIN', 300],
     ['OFFICIAL_CONTENT_MAX', 920], ['OFFICIAL_CARD_PAD', 32],
   ]) {
     assert.ok(new RegExp('const ' + name + ' = ' + String(value).replace('.', '\\.') + ';').test(body),
       name + ' 必须逐字等于官方常量 ' + value + '（来自 ui-layout 与 ConversationRoot）');
   }
-  // 下限 = 左栏拉最宽 + 右栏拉最窄 ⇒ 中间区最窄。
-  assert.match(body, /viewportW - SIDEBAR_MAX - RIGHTBAR_MIN/,
-    '列宽下限必须由「左栏最宽 + 右栏最窄」推出（= 中间区最窄）');
-  // 上限 = 官方完整最宽 = 内容 920 + 卡片余量 32。
+  assert.ok(/const RIGHTBAR_MAX_RATIO = 0\.7;/.test(body),
+    '右栏上限比例必须逐字等于官方 ui-layout 的 0.7');
+
+  // ── 上下限：左右栏各取**相反**极值 ────────────────────────────────────────
+  //
+  // 用户原话：「会话框最小就是右侧和左侧栏目拉到最小距离……最大一样最多是左右
+  // tab 最大距离」。即：
+  //   下限 = 左右栏都拉到**最大**时中间剩的宽（中间区**最窄**）
+  //   上限 = 左右栏都拉到**最小**时中间剩的宽（中间区**最宽**，再被官方 952 封顶）
+  //
+  // ⚠️ 这条判据此前钉的是「下限 = 左栏最大 + 右栏**最小**」，方向是错的：
+  // 那样算出来**视口越大下限越大**（1920 → 1200），下限反超上限、列宽被钉死，
+  // 三列永远放不下（等于每列占满整屏）。本轮修正并在此钉住正确的一对。
+  assert.match(body, /viewportW - SIDEBAR_MAX - Math\.round\(viewportW \* RIGHTBAR_MAX_RATIO\)/,
+    '列宽下限必须由「左栏最宽 + 右栏最宽(vw×0.7)」推出（= 中间区最窄）');
+  assert.match(body, /viewportW - SIDEBAR_MIN - RIGHTBAR_MIN/,
+    '列宽上限必须由「左栏最窄 + 右栏最窄」推出（= 中间区最宽）');
+  // 上限 = 官方完整最宽 = 内容 920 + 卡片余量 32（再与「中间区最宽」取小）。
   assert.match(body, /OFFICIAL_CONTENT_MAX \+ OFFICIAL_CARD_PAD/,
     '列宽上限必须是官方完整最宽（内容 920 + 卡片余量 32）');
-  // 旧的反向公式必须消失 —— 留着它就是把那次修正退回去。
-  assert.ok(!/SIDEBAR_MIN|RIGHTBAR_MAX_RATIO/.test(body),
-    '不得再出现「左栏最窄 + 右栏最宽」那套反向常量（那是被实测否掉的第一版）');
   // 夹取顺序：上限赢（视口很大时下限会超过上限，此时「不超过官方最宽」是硬约束）。
   assert.match(body, /Math\.min\(colWidthMax, Math\.max\(colWidthMin, officialDefault\)\)/,
     '夹取顺序必须是 min(上限, max(下限, 默认)) —— 让上限在冲突时赢');
@@ -389,6 +462,24 @@ test('★ 0.19.29 Team：列宽上下限取自官方常量，放不下时左右�
   // 按钮位置按用户要求贴中间区左右边缘、垂直居中。
   assert.match(raw, /\.hwb-compare-pan\{position:absolute;top:50%;transform:translateY\(-50%\)/,
     '左右按钮必须绝对定位在中间区左右边缘并垂直居中');
+
+  // ── 0.19.31（用户 2026-09-27 原话）：「面板透明？--这个用在并发中面板一直悬浮的左右
+  //     按键上，然后这个面板改为和 dsh 官方别的胶囊面板同步的不透明」──────────────
+  //
+  // 判据成对，缺一条都能过掉一半的真缺陷：
+  //   · 只测「底色是 specific-menu」→ 放过「常态 opacity:0，根本看不见」；
+  //   · 只测「常态 opacity:1」→ 放过「底色还是那支发虚的专用色」。
+  assert.match(raw, /\.hwb-compare-pan\{[^}]*background:var\(--dsw-specific-menu\)/,
+    '左右按钮底色必须走官方胶囊面板同款 --dsw-specific-menu（用户：和官方别的胶囊面板同步）');
+  assert.match(raw, /\.hwb-compare-pan\{[^}]*backdrop-filter:var\(--dsw-menu-backdrop-filter\)/,
+    '底色为 specific-menu 的高层级表面必须同时上官方 menu backdrop-filter（两者同进同出）');
+  assert.match(raw, /\.hwb-compare-pan\{[^}]*opacity:1/,
+    '常态必须 opacity:1 —— 用户要的是「面板一直悬浮」，不是「hover 才现身」');
+  // 旧形态必须真的没了：靠视口 hover 才现形的规则、以及那支发虚的 input-major 底色。
+  assert.ok(!/\.hwb-compare-viewport:hover \.hwb-compare-pan/.test(raw),
+    '不得再靠「鼠标进视口才现形」—— 触屏/键盘路径根本等不到这一刻');
+  assert.ok(!/\.hwb-compare-pan\{[^}]*background:var\(--dsw-specific-input-major/.test(raw),
+    '左右按钮不得再用 --dsw-specific-input-major 当底色（那是输入框专用色，不是胶囊面板色）');
 });
 
 /**
@@ -558,8 +649,27 @@ test('★ 0.19.22 Team：布局与对话框必须照抄官方（不被原生挤 
     '卡片底色必须用官方的 --dsw-specific-input-major');
   assert.match(css, /\.hwb-col-composer-card\{[^}]*box-shadow:var\(--dsw-elevation-soft/,
     '卡片投影必须用官方的 --dsw-elevation-soft');
-  assert.match(css, /\.hwb-col-composer-input\{[^}]*min-height:36px[^}]*max-height:var\(--dsh-composer-text-max-height/,
-    '文本面必须 36px 起、以官方的 --dsh-composer-text-max-height 封顶');
+  // 官方把「36px 起」放在 `.uV2eYG_input`，把「336px 封顶 + 滚动」放在 `.uV2eYG_scroll`
+  // ——**两个不同的盒子**。本插件照这个分层：文本面 36px 起，滚动盒封顶。
+  assert.match(css, /\.hwb-col-composer-input\{[^}]*min-height:36px/,
+    '文本面必须 36px 起（官方 .uV2eYG_input 的 docked floor）');
+  assert.match(css, /\.hwb-col-composer-scroll\{[^}]*max-height:var\(--dsh-composer-text-max-height/,
+    '滚动盒必须以官方的 --dsh-composer-text-max-height 封顶（官方 .uV2eYG_scroll）');
+  // 官方 `.uV2eYG_placeholder` 是**独立元素**，不是 textarea 的 placeholder 属性
+  //（官方文本面是 contenteditable，没有那个属性）。属性写法会与独立元素同时显示。
+  assert.match(css, /\.hwb-col-composer-placeholder\{/, '必须有官方的独立占位元素');
+  assert.ok(!/placeholder: '向 '/.test(body),
+    '文本面不得再用 placeholder **属性** —— 官方是独立元素，两处同时显示一眼就不是官方那个');
+  // 官方 `.uV2eYG_add`：28px 圆形图标按钮。
+  assert.match(css, /\.hwb-col-composer-add\{[^}]*width:28px;height:28px[^}]*border-radius:999px/,
+    '工具栏左侧必须有官方那枚 28px 圆形 .add 按钮');
+  // 官方 `.uV2eYG_modes` 模式切换（用户第 2 点点名要的「完整的切换模式」）。
+  assert.match(css, /\.hwb-col-composer-modes\{/, '必须有官方的 .modes 模式切换组');
+  assert.match(body, /hwb-col-composer-modes[\s\S]{0,400}?onChange: \(e\) => setColThink\(c\.key, e\.target\.value\)/,
+    '模式切换必须是**真的受控**（改得动本列），不是画一个摆件');
+  // 官方 `.uV2eYG_row` 是 inline-size 容器（靠它做窄卡片降级）。
+  assert.match(css, /\.hwb-col-composer-row\{[^}]*container-type:inline-size/,
+    '工具栏行必须是 inline-size 容器（官方 .uV2eYG_row）');
   assert.match(css, /\.hwb-col-composer-send\{[^}]*width:34px;height:34px[^}]*border-radius:999px[^}]*background:var\(--dsw-alias-button-info-fill/,
     '发送按钮必须是官方那枚 34px 圆形主按钮');
   // 三列的对话框必须**各一个**（用户要的 3 者独立不变），而不是合成一个。

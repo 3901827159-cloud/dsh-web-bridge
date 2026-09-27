@@ -305,21 +305,38 @@ test('waitStatDetailRows：空账本不给行（面板不留 0 ms 噪音）', ()
   assert.deepEqual(waitStatDetailRows({ session: emptyWaitStats() }), []);
 });
 
-test('waitStatDetailRows：本会话与累计同屏，且包含会话占比与平均等待时长占比', () => {
+test('waitStatDetailRows：行序按用户指定——两个占比相邻、两个轮次相邻、累计压最低栏', () => {
+  // 用户原话（0.19.35）：「『本次会话等待发送』也删除，和顶部重复无意义，『本次会话
+  // 占比』和『平均会话等待时长占比』两栏放在上下近处，『本次会话轮次』和『累计已统计
+  // 会话轮次（加上会话轮次！）』放一起上下两栏，『累计等待发送』放最低栏」。
+  //
+  // 这条钉的是**顺序**，不是「包含哪些行」——顺序正是用户这一轮点名要的东西，
+  // 只断言集合会让「把行按字母排」也算通过。
   const rows = waitStatDetailRows({
     session: { totalWaitMs: 3000, totalDurationMs: 7000, durationTurns: 2, turns: 2, waitedTurns: 1, rateLimitRetries: 1 },
     total: { totalWaitMs: 20_000, totalDurationMs: 60_000, durationTurns: 9, turns: 9, waitedTurns: 4 },
     metrics: { gapTargetMs: 5000, sincePrevSendMs: 9400 },
   });
   const labels = rows.map(r => r.label);
-  assert.ok(labels.includes('本次会话等待发送'));
-  assert.ok(labels.includes('本次会话占比'));
-  assert.ok(labels.includes('累计等待发送'));
-  assert.ok(labels.includes('平均会话等待时长占比'));
-  assert.equal(rows.find(r => r.label === '本次会话等待发送').value, '3 秒');
+  // ① 与面板标题重复的那一行必须消失。
+  assert.ok(!labels.includes('本次会话等待发送'), '「本次会话等待发送」与面板标题重复，必须删除');
+  // ② 两个占比上下相邻。
+  const iSr = labels.indexOf('本次会话占比');
+  const iTr = labels.indexOf('平均会话等待时长占比');
+  assert.ok(iSr >= 0 && iTr >= 0, '两个占比行都必须出现');
+  assert.equal(iTr, iSr + 1, '两个占比必须上下相邻，实得：' + labels.join(' / '));
+  // ③ 两个轮次上下相邻（用户点名「加上会话轮次」）。
+  const iSt = labels.indexOf('本次会话轮次');
+  const iTt = labels.indexOf('累计已统计会话轮次');
+  assert.ok(iSt >= 0 && iTt >= 0, '两个轮次行都必须出现');
+  assert.equal(iTt, iSt + 1, '两个轮次必须上下相邻，实得：' + labels.join(' / '));
+  // ④ 累计总量压在最底栏。
+  assert.equal(labels[labels.length - 1], '累计等待发送', '「累计等待发送」必须在最低栏，实得：' + labels.join(' / '));
+  // 值仍逐项可核对（行序变了，口径没变）。
   assert.equal(rows.find(r => r.label === '本次会话占比').value, '30%');
   assert.equal(rows.find(r => r.label === '累计等待发送').value, '20 秒');
   assert.equal(rows.find(r => r.label === '平均会话等待时长占比').value, '25%');
+  assert.equal(rows.find(r => r.label === '累计已统计会话轮次').value, '9 轮');
   assert.equal(rows.find(r => r.label === '距上次发送').value, '9 秒');
   assert.equal(rows.find(r => r.label === '发送间隔目标').value, '5 秒');
   // 平均值只在累计里、且只在等待过时给（分母为 0 不许除）。

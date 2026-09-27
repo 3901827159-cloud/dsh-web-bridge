@@ -76,7 +76,11 @@ export function createRelay(options = {}) {
   let httpServer = null;
   let started = false;
   let startError = null;
-  let consent = false;      // loaded once from the durable local consent record
+  // 0.19.31（用户 2026-09-27：「连接自动化设为默认开启」）：首次运行即为**开**。
+  // 仍是「可关」的：只有显式关过（落盘记录里 `accepted === false`）才回落成关，
+  // 因此下面的 loadConsent 只在记录里**确实写了布尔值**时才覆盖本默认值。
+  // 这条默认只影响「从未做过选择」的机器；已有记录的行为逐字不变。
+  let consent = true;      // default-on; an explicit stored choice still wins
   let lastError = '';
   let metrics = null;
 
@@ -84,7 +88,9 @@ export function createRelay(options = {}) {
     if (!cfg.consentStorePath) return;
     try {
       const raw = JSON.parse(fs.readFileSync(cfg.consentStorePath, 'utf8'));
-      consent = raw?.accepted === true;
+      // 只有记录里**明确写了布尔值**才覆盖默认开启：文件损坏/字段缺失/旧格式
+      // 都保持默认（旧写法 `raw?.accepted === true` 会把「没写」判成「关」）。
+      if (typeof raw?.accepted === 'boolean') consent = raw.accepted;
     } catch { /* first run or unreadable store */ }
   }
 

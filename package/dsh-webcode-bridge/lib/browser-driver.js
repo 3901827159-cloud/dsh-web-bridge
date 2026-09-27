@@ -41,6 +41,27 @@ import { fileURLToPath } from 'node:url';
 // 重建驱动」把前一个实例的锁误判成别人的而拒绝自己。
 const PROCESS_STARTED_AT = Date.now();
 
+/**
+ * Node 侧的等待原语（0.19.33）。
+ *
+ * 存在的理由是一次真机缺陷：`runTurn` 的续聊重试分支里写了 `await sleep(1500)`，
+ * 而 `sleep` 只在本文件的 `DOM_CAPTURE` **注入模板串**里定义过（那是喂给浏览器
+ * `page.evaluate` 执行的代码，与 Node 模块作用域毫无关系）。于是那一行必然抛
+ * `ReferenceError: sleep is not defined`，被 `runTurn` 的 catch 当成普通失败 ——
+ * 用户看到的是「这一轮模型整个没回复」，而不是「重试了一次仍然失败」。
+ *
+ * 这与同文件记录的 `nav is not defined` 是**同型**缺陷（跨作用域引用），区别只是
+ * 这次被引用的名字恰好来自模板串而不是另一个函数。`test/driver-scope.test.mjs`
+ * 是本缺陷的常驻护栏；它对模板串的建模失真也已一并修掉（见该文件头注）。
+ *
+ * 为什么叫 `delay` 而不是 `sleep`：模块里不能再出现 `sleep` 这个名字，否则
+ * 护栏的回归钉（「`runTurn` 体内不得引用 `sleep`」）与「Node 侧有一个同名 helper」
+ * 会互相打架，读代码的人也无从一眼分辨哪个是浏览器的、哪个是 Node 的。
+ */
+function delay(ms) {
+  return new Promise((resolve) => { setTimeout(resolve, ms); });
+}
+
 const decoderPath = path.join(path.dirname(fileURLToPath(import.meta.url)), 'decoder.js');
 // SSE 原始帧抓包目录（WEBCODE_SSE_DEBUG=<dir> 时启用，仅用于新站点解码器取证）。
 const SSE_DEBUG_DIR = process.env.WEBCODE_SSE_DEBUG || null;
@@ -532,8 +553,20 @@ export const ATTACH_FORBIDDEN_SITES = Object.freeze(new Set());
  * 这里**只做上限收紧**：配置为 0（用户显式关闭附件）时一律 inline，绝不因为本表
  * 把附件重新打开；配置为 60_000 且站点在本表内时取 `min(60_000, 8_000)`。
  * 未列出的站点逐字维持旧行为（能力边界：本次只改 deepseek）。
+ *
+ * ## kimi 加入（真机取证，2026-09-25）
+ *
+ * 与 deepseek 同构的事故形态：kimi 轮 38,807 字符（navTrace `messageChars:38807`）
+ * 在全站默认 60,000 之下 ⇒ `under-limit` ⇒ 全文 inline 灌进 contenteditable
+ * 输入框（`div.chat-input-editor`，providers.js:277）——而 kimi 输入框实测上限
+ * ~20K，超限部分**静默丢失**，模型只见前半，会话上下文被无声截断。
+ * `assertContextBudget` 拦不住它：kimi k3 声明 `context: 1_000_000`（providers.js:310），
+ * 38.8K 字符 ≈ 38.8K token 远未超限——该闸对比的是**声明窗口**，不是输入框 DOM 上限。
+ * kimi 的附件要件齐备（`attachSelector: "input[type='file']"`、Connect-RPC 解码器
+ * 已在），与 0.19.11 deepseek 修复逐字同构地取 8,000：真实会话首轮普遍 ≥ 20k，
+ * 收紧后全部走附件，输入框里只留指针文本。
  */
-export const SITE_ATTACH_INLINE_LIMIT = Object.freeze({ deepseek: 8_000 });
+export const SITE_ATTACH_INLINE_LIMIT = Object.freeze({ deepseek: 8_000, kimi: 8_000 });
 
 /**
  * 把「调用方配置的阈值」与「站点上限」合成本次实际使用的阈值（纯函数，可断言）。
@@ -1256,7 +1289,15 @@ export function createBrowserDriver(options = {}) {
       // 0.16.3：**当前生效**的投递形态（每次读都现算，见 promptTransportNow）。
       // 放在 status 上，是因为设置面要显示「生效值」——只显示用户选了什么，
       // 会出现「设置页写纯文本、实际走附件」这种无从发现的偏差。
-      promptTransport: promptTransportNow(),
+      //
+      // 0.19.32：这一格现在是**本实例站点合并后**的生效值（站点档优先），与真正投递时
+      // 判据用的是同一个函数、同一个入参——读数与行为不可能分叉。
+      promptTransport: promptTransportNow(siteId),
+      // 站点级覆盖的**存在性**（`null` = 本站点没有覆盖、跟随全局）。
+      // 为什么单独报一格：面板要能回答「这个站点到底是自己设的，还是跟随全局的」——
+      // 只有合并后的生效值时，用户看到的永远是一个值，无从判断覆盖是否真的存下了。
+      // 与 sendGapMsBySlot 的读数口径一致：`null` 与具体值可区分。
+      promptTransportSite: promptTransportSiteOverride(siteId),
       // 0.16.9：站点附件禁令的**可核对读数**。0.16.7 加了禁令却没在任何投影里出现，
       // 于是「修复生效没有」在面板与 /status 上都看不出来（attach-status 反而还在
       // 承诺超阈值走附件）。读数是站点事实，放在 status 上与 promptTransport 并列。
@@ -2457,13 +2498,61 @@ export function createBrowserDriver(options = {}) {
    * 非法值一律当 `'attach'`：投递形态只有两个合法取值，写错的配置必须退化成
    * 默认行为，而不是让投递直接失败（同 promptTransportPlan 里 attachEnabled
    * 的取向）。读取函数抛错也一样退化——设置服务不可用不该拦住一轮消息。
+   *
+   * ## 0.19.32：站点级覆盖（与「发送间隔」逐字同构的一条链）
+   *
+   * 用户要求「提示词投递：给每个模型站点都做到和『发送间隔（全局）』一样的逻辑：
+   * 全局设置一个，但是针对每个单独网站设置能够单独设置」。发送间隔那条链是
+   * `accounts.sendGapForSlot`：**槽显式值 → 站点级键 → 全局值**。这里逐字照搬成
+   * **站点显式值 → 全局设置 → 插件 config → 'attach'**。
+   *
+   * 为什么不在驱动里查 `promptTransportBySite[siteId]` 而要多一个读取函数：驱动读的是
+   * **本实例的站点**，而设置命名空间的形状（哪个键、怎么归一化）属于控制面。驱动只认
+   * 「给我一个取值函数」这一条契约，于是「站点级键的归一化规则」在写入侧（web-control）
+   * 只有一份，这里不再抄第二遍。
+   *
+   * 兼容性硬约束：没有 `getPromptTransportForSite` 时必须**逐字**走旧的
+   * `getPromptTransport`。既有护栏（test/settings-transport.test.mjs ③）正是用后者钉
+   * 「每次现读、不是构造期快照」，那条语义不能因为新增一档而改变。
+   *
+   * @param {string|null} siteId 本实例的站点；缺省（老调用点）只读全局那一档
    */
-  function promptTransportNow() {
+  /**
+   * 本站点**显式**的投递形态覆盖；没有覆盖时返回 `null`（跟随全局）。
+   *
+   * 只回答「有没有覆盖、覆盖成什么」，不做回落——回落是 `promptTransportNow` 的事。
+   * 拆成两个函数是因为它们的**消费者不同**：`promptTransportNow` 的返回值喂给判定层
+   *（决定这一轮走附件还是纯文本），本函数的返回值喂给读数层（面板要能显示「跟随全局」
+   * 与「已覆盖为纯文本」两种状态，而这两种状态合并后就只剩一个值，看不出区别）。
+   *
+   * 非法值一律视同「没有覆盖」（返回 `null`）而不是返回一个非法值：设置文件可手改，
+   * 写错的配置只许退化成「跟随全局」，不许变成第三种谁也没定义过的口径。
+   */
+  function promptTransportSiteOverride(siteId) {
+    if (!siteId || typeof options.getPromptTransportForSite !== 'function') return null;
+    try {
+      const raw = options.getPromptTransportForSite(siteId);
+      return raw === 'inline' || raw === 'attach' ? raw : null;
+    } catch { return null; }
+  }
+
+  function promptTransportNow(siteId = null) {
     let raw;
     try {
-      raw = typeof options.getPromptTransport === 'function' ? options.getPromptTransport() : options.promptTransport;
+      if (siteId && typeof options.getPromptTransportForSite === 'function') {
+        raw = options.getPromptTransportForSite(siteId);
+      } else {
+        raw = typeof options.getPromptTransport === 'function' ? options.getPromptTransport() : options.promptTransport;
+      }
     } catch { raw = options.promptTransport; }
-    return raw === 'inline' ? 'inline' : 'attach';
+    // 站点档与全局档都只认这两个字面量；其余（含读取函数抛错后的 undefined）一律
+    // 落回全局那一档，全局也不合法才退到 'attach'。
+    if (raw === 'inline' || raw === 'attach') return raw;
+    let global;
+    try {
+      global = typeof options.getPromptTransport === 'function' ? options.getPromptTransport() : options.promptTransport;
+    } catch { global = options.promptTransport; }
+    return global === 'inline' ? 'inline' : 'attach';
   }
 
   /**
@@ -2740,10 +2829,25 @@ export function createBrowserDriver(options = {}) {
         //
         // 诊断信息改用本作用域真实持有的 `target`（本轮要导航回去的会话 URL）：
         // 同样是可复核的现场，且不依赖任何外层变量。
+        //
+        // ⚠ 同族的第二例（0.19.33 修）：等待重试间隔原先写的是 `await sleep(1500)`，
+        // 而 `sleep` 只存在于本文件的 `DOM_CAPTURE` **注入模板串**里（那是浏览器侧
+        // 执行的代码），Node 模块作用域没有这个绑定 ⇒ 这一行必然抛
+        // `ReferenceError: sleep is not defined`。触发条件与上面 `nav` 那一例**完全
+        // 相同**（`attempt=0` 不进这一支，只有第一次导航就没 ready 才踏进来，
+        // 而那正是页面冷加载慢的常见现场），所以用户看到的现象也逐字相同：
+        // 「GLM 这一轮整个没回复」。
+        //
+        // 为什么护栏第一次没抓到它：`test/driver-scope.test.mjs` 的绑定表是用**原始
+        // 源码**上的正则建的，模板串里那句 `const sleep = (ms) => …` 因此被当成了
+        // 一个真实的模块级绑定，扫描器对 `sleep` 彻底瞎了（正是该文件头注里写明的
+        // 「只会漏报」那一个宽松方向）。该文件的模板串建模与回归钉本轮一并修好。
+        //
+        // 现在用模块级的 `delay`（Node 侧唯一等待原语）。
         for (let attempt = 0; attempt < 2 && !ready; attempt += 1) {
           if (attempt > 0) {
             warn(`resume navigation not ready — retrying once (site=${siteId}, target=${safeUrl(target)})`);
-            await sleep(1500);
+            await delay(1500);
           }
           try {
             // 「已在目标会话上」判定要用 **cid/会话 id**，不能用 URL 字符串前缀。
@@ -3009,7 +3113,8 @@ export function createBrowserDriver(options = {}) {
           // 设置面的「投递形态」开关（0.16.3）：'inline' = 用户显式要求纯文本，
           // 逐字回到旧行为；其余一律 'attach'（是否真的走附件仍由上面的阈值决定）。
           // 现读而不是取构造函数快照，理由见 promptTransportNow。
-          transport: promptTransportNow(),
+          // 0.19.32：传本实例站点，于是站点级覆盖在这一条判据里生效（与 status 同源）。
+          transport: promptTransportNow(siteId),
           // cfg.attachMaxChars 由 index.js 透传（task-1 / lib/index.js）。
           // 未配置时这里是 undefined，**必须显式转成 null**再传：undefined 在
           // promptTransportPlan 里是「取默认 1_500_000」，而缺配置时的正确行为是

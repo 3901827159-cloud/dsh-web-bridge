@@ -13,7 +13,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { appendReplyLog, DEFAULT_REPLY_LOG_DIR } from '../lib/reply-log.js';
+import { appendReplyLog } from '../lib/reply-log.js';
 
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'webcode-reply-log-'));
 const cleanup = (d) => fs.rmSync(d, { recursive: true, force: true });
@@ -68,12 +68,55 @@ test('失败静默：目录不可写（路径被文件占用）返回 null 且�
 });
 
 test('测试进程守卫：NODE_TEST_CONTEXT 下未显式给目录时不写默认位置', () => {
-  // 本文件就在 node --test 下运行（NODE_TEST_CONTEXT 必然已设），不传 opts.dir
-  // 必须返回 null；若实现回归，这里会真的往 ~/.dsh/logs 写入测试噪声。
-  assert.ok(process.env.NODE_TEST_CONTEXT, '前提：本用例跑在测试进程里');
+  // 本用例的守卫只在 NODE_TEST_CONTEXT 已设时才有意义（node --test 通道）；
+  // 直跑（node test/x.mjs，调试用）没有这个 env——前提不成立时跳过守卫断言，
+  // 但仍验证「不显式给目录」这条路径本身可走（写入落到默认目录或返回 null，
+  // 两种都不抛错——0.19.30 起直跑不再把前提当硬断言拦整份测试）。
+  if (!process.env.NODE_TEST_CONTEXT) {
+    const file = appendReplyLog('should not be written', { calls: 0 });
+    assert.ok(file === null || typeof file === 'string', '无 env 直跑：守卫路径不抛错即可');
+    return;
+  }
   const file = appendReplyLog('should not be written', { calls: 0 });
   assert.equal(file, null, '测试进程 + 无显式目录必须 no-op');
-  assert.ok(!fs.existsSync(path.join(DEFAULT_REPLY_LOG_DIR, 'webcode-bridge-replies.log')
-    ) || !fs.readFileSync(path.join(DEFAULT_REPLY_LOG_DIR, 'webcode-bridge-replies.log'), 'utf8').includes('should not be written'),
-    '默认日志文件里不得出现本用例的写入');
+  // 契约就到此为止：**返回 null 就等于没有落盘**，这正是本用例要钉的那条守卫。
+  //
+  // 为什么删掉了原先那条「默认日志文件里不得出现本用例写入」的内容断言（2026-09-27）：
+  // 它读的是**生产日志**（~/.dsh/logs/webcode-bridge-replies.log），而那份文件同时是桥的
+  // **原始回复留痕**——正文里出现 `should not be written` 这句话完全合法。本机实测确已发生：
+  // 一条被 dump 的模型回复逐字引用了本测试文件的源码（该文件第 25839 行），断言因此失败。
+  // 关键读数：**HEAD 版本跑同一个用例同样失败** ⇒ 它与本轮改动无关，是一条**环境相关**的假红。
+  // 假红比漏报更坏（doc/comment-style.md §9.1 第 1 条）：它会让整份测试在某台机器上永远红着，
+  // 读者于是学会忽略它。真正的守卫由上一行断言承担；内容比对这一层判不了「谁写的」，
+  // 留着只会再次误伤，因此按「修判据而不是绕过」的同一纪律删掉这一条。
+});
+
+test('0.19.30 按站点分文件：meta.siteId 时落 <site> 段文件，头行带 site= 字段', () => {
+  const dir = tmp();
+  try {
+    const file = appendReplyLog('hi', { siteId: 'glm', calls: 1 }, { dir, now: NOW });
+    assert.equal(file, path.join(dir, 'webcode-bridge-replies.glm.log'));
+    const content = fs.readFileSync(file, 'utf8');
+    assert.ok(content.includes('site=glm'), '头行带站点字段（时间之后、session 之前）');
+    assert.ok(content.includes('session=-'), '无会话标识仍记 session=-');
+    assert.ok(!fs.existsSync(path.join(dir, 'webcode-bridge-replies.log')), '默认名文件不被创建');
+  } finally { cleanup(dir); }
+});
+
+test('siteId 安全化：非法字符剔除、空值回落默认文件名', () => {
+  const dir = tmp();
+  try {
+    const a = appendReplyLog('a', { siteId: 'Deep_Seek!.exe', calls: 0 }, { dir });
+    assert.equal(a, path.join(dir, 'webcode-bridge-replies.deepseekexe.log'));
+    const b = appendReplyLog('b', { calls: 0 }, { dir });
+    assert.equal(b, path.join(dir, 'webcode-bridge-replies.log'));
+  } finally { cleanup(dir); }
+});
+
+test('显式 opts.basename 胜过站点分文件（测试通道不受 siteId 影响）', () => {
+  const dir = tmp();
+  try {
+    const file = appendReplyLog('x', { siteId: 'glm', calls: 0 }, { dir, basename: 'custom.log' });
+    assert.equal(file, path.join(dir, 'custom.log'));
+  } finally { cleanup(dir); }
 });

@@ -22,12 +22,17 @@ import { buildPromptVariants, buildSitePromptRows } from './prompt-variants.js';
 // 站点提示词文件的**唯一路径来源**（0.16.38）：设置页要「指向本地提示词文件」，
 // 路径就必须与真正落盘/读回用的是同一个函数——前端自己拼路径，迟早与落盘分叉。
 import { sitePromptPath, DEFAULT_PROMPT_STORE_DIR } from './prompt-store.js';
-import { composerWaitLine, composerWaitPillLabel, waitStatDetailRows, waitStatRows, waitStatBlocks, formatDuration, formatElapsed, sanitizeWaitStats } from './wait-stats.js';
+import { composerWaitLine, composerWaitPillLabel, waitStatDetailRows, waitStatRows, waitStatBlocks, formatDuration, formatElapsed, projectedWaitMs, sanitizeWaitStats } from './wait-stats.js';
+// 注：`liveElapsedMs`（本地私有）已在 0.19.34 删除 —— 它的算法与 wait-stats 的
+// `liveWaitMs` 逐字相同，只是少加了账本累计，而面板标题现在要的正是带累计的那个数。
 import { isLoopbackHost, originMatchesHost } from './loopback.js';
 // 浏览器来源与安装（0.18.0）。与 browser-driver 读**同一份**解析逻辑，
 // 避免「驱动用一个、面板报另一个」。
 import { resolveBrowserExecutable, installBundledChromium } from './browser-runtime.js';
 import { httpFetch } from './upstream.js';
+// 更新与重启提醒（0.19.39）。检查是只读 HTTP，安装是一次 dsh CLI 调用；
+// 判据（版本比较/挑最新版）全在那个模块的纯函数里，本文件只做接线。
+import { fetchPackument, updateDecision, runInstall, PACKAGE_NAME } from './update.js';
 // 并列多会话的列身份 → 提示词（0.19.21，用户 Q5 的沙箱适配）。
 import { withColumnGuidance, normalizeColumnContext } from './column-context.js';
 import { writeColumnArtifact, fencedBlocks, ColumnFsDenied } from './column-fs.js';
@@ -48,6 +53,18 @@ const MAX_BODY_BYTES = 256 * 1024;
  * 并发的第二次调用复用同一次进行中的安装，装完自动清空。
  */
 let browserInstallPromise = null;
+
+/**
+ * 更新检查的**内存**缓存（0.19.39）。
+ *
+ * 为什么需要：设置页每次打开都会读 `GET update-status`，而它要打一次 npm
+ * registry。缓存让「打开设置页」不至于每次都等一次网络（registry 慢的时候面板
+ * 首屏会卡）。10 分钟是「用户装完回来能看到新状态」与「不重复打 registry」的取中。
+ *
+ * 只存内存、不落盘：重启进程自然重查一次——而那正是「装完要重启」之后该有的行为。
+ */
+let updateCache = null;
+const UPDATE_CACHE_MS = 10 * 60 * 1000;
 
 /**
  * 「导入登录态」允许的源 profile 根目录（0.14.4）。
@@ -140,6 +157,11 @@ export function createWebControl(deps = {}) {
     logger = console,
     presetInfo = null,  // () → { prompt, model, tools, at } — last first-turn text
     settingsStore = null, // { get: () => ({extraPrompt}), set: (value) => ({extraPrompt}) }
+    // () → number：设置**修订号**（0.19.33）。由 configManager（唯一的落盘点）注入，
+    // 每次 set() 自增。它随下面几条读数路由一起回给客户端，作为「设置变了 ⇒ 该重拉」
+    // 的服务端权威判据。缺省 null 时路由回 null，客户端据此退化成「只按挂载拉一次」
+    // 的旧行为——独立启动的桥与测试替身因此仍然可用，不会因为没接这一档而报错。
+    settingsRevision = null,
     contextWindowOf = null, // (model) → number — 与 resolveModel/预算闸同一个取值函数
     waitStatsOf = null,     // (sessionId?) → { total, session } — 等待发送时长累计账本
     // (sessionId?) → { team, subAgents, teamError, subAgentsError } — 真实花名册
@@ -177,6 +199,25 @@ export function createWebControl(deps = {}) {
     const requested = process.env.WEBCODE_PROMPT_STORE_DIR;
     if (requested === 'off') return 'off';
     return requested || DEFAULT_PROMPT_STORE_DIR;
+  }
+
+  /**
+   * 当前设置**修订号**（0.19.33），或 null（宿主没接这一档）。
+   *
+   * 只做两件事：调用宿主给的取值函数、把非有限值折成 null。**不缓存**——
+   * 缓存会让「面板拿到的号」与「真正落盘的号」在某个瞬间分叉，而它的全部价值
+   * 就在于「号变了 ⇒ 必须重拉」这条判据当场成立。
+   *
+   * 读取抛错同样折成 null（同 web-control 其余读取函数的取向：读数不可用
+   * 不该让整条路由 500，客户端的重拉因此退化成「只按挂载拉一次」，与旧行为
+   * 逐字相同，而不是白屏）。
+   */
+  function settingsRevisionNow() {
+    if (typeof settingsRevision !== 'function') return null;
+    try {
+      const v = Number(settingsRevision());
+      return Number.isFinite(v) ? v : null;
+    } catch { return null; }
   }
 
   /**
@@ -375,6 +416,8 @@ export function createWebControl(deps = {}) {
     // 客户端只管渲染——这样 13px 单行药丸与点击面板给出的仍是同一个数。
     const live = snap?.live || null;
     const now = Number(snap?.now) || Date.now();
+    // 面板标题右侧与药丸读**同一个**投影（账本累计 + 在途增量），因此只算一次。
+    const projectedMs = projectedWaitMs(sanitizeWaitStats(session), live, now);
     return {
       ok: true,
       total,
@@ -401,20 +444,19 @@ export function createWebControl(deps = {}) {
       // 在秒级取整下就足以让两个数不同（「3 s」与「4 s」并存）。
       label: composerWaitPillLabel({ session, metrics, live, now }),
       sessionValue: session ? formatDuration(sanitizeWaitStats(session).totalWaitMs) : '',
-      // 面板里的「正在等待」行：与药丸同一套边界（liveElapsedMs），只在在途时有。
-      liveValue: live ? formatElapsed(liveElapsedMs(live, now)) : null,
+      // 面板标题右侧那一个数（0.19.34）。
+      //
+      // 用户原话：「移除突然出现的：正在等待发送 Ns，改为实时更新面板顶部
+      // 『等待发送统计』」。旧形态里标题右侧是 sessionValue（**已落账**的本会话
+      // 累计，在途期间不动），在途那一段另起一行「正在等待发送 N 秒」——一次等待
+      // 期间面板里站着两个数，用户读到的却是那个不动的。
+      //
+      // 现在标题右侧改读 projectedValue = 账本累计 + 在途增量（与药丸同源同函数
+      // projectedWaitMs），逐秒前进；sessionValue 仍保留在载荷里（它是账本口径的
+      // 公开读数，curl 与旧前端照旧可核对），只是不再上标题。
+      projectedValue: projectedMs > 0 ? formatElapsed(projectedMs) : '',
       detailRows: waitStatDetailRows({ session, total, metrics, live, now }),
     };
-  }
-
-  /** 在途等待已过的毫秒数（与 liveWaitLabel 同一套边界，供面板显示）。 */
-  function liveElapsedMs(live, now) {
-    const startedAt = Number(live?.startedAt);
-    if (!Number.isFinite(startedAt)) return 0;
-    const baseMs = Math.max(0, Math.round(Number(live?.baseMs) || 0));
-    const endsAt = Number(live?.endsAt);
-    const ceiling = Number.isFinite(endsAt) ? endsAt : Math.max(now, startedAt);
-    return baseMs + Math.max(0, Math.min(now, ceiling) - startedAt);
   }
 
   /**
@@ -728,21 +770,34 @@ export function createWebControl(deps = {}) {
     // 相同，不会出现「面板说成功了、独立页说回落了」。
     //
     // 只读、无副作用：不上传、不发送、不写设置。
-    'GET attach-status': async () => {
+    //
+    // 0.19.32：这一格现在**按站点**回答（`?siteId=glm`）。用户要求「提示词投递：给每个
+    // 模型站点都做到和『发送间隔（全局）』一样的逻辑：全局设置一个，但是针对每个单独
+    // 网站设置能够单独设置」——面板上必须能看见「这个站点是自己设的，还是跟随全局的」，
+    // 否则站点档存没存下、生效没生效都无从核对。
+    //
+    // 不传 siteId 时逐字沿用旧行为（取驱动当前站点），既有调用方零改动。
+    'GET attach-status': async (body) => {
       const settings = settingsStore ? (settingsStore.get() || {}) : {};
-      // 与 browser-driver 的 promptTransportNow 同一判据（只有逐字 'inline' 算纯文本）：
-      // 设置面优先于插件 config，两者都没有才落到『attach』默认值。
-      const chosen = settings.promptTransport === 'inline' ? 'inline'
-        : (config.promptTransport === 'inline' ? 'inline' : 'attach');
-      const limit = Number(config.attachInlineLimitChars) > 0 ? Math.floor(Number(config.attachInlineLimitChars)) : 0;
       const st = (relay?.config?.driverStatus?.() ?? (typeof driver?.status === 'function' ? driver.status() : null)) || {};
+      const siteId = String(body?.siteId || '').trim() || st.siteId || null;
+      // 与 browser-driver 的 promptTransportNow 同一判据、同一回落链（只有逐字 'inline'
+      // 算纯文本）：**站点档 → 全局设置档 → 插件 config → 'attach'**。
+      // 这里逐字重写一遍链子而不是去驱动里问，是因为驱动只回答「**它自己**那个站点」，
+      // 而面板要能问「任意站点」（还没建驱动的站点也要能显示）。两处的一致性由
+      // test/site-prompt-transport.test.mjs 的行为断言钉住。
+      const bySite = settings.promptTransportBySite && typeof settings.promptTransportBySite === 'object' ? settings.promptTransportBySite : {};
+      const sitePick = siteId && (bySite[siteId] === 'inline' || bySite[siteId] === 'attach') ? bySite[siteId] : null;
+      const globalPick = settings.promptTransport === 'inline' ? 'inline'
+        : (config.promptTransport === 'inline' ? 'inline' : 'attach');
+      const chosen = sitePick || globalPick;
+      const limit = Number(config.attachInlineLimitChars) > 0 ? Math.floor(Number(config.attachInlineLimitChars)) : 0;
       const last = st.attachTransport || null;
       const probe = st.attachProbe || null;
       // 0.16.9：站点禁令必须在这里**说清楚**。0.16.7 让 DeepSeek 永不走附件，但本行
       // 与 lastLine 都还在按全局开关描述，于是面板对一个已经不再走附件的站点继续承诺
       // 「超过 60000 字符改走附件」——用户只能看到「附件怎么不好使了」，看不到「这里
       // 就不再走附件了」。判据取自驱动的实际站点，不重复写死站点名单。
-      const siteId = st.siteId || null;
       const attachForbidden = st.attachForbidden === true;
       const transportLine = attachForbidden
         ? '纯文本：本站点（' + siteId + '）**永不使用附件投递**——网页收得下附件但读不到内容'
@@ -752,7 +807,10 @@ export function createWebControl(deps = {}) {
           ? '纯文本：永远把正文写进输入框（附件投递已关闭）'
           : (limit > 0
             ? '附件投递（默认）：正文超过 ' + limit + ' 字符时改走附件，失败自动回落纯文本'
-            : '纯文本：附件阈值 0（附件投递已关闭）'));
+            : '纯文本：附件阈值 0（附件投递已关闭）'))
+          // 站点档命中时必须**说出来**：这一行是用户核对「我设的站点档到底生效没有」的
+          // 唯一入口，只说合并后的形态会让「跟随全局」与「本站点已覆盖」看起来一样。
+          + (sitePick ? '（本站点单独设置：' + (sitePick === 'inline' ? '纯文本' : '附件投递') + '）' : '（跟随全局）');
       let lastLine;
       if (!last) lastLine = '本会话还没触发过附件投递（正文未超过阈值）。';
       else if (last.code === 'SITE_NO_ATTACH') {
@@ -784,7 +842,9 @@ export function createWebControl(deps = {}) {
         : ((probe.ok ? '上传已确认 —— 证据 ' + probe.evidence + '（' + probe.chars + ' 字符）'
           : '未确认 —— ' + (probe.code || '未知') + '（' + probe.chars + ' 字符）')
           + '；清理 ' + (probe.cleaned ? '成功（' + probe.cleanedBy + '）' : '未完成（' + (probe.cleanupNote || probe.cleanedBy) + '）'));
-      return { ok: true, effective: chosen, limit, last, probe, transportLine, lastLine, probeLine };
+      // sitePick / siteId 一起回：面板要显示「本站点覆盖」那一行的状态，而只有
+      // `effective` 一个值时，用户无从判断覆盖是否真的存下了（同 sendGapMsBySlot 的读数口径）。
+      return { ok: true, siteId, effective: chosen, sitePick, globalPick, limit, last, probe, transportLine, lastLine, probeLine, settingsRevision: settingsRevisionNow() };
     },
     // ── 浏览器来源与安装（0.18.0）────────────────────────────────────────────
     //
@@ -938,12 +998,19 @@ export function createWebControl(deps = {}) {
       return {
         ok: true,
         ...config,
+        // 设置修订号（0.19.33）：客户端把它存下来当依赖，任何一次写入后号会前进
+        // ⇒ 面板据此重拉派生读数（提示词模板 / 再教学 / 投递形态生效值）。
+        // 缺宿主接线时是 null，与「只按挂载拉一次」的旧行为等价。
+        settingsRevision: settingsRevisionNow(),
         promptTransport: config.promptTransport === 'inline' ? 'inline' : 'attach',
         sendGapBasis: config.sendGapBasis === 'end-to-start' ? 'end-to-start' : 'send-to-send',
         // 两个站点级字典（0.16.38）：与上面同一条纪律——从未保存过时设置文件里
         // 没有这两个键，回 undefined 会让前端渲染成「加载失败」。回空对象。
         defaultModelBySite: config.defaultModelBySite && typeof config.defaultModelBySite === 'object' ? config.defaultModelBySite : {},
         extraPromptBySite: config.extraPromptBySite && typeof config.extraPromptBySite === 'object' ? config.extraPromptBySite : {},
+        // 站点级投递形态（0.19.32）：同上——从未保存过时设置文件里没有这个键，
+        // 回 undefined 会让前端渲染成「加载失败」。回空对象 = 每个站点都跟随全局。
+        promptTransportBySite: config.promptTransportBySite && typeof config.promptTransportBySite === 'object' ? config.promptTransportBySite : {},
       };
     },
     'POST settings': async (body) => {
@@ -998,6 +1065,19 @@ export function createWebControl(deps = {}) {
       if ('promptTransport' in updated) {
         updated.promptTransport = updated.promptTransport === 'inline' ? 'inline' : 'attach';
       }
+      // 站点级投递形态（0.19.32）：与上面全局档同一条纪律，只是**键多一层归一化**
+      //（同 sendGapMsBySlot：未知站点的键直接丢弃，它永远不会被查表命中，留着只会让
+      // 设置文件越来越脏）。落盘的字典里**只许有** 'inline' / 'attach' 两个合法值——
+      // 「本站点显式设成跟随全局」用**删键**表达，不写第三个值。
+      if ('promptTransportBySite' in updated) {
+        const src = updated.promptTransportBySite && typeof updated.promptTransportBySite === 'object' ? updated.promptTransportBySite : {};
+        const out = {};
+        for (const [sid, val] of Object.entries(src)) {
+          if (!getSite(sid)) continue;
+          if (val === 'inline' || val === 'attach') out[sid] = val;
+        }
+        updated.promptTransportBySite = out;
+      }
       // 站点级设置（0.16.38）：`defaultModelBySite` 与 `extraPromptBySite` 都是
       // 「站点 id → 值」的字典，设置文件可手改，因此写入前一律归一化：
       //   · 键必须是在编站点 id（未知键丢弃，它永远不会被查表命中）；
@@ -1030,7 +1110,11 @@ export function createWebControl(deps = {}) {
         updated.extraPromptBySite = out;
       }
       const result = settingsStore.set(updated);
-      return { ok: true, ...result };
+      // 落盘成功后把**新的**修订号一起回（0.19.33）：客户端不必等下一次轮询才知道
+      // 「该重拉读数了」——保存这个动作本身就把新号交到它手上，于是「点了保存、
+      // 提示词与生效值立刻跟上」在**同一次交互**里成立，而不是最多等一个轮询周期。
+      // 这正是用户报的「更改后提示词更新跟不上」要修的那件事。
+      return { ok: true, ...result, settingsRevision: settingsRevisionNow() };
     },
     'POST account-add': async (body) => {
       // 「新账号」（0.19.4，用户指令）：下拉底部那一行点下去要为该站点**新增一个槽**。
@@ -1093,6 +1177,10 @@ export function createWebControl(deps = {}) {
       return {
         ok: true, variants, sites: rows, toolsSource, active,
         extraPrompt: settings.extraPrompt || '', storeDir,
+        // 设置修订号（0.19.33）：与 GET settings / attach-status 同源。客户端拿它
+        // 当**重拉依赖**——用户在站点页改完投递形态后，模板与再教学文本必须跟着重算，
+        // 否则面板上「已保存」与「看到的仍是旧的」会同时成立（真机复现的症状）。
+        settingsRevision: settingsRevisionNow(),
       };
     },
     // 用**系统默认程序**打开某站点的提示词文件（0.16.38）。
@@ -1192,6 +1280,54 @@ export function createWebControl(deps = {}) {
       }
       const r = await importer(accountKey, dir);
       return { ok: true, siteId: accountKey, accountKey, sourceProfileDir: dir, ...(r || {}) };
+    },
+    // ---- 本插件自身的版本与更新（0.19.39）----------------------------------
+    //
+    // 用户原话：「参考 dsh-store 的设置界面顶部『插件市场 / dsh-market / v1.65.1 /
+    // 更新插件市场 / 本次全部忽略』设计好本插件的更新和只做提醒重启操作，替换
+    // 现在空白的单独 github 按钮」。
+    //
+    // 三个动作分开，各自只回答一个问题：
+    //   GET  update-status —— 「现在跑的是哪一版、有没有新版」（只读，不安装）
+    //   POST update        —— 「装」（唯一有副作用的那个，走 csrfSafe 门禁）
+    // 分开的直接理由：设置页挂载时就要显示版本，而它**不该**顺带触发一次安装。
+    'GET update-status': async () => {
+      const current = config.version || null;
+      // profile 名由服务端给：客户端**拿不到**它（浏览器侧不知道自己在哪个
+      // profile 里跑），而安装命令 `dsh plugin --profile <p> add` 需要它。
+      // 从 profileDir 的末段取（`~/.dsh/profiles/web` → `web`），取不到回落 'web'。
+      const profile = (() => {
+        try {
+          const base = path.basename(String(config.profileDir || ''));
+          return base && base !== '.' && base !== '/' ? base : 'web';
+        } catch { return 'web'; }
+      })();
+      // 上一次检查的结果缓存在内存里：设置页每次打开都打一次 registry 是浪费，
+      // 而且 registry 慢的时候会让面板首屏卡住。
+      if (updateCache && Date.now() - updateCache.at < UPDATE_CACHE_MS) {
+        return { ok: true, package: PACKAGE_NAME, current, profile, ...updateCache.value, cached: true };
+      }
+      const r = await fetchPackument({ name: PACKAGE_NAME });
+      const decision = updateDecision({ current, packument: r.ok ? r.packument : null, error: r.ok ? null : r.error });
+      updateCache = { at: Date.now(), value: decision };
+      return { ok: true, package: PACKAGE_NAME, current, profile, cached: false, ...decision };
+    },
+    // 「更新插件市场」的对应物。**真的装**（用户明确选择「点了就真装」），
+    // 装完给的是**重启提醒**而不是自动重启——重启会终止在跑的会话，
+    // 而那正是用户此刻在用的东西（见 lib/update.js 文件头第 1 条）。
+    'POST update': async (body) => {
+      const profile = String(body?.profile || 'web').trim() || 'web';
+      // spec 只允许两种：包名本身（取 registry 最新）或一个显式版本号。
+      // **不接受任意字符串**——它会被拼进命令行，放开等于开一个任意参数入口。
+      const requested = String(body?.version || '').trim();
+      const spec = requested ? PACKAGE_NAME + '@' + requested : PACKAGE_NAME;
+      if (requested && !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(requested)) {
+        return { ok: false, error: '版本号形状不合法：' + requested.slice(0, 40) };
+      }
+      // 装完缓存必然过期（current 变了）——清掉，下一次检查重新问 registry。
+      updateCache = null;
+      const r = await runInstall({ profile, spec });
+      return { ...r, profile, spec };
     },
     // 设置页「登录网站」下拉的数据源：站点清单 + 各自登录态，不启动浏览器。
     'GET login-sites': async () => {
@@ -1461,7 +1597,14 @@ export function createWebControl(deps = {}) {
         : null;
       const fresh = !stored?.webSessionId;
       if (typeof target?.sendTurn === 'function') {
-        const res = await target.sendTurn(sessionKey, promptText, { fresh, model: body?.model });
+        // 0.19.30（用户第 2 点「保留完整的切换模式」）：把本列的思考模式交给
+        // `sendTurn`。它的形参**本来就有** `thinkMode`（`browser-driver.js:3309`，
+        // 三态 'auto'|'on'|'off'，见同文件 2840 行），这里此前没透传 ——
+        // 于是「界面选得动、服务端收下、真正生成时不生效」：静默失败，
+        // 正是本仓库反复记过的那个坑。本条只接线，不新增任何后端路径。
+        const res = await target.sendTurn(sessionKey, promptText, {
+          fresh, model: body?.model, thinkMode: body?.thinkMode,
+        });
         const reply = res?.text || res || '';
         // ── 0.19.29：把本列产出落到**本列目录**（用户「沙箱」需求的落地）────────
         //
@@ -1517,6 +1660,11 @@ export function createWebControl(deps = {}) {
   // 「调用点存在、另一端没有」的缺陷从此在离线就能红。
   actions['POST status'] = actions['GET status'];
   actions['POST session-slot'] = actions['GET session-slot'];
+  // attach-status 同理（0.19.32）：客户端带 body（`api('attach-status', { siteId })`）
+  // 就会走 POST，而服务端只注册了 GET ⇒ 真机 405 + 空 body，面板那一行永远显示
+  // 「读数加载中…」。这正是 0.15.3 修过的那族缺陷（status 的 POST 别名），
+  // 新增参数时又长回来了一次。护栏见 test/site-prompt-transport.test.mjs。
+  actions['POST attach-status'] = actions['GET attach-status'];
 
   /**
    * Handle one request. `pathname` is the full path; any suffix that ends
