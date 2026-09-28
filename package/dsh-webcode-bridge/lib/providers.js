@@ -166,13 +166,14 @@ export const DEEPSEEK = site({
   // 主证据仍是文件名本身（filenameEvidence），这只是提速副证据。
   attachPreview: "[class*='file'], [class*='attachment'], [data-file], [data-attachment]",
   decoder: 'deepseek', stream: true,
-  // 单一模型入口：桥只暴露一个 DeepSeek（深度思考）。
+  // 单一模型入口：桥只暴露一个 DeepSeek（0.19.43 起显示名去掉「（深度思考）」
+  // 后缀——组标题已写着站点，能力注记由模型元数据 thinking 表达，不该占名字）。
   // 旧版三 pill（快速/专家/识图）已随 2026-09-10 新版 UI 取消——真机实测
   // model_type 恒为 default，模式差异只剩「深度思考」开关；带图发送同样是
   // default + ref_file_ids，由网页自行路由。因此不再拆成三个模型 id，
   // 带图能力对本模型自动生效（有图就传，无图不受限）。
   models: [
-    { id: 'deepseek', name: 'DeepSeek（深度思考）', labels: ['专家模式', 'DeepSeek'], thinking: true, context: 1_000_000, budget: 1_000_000, acceptsImages: true },
+    { id: 'deepseek', name: 'DeepSeek', labels: ['专家模式', 'DeepSeek'], thinking: true, context: 1_000_000, budget: 1_000_000, acceptsImages: true },
   ],
 });
 
@@ -261,7 +262,17 @@ export const GLM = site({
     // 版本条目显示 GLM-5.3，Flash 条目显示 GLM-Flash。
     { id: 'glm-5.3', name: 'GLM-5.3', labels: ['GLM-5.3'], context: GLM_CONTEXT_WINDOW, budget: GLM_CONTEXT_WINDOW, acceptsImages: true },
     { id: 'glm-5.3-flash', name: 'GLM-5.3-Flash', labels: ['GLM-Flash'], context: GLM_CONTEXT_WINDOW, budget: GLM_CONTEXT_WINDOW, acceptsImages: true },
-    { id: 'auto', name: '智谱清言', labels: ['GLM'], context: GLM_CONTEXT_WINDOW, budget: GLM_CONTEXT_WINDOW },
+    // ⚠ 0.19.43 起**真删** auto（原显示名「智谱清言」）。
+    //
+    // 用户 2026-09-28 判据：「不需要这个自动吧？这个除了网站给的自动，一般都是没有
+    // 这个模型档位吧？……这里不是已经让选择了吗？提供网站提供的模型列表就行」。
+    // 对这个站点用户是对的：`modelPicker` 契约已声明（见上），网页真实档位就是
+    // GLM-5.3 / GLM-Flash 两条，auto 是桥自己发明的「不切换」档，不是网页档位。
+    //
+    // 历史 id `glm:auto` 仍可解析（ALIASES 里的兼容别名，落到本站点旗舰档），
+    // 因为真机 settings.yaml 的 `subagent-model-selection.allowedModels` 里就有
+    // 它——从**模型表**里删掉（下拉不再出现）与「旧值仍解析得开」必须同时成立，
+    // 与兼容空壳 `webcode` 是同一条纪律。
   ],
 });
 
@@ -349,7 +360,9 @@ export const KIMI = site({
     { id: 'k3', name: 'K3', labels: ['K3'], context: 1_000_000, acceptsImages: true },
     { id: 'k3-cluster', name: 'K3 集群', labels: ['K3 集群'], context: 1_000_000 },
     { id: 'quick', name: '快速', labels: ['快速'], context: 1_000_000 },
-    { id: 'auto', name: 'Kimi', labels: ['Kimi'], context: 1_000_000 },
+    // ⚠ 0.19.43 起**真删** auto（原显示名「Kimi」）。理由与 GLM 逐字同构：
+    // `modelPicker` 已声明，网页真实档位是 快速 / K3 / K3 集群 三条，auto 是桥自己
+    // 发明的「不切换」档。历史 id `kimi:auto` 仍由 ALIASES 解析（见那里）。
   ],
 });
 
@@ -419,7 +432,9 @@ export const DOUBAO = site({
     // 本地默认：**对话**（豆包标准对话模式）。放在最前即首选。
     { id: 'chat', name: '对话', labels: ['对话'], context: 256_000, acceptsImages: true },
     { id: 'work', name: '工作', labels: ['工作'], context: 256_000, acceptsImages: true },
-    { id: 'auto', name: '豆包', labels: ['豆包'], context: 256_000 },
+    // ⚠ 0.19.43 起**真删** auto（原显示名「豆包」）。理由与 GLM/Kimi 同构：
+    // modelPicker 的 segmented 契约已声明，网页真实档位是 对话 / 工作 两个模式。
+    // 历史 id `doubao:auto` 仍由 ALIASES 解析。
   ],
 });
 
@@ -599,10 +614,10 @@ export const ZAI = site({
     { id: 'glm-5.3-flash', name: 'GLM-5.3-Flash', labels: ['GLM-5.3-Flash'], context: GLM_CONTEXT_WINDOW, budget: GLM_CONTEXT_WINDOW, acceptsImages: true },
     { id: 'glm-5.3', name: 'GLM-5.3', labels: ['GLM-5.3'], context: GLM_CONTEXT_WINDOW, budget: GLM_CONTEXT_WINDOW, acceptsImages: true },
     { id: 'glm-5.2', name: 'GLM-5.2', labels: ['GLM-5.2'], context: GLM_CONTEXT_WINDOW, budget: GLM_CONTEXT_WINDOW, acceptsImages: true },
-    // 站点默认：不切换网页模型，按页面当前选择走。名字保持干净的站点名
-    //（regression.test.mjs 有护栏：模型名不得含「网页当前模型」这类元描述，
-    // 也不得用括注——选择器里应当是干净名字）。
-    { id: 'auto', name: 'Z.ai', labels: ['GLM'], context: GLM_CONTEXT_WINDOW, budget: GLM_CONTEXT_WINDOW },
+    // ⚠ 0.19.43 起**真删** auto（原显示名「Z.ai」）。理由与 glm 逐字同构：
+    // modelPicker 已声明，网页真实档位就是 GLM-5.3-Flash / GLM-5.3 / GLM-5.2 三条。
+    // 历史 id `zai:auto` 仍由 ALIASES 解析（它与 `glm:auto` 是两条不同的别名，
+    // 各自收敛到**本站点**的档位，不许互相串站点）。
   ],
 });
 
@@ -707,11 +722,20 @@ export function siteIdForProvider(providerId) {
 }
 
 /**
- * 组标题 = **站点短键/域**（用户 2026-09-28 指定）。
+ * 组标题 = **`webcode-` + 站点短键/域**（用户 2026-09-28 指定，0.19.43 加前缀）。
+ *
+ * 前缀的含义：**这一组是网页桥提供的**。`webcode` 就是本插件的兼容 provider id
+ * （见 MODEL_PROVIDER_COMPAT_ID），组名带同一前缀，让人一眼看出这些模型来自
+ * 网页桥而不是官方 provider；也顺带避开与官方分组重名的可能。
  *
  * 刻意不用 `st.name`：那些是「智谱清言 (GLM)」「Kimi (月之暗面)」这类描述性名字，
  * 而用户要的是一眼看出「哪个网站」；并且 glm 与 zai 必须分得开 —— z.ai 的
  * shortKey 恰好就是它的真实域名（见 ZAI 的 shortKey 注释），语义正好吻合。
+ *
+ * ⚠ **为什么前缀加在这一层、而不是去改 shortKey**：`shortKey` 同时决定扁平显示名
+ *（`modelDisplayName` -> `glm/glm-5.3`）、历史设置值、设置页的站点名与
+ * `test/model-labels.test.mjs` 的一批断言。只有「组标题」这一处需要前缀，
+ * 改 shortKey 会让上面四样一起漂移。
  */
 export function providerGroupName(siteId) {
   const st = SITES.find((s) => s.id === siteId);
@@ -727,7 +751,7 @@ export function providerGroupName(siteId) {
   //（test/model-labels.test.mjs 的 `glm/glm-5.3` 断言）与设置页 optgroup
   // 一起漂移——而这次只需要「组标题」这一处改名。
   const override = PROVIDER_GROUP_NAME_OVERRIDES[siteId];
-  return override || st.shortKey || st.id;
+  return MODEL_PROVIDER_COMPAT_ID + '-' + (override || st.shortKey || st.id);
 }
 
 /** 组名覆盖表（见 providerGroupName 注释）。值必须是用户可读的真实站点域名。 */
@@ -831,17 +855,30 @@ const ALIASES = Object.freeze({
   flash: 'deepseek:deepseek',
   vision: 'deepseek:deepseek',
   'gpt-4o': 'chatgpt:auto', chatgpt: 'chatgpt:auto',
-  glm: 'glm:auto', 'glm-4.5': 'glm:glm-5.3', 'glm-4.6': 'glm:glm-5.3',
+  // ⚠ 0.19.43：glm / kimi / doubao / zai 四个站点的 auto 已从模型表里**真删**
+  //（用户判据：网页给了真实档位，就不该再有一个桥自己发明的「不切换」档）。
+  // 但历史值必须仍解析得开——真机 `~/.dsh/settings.yaml` 的
+  // `subagent-model-selection.allowedModels` 里就写着 `glm:auto` / `kimi:auto` /
+  // `doubao:auto`；只删模型表不改别名，这些白名单会当场变成不可解析值。
+  // 因此下面的别名**同时**覆盖两种写法：裸站点名（`glm`）与已限定的历史 id
+  //（`glm:auto`）。落点各自收敛到**本站点**的档位，绝不互相串站点。
+  glm: 'glm:glm-5.3', 'glm:auto': 'glm:glm-5.3',
+  'glm-4.5': 'glm:glm-5.3', 'glm-4.6': 'glm:glm-5.3',
   // GLM 版本别名（0.13.0 起 glm 站点有真实版本条目；旧设置值必须仍解析得开）
   'glm-5.3': 'glm:glm-5.3', 'glm-5.3-flash': 'glm:glm-5.3-flash',
   // 用户口头/历史写法（点号、连字符、大小写混用）统一收敛到 z.ai 的真实条目
   'z.ai-glm5.3': 'zai:glm-5.3', 'z.ai-glm5.3-flash': 'zai:glm-5.3-flash',
   'zai-glm-5.3': 'zai:glm-5.3', 'zai-glm-5.3-flash': 'zai:glm-5.3-flash',
   'glm-zai-5.3': 'zai:glm-5.3',
-  kimi: 'kimi:auto', 'kimi-k3': 'kimi:k3', k3: 'kimi:k3', 'k3-cluster': 'kimi:k3-cluster',
-  qwen: 'qwen:auto', doubao: 'doubao:auto',
+  kimi: 'kimi:k3', 'kimi:auto': 'kimi:k3', 'kimi-k3': 'kimi:k3', k3: 'kimi:k3', 'k3-cluster': 'kimi:k3-cluster',
+  // qwen / doubao / grok / claude / gemini 的 auto **保持不动**：桥没有它们的
+  // modelPicker 契约，切不动网页模型，auto 是那里唯一可用的条目（用户 2026-09-28：
+  //「如果你不知道的话，就先空着不用改」）。doubao 是例外的一半：它有 segmented
+  // 契约，模型表里的 auto 已真删，所以这里额外把历史 id 收敛到「对话」。
+  qwen: 'qwen:auto', doubao: 'doubao:chat', 'doubao:auto': 'doubao:chat',
   grok: 'grok:auto', claude: 'claude:auto', gemini: 'gemini:auto',
-  zai: 'zai:auto', 'z-ai': 'zai:auto', 'chat.z.ai': 'zai:auto', 'glm-zai': 'zai:auto',
+  zai: 'zai:glm-5.3', 'zai:auto': 'zai:glm-5.3',
+  'z-ai': 'zai:glm-5.3', 'chat.z.ai': 'zai:glm-5.3', 'glm-zai': 'zai:glm-5.3',
 });
 
 export const DEFAULT_MODEL_ID = 'deepseek-web';

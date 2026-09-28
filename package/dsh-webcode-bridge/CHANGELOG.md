@@ -5,6 +5,59 @@ All notable changes to this package. Newest first.
 The canonical, in-progress record of what was changed and why lives in [doc/progress.md](../../doc/progress.md);
 this file is the package-facing release history.
 
+## 0.19.43
+
+**模型选择器：组名加 `webcode-` 前缀；四个有模型选择器契约的站点删掉自造的 `auto` 档。**
+
+用户三点要求（2026-09-28）：
+
+1. **可见组名改为 `webcode-xxx`** —— 一眼看出这组模型来自网页桥，也顺带避开与官方
+   provider 分组重名。GLM 仍是 `chatglm`、z.ai 仍是 `z.ai`，只是加了前缀：
+   `webcode-deepseek` / `webcode-chatglm` / `webcode-chatgpt` / `webcode-kimi` /
+   `webcode-qwen` / `webcode-doubao` / `webcode-grok` / `webcode-claude` /
+   `webcode-gemini` / `webcode-z.ai`。
+2. **DeepSeek 去掉「（深度思考）」后缀** —— 能力注记由模型元数据 `thinking` 表达，
+   不该占用显示名。行名现在是 `DeepSeek`。
+3. **删掉「网站名当模型名」的那些条目** —— `智谱清言` / `豆包` / `Kimi` / `Z.ai`
+   其实是每个站点那个 `auto`（「不切换网页模型」）档，是桥自己发明的，不是网页给的档位。
+
+### 删 `auto` 的判据与边界（这一条不能只看一半）
+
+用户原话：「这个除了网站给的自动，一般都是没有这个模型档位吧？……这里不是已经让选择了吗？
+提供网站提供的模型列表就行」「如果你不知道的话，就先空着不用改」。
+
+于是按「桥有没有该站点的 `modelPicker` 契约」划线——**契约在，说明桥知道网页真实档位**：
+
+| 站点 | 有 modelPicker | 处置 | 现在公布的档位 |
+| --- | --- | --- | --- |
+| glm | 有 | **删 auto** | GLM-5.3 / GLM-5.3-Flash |
+| zai | 有 | **删 auto** | GLM-5.3-Flash / GLM-5.3 / GLM-5.2 |
+| kimi | 有 | **删 auto** | K3 / K3 集群 / 快速 |
+| doubao | 有（segmented） | **删 auto** | 对话 / 工作 |
+| chatgpt / qwen / grok / claude / gemini | **没有** | **保持不动** | 仍是那一条 auto |
+
+后 5 个站点如果也删，`models.length === 0` 会让 DSH 目录构建器**整组不生成**——
+下拉里会凭空少掉 5 个组。
+
+**兼容性（与 `webcode` 空壳同一条纪律）**：模型表里删掉，**历史 id 仍必须解析得开**。
+真机 `~/.dsh/settings.yaml` 的 `subagent-model-selection.allowedModels` 里就写着
+`glm:auto` / `kimi:auto` / `doubao:auto`；只删模型表不改别名，这些白名单会当场变成
+不可解析值。因此 `ALIASES` 同时覆盖裸站点名与已限定的历史 id，各自收敛到本站点档位：
+`glm:auto` → `glm:glm-5.3`、`kimi:auto` → `kimi:k3`、`doubao:auto` → `doubao:chat`、
+`zai:auto` → `zai:glm-5.3`。
+
+### 取证与护栏
+
+- `node .tmp/verify-groups-43.mjs` 模拟 DSH 目录构建器：**11 provider / 10 个可见组**，
+  空壳不生成组，10 个组名全部带 `webcode-` 前缀，组内行名是裸名。
+- `test/model-labels.test.mjs` **12/12**（组名对照表改成带前缀，新增一条
+  「组名一律带 `webcode-` 前缀且不重复前缀」的护栏）。
+- `test/regression.test.mjs` **53 pass / 1 fail** —— 那 1 条是既有失败
+  （「网页会话丢失时用整段首轮提示词重放」，与本轮改动无关，0.19.42 阶段同读数同断言，
+  已用 `git stash` 反证）。该文件里 auto 相关的两处断言已按本轮语义重写。
+
+---
+
 ## 0.19.42
 
 **模型选择器按站点分组：一个网站一层。**

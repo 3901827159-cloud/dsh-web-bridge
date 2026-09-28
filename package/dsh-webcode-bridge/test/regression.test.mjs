@@ -30,7 +30,9 @@ test('普通回复完成、模型传递、游标提交与同长度历史改写',
     const models = await adapter.listModels('webcode-deepseek');
     const ids = models.map(m => m.id);
     assert.ok(ids.includes('deepseek:deepseek'));
-    for (const [pid, want] of [['webcode-glm', 'glm:auto'], ['webcode-chatgpt', 'chatgpt:auto'], ['webcode-kimi', 'kimi:auto']]) {
+    // 0.19.43：glm / kimi 的 auto 已从模型表真删，公布的是网页真实档位。
+    // chatgpt 没有 modelPicker 契约，auto 是那里唯一可用的条目（保持不动）。
+    for (const [pid, want] of [['webcode-glm', 'glm:glm-5.3'], ['webcode-chatgpt', 'chatgpt:auto'], ['webcode-kimi', 'kimi:k3']]) {
       const list = await adapter.listModels(pid);
       assert.ok(list.map(m => m.id).includes(want), `${pid} 必须公布 ${want}`);
       // 组内行名是**裸模型名**，不带站点前缀（组标题已经写着站点）
@@ -798,17 +800,31 @@ test('模型名是干净名字：不得含元描述或括注，auto 入口仍唯
   }
   // DeepSeek 只有一个模型，且名字就是「站点短键/模型 id」的形态（用户要求）。
   assert.equal(all.find(m => m.id === 'deepseek:deepseek').name, 'deepseek/deepseek');
-  // 未校准站点仍只有唯一 auto 入口，且解析不因改名而失效。
-  // 0.13.0 起 glm/zai/kimi 有了真实版本条目，auto 变回「站点默认（不切换）」，
-  // 因此这里断言的是「auto 仍存在且解析到本站点」，而不是具体版本名。
-  for (const [id, siteId] of [['glm:auto', 'glm'], ['zai:auto', 'zai'], ['kimi:auto', 'kimi'],
-    ['qwen:auto', 'qwen'], ['doubao:auto', 'doubao'], ['grok:auto', 'grok']]) {
+  // 历史 auto 值必须**仍解析得开**，但不必仍是模型表里的一档（0.19.43）。
+  // 这一格是「真删模型表」与「不砸存量设置」同时成立的护栏——真机
+  // `~/.dsh/settings.yaml` 的 subagent-model-selection.allowedModels 里就写着
+  // `glm:auto` / `kimi:auto` / `doubao:auto`。落点各自收敛到本站点的档位：
+  // glm→GLM-5.3、kimi→K3、doubao→对话、zai→GLM-5.3、qwen/grok→auto（未删）。
+  for (const [id, siteId, wantModel] of [['glm:auto', 'glm', 'glm-5.3'], ['zai:auto', 'zai', 'glm-5.3'],
+    ['kimi:auto', 'kimi', 'k3'], ['qwen:auto', 'qwen', 'auto'], ['doubao:auto', 'doubao', 'chat'],
+    ['grok:auto', 'grok', 'auto']]) {
     const m = resolveWebModel(id);
     assert.equal(m.siteId, siteId, id + ' 必须解析到 ' + siteId);
-    assert.equal(m.id, 'auto');
+    assert.equal(m.id, wantModel, id + ' 必须解析到 ' + wantModel);
     assert.ok(m.name.trim().length > 0, id + ' 必须有显示名');
   }
-  // 每个站点的 auto 入口唯一
+  // 0.19.43：四个**有 modelPicker 契约**的站点不得再有 auto 档（网页自己给了档位）；
+  // 没有契约的五个站点仍只靠 auto 才不至于变成空组。
+  const WITH_PICKER = ['glm', 'zai', 'kimi', 'doubao'];
+  for (const siteId of WITH_PICKER) {
+    assert.ok(!all.some((m) => m.siteId === siteId && m.id === siteId + ':auto'),
+      siteId + ' 有 modelPicker 契约，不应再公布自造的 auto 档');
+  }
+  for (const siteId of ['chatgpt', 'qwen', 'grok', 'claude', 'gemini']) {
+    assert.ok(all.some((m) => m.siteId === siteId && m.id === siteId + ':auto'),
+      siteId + ' 没有 modelPicker 契约，auto 必须保留（否则整组消失）');
+  }
+  // 每个站点的 auto 入口不得重复
   for (const siteId of new Set(all.map((m) => m.siteId))) {
     const autos = all.filter((m) => m.siteId === siteId && m.id === siteId + ':auto');
     assert.ok(autos.length <= 1, siteId + ' 的 auto 入口不得重复');

@@ -142,16 +142,16 @@ test('z.ai 的显示名用域名短键，内部路由 id 不变（历史设置�
 
 /** 期望的组名（2026-09-28 用户指定：站点短键/域）。手写对照表，见下方断言注释。 */
 const EXPECTED_GROUP_NAMES = Object.freeze({
-  deepseek: 'deepseek',
-  glm: 'chatglm',          // 站点 id 是 glm，但真实域名是 chatglm.cn
-  chatgpt: 'chatgpt',
-  kimi: 'kimi',
-  qwen: 'qwen',
-  doubao: 'doubao',
-  grok: 'grok',
-  claude: 'claude',
-  zai: 'z.ai',             // 短键即真实域名
-  gemini: 'gemini',
+  deepseek: 'webcode-deepseek',
+  glm: 'webcode-chatglm',  // 站点 id 是 glm，但真实域名是 chatglm.cn
+  chatgpt: 'webcode-chatgpt',
+  kimi: 'webcode-kimi',
+  qwen: 'webcode-qwen',
+  doubao: 'webcode-doubao',
+  grok: 'webcode-grok',
+  claude: 'webcode-claude',
+  zai: 'webcode-z.ai',     // 短键即真实域名
+  gemini: 'webcode-gemini',
 });
 
 test('注册表里每个站点各占一个 provider，且组名是站点短键/域', () => {
@@ -178,14 +178,28 @@ test('GLM 与 Z.ai 各自成组，组名可分辨（同名模型不再混在一�
   // 用户原话：「glm5.3 和 flash 例如这样放在 chatglm 一组内」。
   // 而 z.ai 是**另一个网站**，必须自成一组、组名不同 —— 否则两条 glm-5.3
   // 在选择器上看起来仍是同一个网站的重复项。
-  assert.equal(providerGroupName('glm'), 'chatglm');
-  assert.equal(providerGroupName('zai'), 'z.ai');
+  assert.equal(providerGroupName('glm'), 'webcode-chatglm');
+  assert.equal(providerGroupName('zai'), 'webcode-z.ai');
   assert.notEqual(providerIdForSite('glm'), providerIdForSite('zai'));
   // 两个站点确实各有一个 glm-5.3（同名），这正是必须分组的原因
   const g = resolveWebModel('glm:glm-5.3');
   const z = resolveWebModel('zai:glm-5.3');
   assert.equal(g.id, z.id, '两个站点的模型 id 同名，是分组要解决的问题');
   assert.notEqual(g.siteId, z.siteId);
+});
+
+test('组名一律带 webcode- 前缀：一眼看出这组是网页桥提供的', () => {
+  // 用户原话（2026-09-28）：「可见组名改为 wecode-xxx 的名字好区分」。
+  // 前缀就是本插件的兼容 provider id，含义是「这组模型来自网页桥」——
+  // 也让这些组不可能与官方 provider 的分组重名。
+  for (const st of SITES) {
+    const name = providerGroupName(st.id);
+    assert.ok(name.startsWith('webcode-'), `${st.id} 的组名缺前缀: ${name}`);
+    // 前缀之后必须还有内容，且不许出现双前缀（重复拼是这次改动最容易犯的错）
+    const tail = name.slice('webcode-'.length);
+    assert.ok(tail.length > 0, `${st.id} 的组名只有前缀: ${name}`);
+    assert.ok(!tail.startsWith('webcode-'), `${st.id} 的组名重复前缀: ${name}`);
+  }
 });
 
 test('旧 provider webcode 仍解析得开（否则所有历史会话当场报 session/model-unavailable）', () => {
