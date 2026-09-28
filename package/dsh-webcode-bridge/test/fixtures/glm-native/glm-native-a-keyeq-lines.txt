@@ -1,0 +1,9 @@
+工具通道已恢复，工作树信息到手。继续深入读取关键文件：README、package 配置、文档索引和 lib 结构。<tool_call>read
+file_path=D:\9_Code_Workspace\dsh-webcode-bridge\README.zh-CN.md
+limit=150
+<tool_call>glob
+path=D:\9_Code_Workspace\dsh-webcode-bridge\package\dsh-webcode-bridge
+pattern=**/*.js</arg_value></tool_call><tool_call>read
+file_path=D:\9_Code_Workspace\dsh-webcode-bridge\package\dsh-webcode-bridge\package.json</arg_value></tool_call><tool_call>read
+file_path=D:\9_Code_Workspace\dsh-webcode-bridge\doc\README.md
+limit=120</arg_value></tool_call>

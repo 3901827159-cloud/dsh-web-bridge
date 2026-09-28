@@ -32,6 +32,85 @@ DSH 每次发消息都会校验存储的 provider 是否仍被服务。
 
 ---
 
+## 0.19.41
+
+**Kimi / Z.ai 真机取证：用户拿到的两个报错都不是真因。Kimi 投递链修复（六处），Z.ai 改为诚实报错。**
+
+用户报障：`Kimi / Qwen / 豆包 / Z.ai —— 现在都不行`，并贴了两条报错。真机取证
+（完整证据 [doc/research/2026-09-27-kimi-zai-glm-real-machine.md](../../doc/research/2026-09-27-kimi-zai-glm-real-machine.md)）
+发现**两条报错都在指向错的方向**。
+
+### Kimi —— `PROMPT_TRUNCATED: 20158/38807（网页端长度上限）` 归因错了
+
+- **20158 不是网页的上限，是桥自己的分块写入丢的**。真机逐档实测：**单次**
+  `insertText` 从 8,000 到 200,000 字符**全部逐字回读**（最长 167ms）；而**分块**
+  20,000+18,400 只回读到 **20,002**（尾部 18,398 字符静默丢失）。块间间隔
+  0/100/…/4000ms **七档结果完全一致** ⇒ 等待无效。
+  **修**：富文本输入框改**一次性**写入（`composerWritePlan` 只对表单控件生效）。
+- **附件投递其实可用，但确认判据恒为 null**：kimi 的附件卡只渲染**去扩展名的 stem**
+  （`<p class="file-card-info-name">webcode-context</p>`），而判据找的是完整文件名 ⇒
+  `ATTACH_NOT_CONFIRMED` → 回落 inline → 撞上上一条。
+  **修**：判断加第二把尺子（stem 回退，仍受作用域/正文排除/长度三闸约束）。
+  **真机复验 173ms 命中、`matched:"stem"`**（此前是等满 90s 超时）。
+  刻意**不**打开类名候选：kimi 页面上 `[class*='file-card']` 有 42 个可见节点。
+- **带附件时发送键处于禁用窗口**：附件上传完成前控件是
+  `div.send-button-container **disabled**`，那一刻按 Enter 网页**完全不响应**——
+  旧实现的「点按钮 → 回车 → 再点按钮」三条路全落在窗口内。
+  **修**：kimi 补 `sendButton` 声明；驱动发送前**等宿主控件的 disabled 消失**
+  （判据取页面事实，不再用 `isEnabled()` 预判——控件是 div，那个判断恒真）。
+- **会话槽从来没落过 id**（`WEB_SESSION_LOST: 会话槽为空`，即「每轮新开对话」）。
+  真机拿到**可导航**证据后补 kimi 的 `/chat/<uuid>` 形状。
+- **网页明说「还在生成」，驱动却按 2.5s 稳态把轮次收束了**（真机现场
+  `settling turn with 0 chars answer / 114 chars thinking`）。kimi 的流里每帧都带
+  `message.status`，是权威信号，旧实现在注释里说「做锚点」却什么都没做。
+  **修**：解码器透出 `generating`，终态时**真的**置 `done`；驱动新增第四条判据
+  （网页说还在生成就推迟收束，仍受既有硬上限约束）。
+- **服务端原话被丢掉**：错误帧的 base64 解出来是
+  「和Kimi聊天的人太多了，订阅会员可进入优先队列」，而旧实现只报
+  `invalid_stream | 流首段: {"heartbeat":{}}`。**修**：解出 `code：原话` 进 reason。
+
+**修完之后的最终定性**：投递链逐格变绿（附件 173ms 命中 / `ready=true` / `send confirmed` /
+38,807 字符逐字写入），随后服务端回 `resource_exhausted` —— **kimi 账号级限流**。
+这不是桥的缺陷，但以前**一个字都看不出来**。
+
+### Z.ai —— `页面已有 7 字回复未回传` 是**假读数**；真机跑不通，且原因是风控闸门
+
+- 那 7 个字是**输入框容器**的 innerText：旧 `answerSelector` 尾部的
+  `[class*="message"]` 命中了 `div.messageInputContainer`（「深度思考\n最高」=7 字），
+  而驱动读的是 `querySelectorAll(sel).pop()`。三处独立读数吻合。
+  **修**：`answerSelector` 改为语义特征 `div.chat-assistant, #response-content-container`。
+- **真因**：站点风控闸门拦在请求之前——`features.enable_captcha=true` ⇒ 前端
+  `await HN()`（阿里云滑块）不返回 ⇒ `POST /api/chat/completions` **永不执行** ⇒
+  wire 上零帧。四轮真机复现全部 0 帧；换 UA 也不过闸。
+  **绕滑块属破解站点风控，本项目不做** ⇒ 处置是**诚实化**：新增站点声明位
+  `captchaSelector`，驱动在发送确认后一次采样，命中即抛 `WEB_CAPTCHA_REQUIRED`
+  （文案说明「消息未被受理 / wire 零帧」并要求手动过验证后重试）。
+- 顺带推翻「z.ai 用 GLM 的 `parts` 帧」这条假设（站点 bundle 里 `parts`/`choices`/
+  `reasoning_content` 各 0 次）；真实帧形状已记档，**decoder 刻意不改**（取不到真机帧，
+  换 decoder 是「猜着解不出」）。
+
+### GLM —— 真机原生调用形态有 3 种，旧解析器对其中 1 种给出**错参数**
+
+真机派发出去的调用是 `read {"md":"limit=150\n<tool_call>glob\n…"}`（DSH 回
+`missing required property "file_path"`）。模型原文是 `<tool_call>` + 裸工具名 +
+`key=value` 行、**没有 `<arg_key>`**，而旧兜底正则把键取成 **`md`**（`README.md` 的行尾）。
+**修**：新增 `parseNativeKeyValueLines`（键必须由工具 schema 声明，否则整块拒绝并留诊断）
+与「原生 key=value」分支；**删掉**产生 `{"md":…}` 的那条兜底正则。
+**错参数比丢调用更坏**——它让模型以为格式已对，只微调格式反复重试。
+
+### 全量门禁
+
+109 个测试文件 / 109 通过 / 0 失败 / exit 0（冻结工作树后逐文件串行实跑，1866s）。
+本轮新增 4 个护栏：`composer-single-write` 4 项、`captcha-gate` 5 项、
+`kimi-decoder` 5 项、`zai-answer-selector` 6 项。
+
+### 未取证（不猜）
+
+① kimi 分块丢内容的**内部机制**未证明（已确证「只在连续写入、间隔无效、单次可靠」）；
+② **z.ai 真机帧未取得** ⇒「按真机帧写 decoder」未交付（取不到，不是没做，未编造夹具）；
+③ z.ai 人肉过一次验证后是否仍每次触发：未取证；
+④ **Qwen / 豆包本轮未取证**——用户报障提到它们，但本轮只拿到 kimi 与 z.ai 两条失败现场。
+
 ## 0.19.40
 
 **交付前审计：修两条真缺陷 + 摘掉一条环境假红。全量单测首次跑通（1162/1162）。**

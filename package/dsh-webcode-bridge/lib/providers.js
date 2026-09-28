@@ -54,6 +54,27 @@ const CONVERSATION_URL_SHAPES = Object.freeze({
   // 注意**不能用 `chatglm.cn/main/alltoolsdetail` 这个无 cid 的形态当会话地址**：
   // 那是游客落地页，导航过去等于开新会话。
   glm: [(u) => u.searchParams.get('cid')],
+  // kimi：`https://www.kimi.com/chat/<uuid>`（真机 2026-09-27 两轮实录）。
+  //
+  // ## 为什么必须补这一条（真机读数，不是「顺手加一个」）
+  //
+  // 补之前 kimi **没有任何地址形状**，于是 `sessionIdFromUrl()` 恒 null ⇒
+  // `rememberConversation` 只在流里给 id 时才执行，而真机两轮的 `status().sessionSlot`
+  // 与 `conversations` 证明：**这一格是空的**——
+  //   `WEB_SESSION_LOST: 会话槽为空（site=kimi，no-stored-session） — 需要整段重建`
+  // 后果链与 providers.js 头注里 GLM 那一笔**逐字同构**：每轮都「整段重建」，
+  // 用户看到的是「同一会话却每轮新开对话」。
+  //
+  // ## 为什么这次敢写形状（与 zai 的取舍对照）
+  //
+  // 判据是「有没有拿到**可导航**的真机证据」，而不是「看起来像」：
+  //   · 一轮跑完后 `page.url()` = `https://www.kimi.com/chat/1a0e26b2-8e72-8a5a-8000-09c279d31e8d?chat_enter_method=home`；
+  //   · 按该形状 `page.goto('/chat/<同一 uuid>')` 之后，地址**逐字不变**
+  //     （`sameId: true`）、页面上读回了只存在于那一轮正文里的标记（`hasOne: true`）
+  //     ⇒ 这个形状**真的能导航回既有会话**，不是猜的。
+  //   · 反面参照：z.ai 的 `/c/<uuid>` 同样**观察到**了，但 `goto` 被打回根地址、
+  //     标记 0 次命中 ⇒ 那条继续维持「不声明」。两条读数的差别就在这里。
+  kimi: [(u) => u.pathname.match(/^\/chat\/([0-9a-fA-F-]{8,64})/)?.[1]],
   // zai **故意不在这里**：真机探针（real-probe-25-zai-url.mjs，2026-09-14）在
   // chat.z.ai 上拿到的地址是裸根 `https://chat.z.ai/`（query 键为空、页面里没有
   // 会话链接），而 real-probe-23 在 zai 上跑一轮直接 120s 超时（captureAlive=true、
@@ -69,6 +90,8 @@ const CONVERSATION_URL_BUILDERS = Object.freeze({
   deepseek: (origin, id) => origin + '/a/chat/s/' + encodeURIComponent(id),
   // GLM/Z.ai：`/main/alltoolsdetail?cid=<id>`；lang 交给站点自己补默认值。
   glm: (origin, id) => origin + '/main/alltoolsdetail?cid=' + encodeURIComponent(id),
+  // kimi：真机验证过「导航回去仍在同一会话」（依据见 CONVERSATION_URL_SHAPES 的 kimi 条）。
+  kimi: (origin, id) => origin + '/chat/' + encodeURIComponent(id),
 });
 
 /** 站点是否只从流里拿会话 id（地址栏不给形状）。GLM 两者都有，这里留作扩展点。 */
@@ -275,6 +298,22 @@ export const KIMI = site({
   // 计数恒为 0 → 已登录的 profile 被判成「未登录」，设置页/右栏徽标永远显示
   // 「未登录」，点「检测」也没用（检测走的就是同一个输入框判定）。
   input: 'div.chat-input-editor, div[contenteditable="true"], textarea.chat-input, textarea[placeholder], textarea',
+  // 发送控件（2026-09-27 真机取证补上；此前 kimi 走「按 Enter」的默认路径）。
+  //
+  // ## 为什么必须声明它（带附件的轮次此前发不出去）
+  //
+  // 真机现场（`.tmp-probe/kimi/lead-send-out.json`，sentinel 探针逐拍读数）：
+  //   · 附件上传**完成前**，控件是 `<div class="send-button-container disabled">`；
+  //     那一刻按 <kbd>Enter</kbd>，网页**完全不响应**——Enter 后 0.4s / 2.0s 两次采样，
+  //     输入框长度恒为 81、地址栏恒为 `https://www.kimi.com/`、附件 chip 恒在；
+  //   · `disabled` 类消失后**点它**：输入框立刻变成 1（只剩换行）、chip 清 0、
+  //     地址栏切到 `/chat/<uuid>` ⇒ **发送成功**。
+  //
+  // 也就是说「按 Enter」这条路在 kimi 上从一开始就不可靠，而附件让它**必然**失败
+  // （上传窗口内 Enter 无效，旧实现的「点按钮 → 回车 → 再点按钮」全落在窗口内）。
+  // 驱动侧配套改动：发送前先等这个控件的 `disabled` 类消失（判据见
+  // browser-driver 的 sendReady），而不是等一个固定时长——上传耗时随文件大小变化。
+  sendButton: '.send-button-container',
   attachSelector: "input[type='file']",
   attachPreview: "[class*='file'], [class*='attachment'], [data-file]",
   decoder: 'kimi-connect', stream: true,
@@ -444,10 +483,99 @@ export const ZAI = site({
   attachSelector: "input[type='file']",
   // 附件落到页面上的可见证据（上传确认用，见 browser-driver 的 waitForAttachment）
   attachPreview: "img[src^='blob:'], [class*='attachment'], [class*='file-card']",
-  // 同 GLM：助手回复节点选择器（0.19.19）。z.ai 与 chatglm.cn 同源模型、
-  // 前端换过一代，这里按「宽特征」写——同样**未取得真机命中读数**，
-  // 但按三态判据只有上行空间（不命中即回落今天的宽窗行为）。
-  answerSelector: 'div.markdown-body, .markdown-body, [class*="prose"], [class*="message"], main',
+  // 助手回复节点选择器（0.19.19 的契约位；2026-09-27 真机实测改写）。
+  //
+  // ## 旧值为什么必须换掉（真机读数，不是推断）
+  //
+  // 夹具 `test/fixtures/zai-real-dom/zai-chat-dom-inventory.json` 是真机会话页面的
+  // 293 个元素的逐字清单（tag/class/id/父索引/innerText 长度，消息 uuid 已脱敏）。
+  // 在它上面复算旧值的命中集合是**逐条可核**的（下表每行只写标签名与命中数，
+  // 完整选择器见上一行）：`div.markdown-body` 与 `.markdown-body` 各 **0** 次
+  // （z.ai 页面上没有这个 class），`[class*="prose"]` **2** 次（#151 用户消息
+  // 53509 字、#172 助手轮容器 0 字），`[class*="message"]` **4** 次
+  // （#148 用户轮外壳、#160 编辑按钮、#168 助手轮外壳，以及
+  // **#184 div.w-full.messageInputContainer.font-primary（输入框容器）**），
+  // `main` **0** 次（页面上根本没有 main 元素）。
+  // 驱动的读取语义是 `[...querySelectorAll(sel)].pop()` = **文档序最后一个**命中节点。
+  // #184 是输入框容器，且它排在 #172 之后 ⇒ 旧值的最后一次命中恒为它，innerText 恒为
+  // 「深度思考\n最高」= **7 字**。三处独立读数逐字吻合：
+  //   · 夹具复算：`.pop()` = #184，chars=7；
+  //   · 落地页（无会话）实测：命中 1 个节点，就是它，7 字；
+  //   · 事故轮次 240s 超时现场：驱动报 `replyChars: 7`。
+  // 也就是说 `WEB_NO_PROGRESS … 页面已有 7 字回复未回传` 里的「7 字回复」**从来不是回复**，
+  // 是输入框容器的 innerText。按本项目纪律（报错必须指向真因），这条假读数比没有读数更贵：
+  // 它把排查方向引向「解码器对不上」，而真因在别处（见下一条 decoder 注释）。
+  // 危害不止于日志：它让 `answerSelector` **恒定命中**且文本恒定 7 字 ⇒
+  // ① `domFound` 恒真、`lastDomGrowthAt` 永不刷新（「页面还在长 → 绝不动」这道保护对 zai 是死的）；
+  // ② 捕获停摆兜底（captureStallRescueMs）拿到的「页面正文」就是这个输入框容器文本，
+  //    一旦 `domTextChanged` 成立，桥会把「深度思考\n最高」当成本轮回答交给上层。
+  //
+  // ## 新值的依据（同一夹具的真机读数）
+  //
+  // #151 是用户消息节点（`div.chat-user … markdown-prose`，chars=53509）；
+  // #172 是助手轮容器（`div.chat-assistant … markdown-prose`，chars=0）；
+  // #174 是它的子节点响应正文区（`div#response-content-container`，chars=0）。
+  // 新值命中 2 个（#172、#174），`.pop()` = #174，chars=0 —— 即「页面确实什么都没说」，
+  // 如实报 0，而不是 7。
+  // `div.chat-assistant` 与 `#response-content-container` 都是**语义特征**（前端用来标记
+  // 「这一轮是谁说的 / 响应正文放哪」），不是 `.svelte-xxxx` 那种编译期哈希——与
+  // `div.chat-user` 同族，改版时更稳。两个都留：`#response-content-container` 更靠内
+  // （读到纯正文，不带助手轮外壳文案），`div.chat-assistant` 是它的父级兜底，
+  // 于是「外壳在、正文区还没挂上」时也不会退化成读不到任何节点。
+  //
+  // ## ⚠ 这一改**不会**让 z.ai 变成可用——真正的拦路虎不在选择器
+  //
+  // 2026-09-27 真机四轮复现（headless×3、headed×1，全部 0 帧）：**completion 请求根本没发出去**。
+  // 站点自带前端（z-cdn.chatglm.cn/z-ai/frontend/prod-fe-1.1.96/assets/index-p_7VciLU.js）
+  // 逐字写着这条闸门：站点特性里 `enable_captcha` 为真时，前端会先 await 一次
+  // 阿里云验证（`HN()`）拿到 `lc`，再把它传给发请求的 `bhe()`；`bhe` 内部才是
+  // fetch `…/api/chat/completions`。自动化环境下那次 await **停在页面上不返回**，
+  // 于是 `bhe` 永不执行；同页 `#chat-captcha-element`、`#chat-captcha-trigger` 可见，
+  // 滑块窗口在 headless 轮次里带 `window-show` 全显。
+  // ⇒ 本文件的 decoder/completionPaths **都不是**本轮失败的原因，别在这里找。
+  answerSelector: 'div.chat-assistant, #response-content-container',
+  // 风控闸的**可见证据**（声明位；读取与判定的接线在 lib/browser-driver.js，见下）。
+  //
+  // 为什么需要它：本轮失败的报告是 `WEB_NO_PROGRESS: 网页侧超过 120s 没有任何新内容
+  // （… 页面已有 7 字回复未回传）`——用户等满 240s，读到的却是一句由假读数拼出来的
+  // 归因（见 answerSelector 的长注释）。而真因在页面上一眼可见。驱动应当在**发送后**
+  // 周期性检查这个选择器；命中且可见时立刻抛一条可读错误（建议 code
+  // `WEB_CAPTCHA_REQUIRED`，文案里带上「站点弹出了滑块/人机验证，请在弹出的窗口里
+  // 手动通过后重试」），**不要**继续等 120s/240s 的看门狗。
+  //
+  // 真机读数（本轮，`shown` = offsetWidth||offsetHeight||getClientRects().length）：
+  //   · 发送前（落地页，probe-zai-resume-shape.mjs）：`[id*=captcha],[class*=captcha]`
+  //     查询命中 **0 个节点** —— 即这些节点不是常驻的，可以做触发器；
+  //   · 发送后 headless（probe-zai-chat-frames.mjs）：`#chat-captcha-element`、
+  //     `#chat-captcha-trigger` 可见，且 `#aliyunCaptcha-window-popup.window-show` 整窗可见；
+  //   · 事故页面（live-cdp/dom-inventory.json #269/#270/#272）：同上，`window-show`。
+  // ⚠ 如实标注两处局限：
+  //   ① 「发送前不存在」只有**落地页**那一条读数；一次**成功**轮次里这些节点长什么样
+  //      **没有读数**（本轮没有任何一次成功轮次）。所以判定必须带**可见性**，
+  //      且失败方向上宁可漏报也不能把正常轮次判死——建议只在**发送后**检查，
+  //      并在命中时如实写进 navTrace/诊断，而不是当唯一判据。
+  //   ② 有头轮次里滑块窗口未显（只有 `#chat-captcha-element`/`#chat-captcha-trigger` 可见），
+  //      所以**不能**只认 `#aliyunCaptcha-window-popup`，否则会漏掉那一种形态。
+  captchaSelector: '#chat-captcha-element, #aliyunCaptcha-window-popup.window-show',
+  // ⚠ decoder 现状（2026-09-27 取证结论，**刻意不改**）：`openai-sse` 对 z.ai 的真实帧
+  // **一个字段都对不上**，但**本仓库现有 9 个 decoder kind 里没有任何一个能解它**，
+  // 所以这里不改成另一个同样解不出的 kind（那是把「已知解不出」换成「猜着解不出」）。
+  //
+  // 真实帧形状来自**站点自带前端代码**（同一份 index-p_7VciLU.js，帧处理器 di 的解构）：
+  //   { id, done, content, delta_content, edit_content, sources, selected_model_id, error,
+  //     usage, files, phase="other", edit_index=0, scope="legacy", agent_id, delta_name,
+  //     subagent_type, task_id, tool_name, parent_message_id, delta_arguments, status,
+  //     metadata, content_blocks }
+  // 正文增量在 `delta_content`，全量快照在 `content`，阶段在 `phase`（含 "tool_response"），
+  // 收尾看 `done`。该 bundle 里 `choices` / `parts` / `reasoning_content` 出现次数**均为 0**
+  // ——即既不是 OpenAISseDecoder 的 `choices[].delta.content`，也不是 GlmDecoder 的
+  // `parts[].content[].type`（任务书里「怀疑 z.ai 用 GLM 帧」这一条**被推翻**）。
+  //
+  // 缺的那一半在 lib/decoder.js（**本文件写权限不含它**）：需要新增一个 zai 专属 kind，
+  // 语义要点是「`delta_content` 是增量、`content` 是快照」，两者混用时要走 GlmDecoder
+  // 那种前缀差分（否则整段会播两遍）。在它落地并拿到**真机帧夹具**之前，z.ai 不应
+  // 被当成可用站点；后续取证见 doc/long-term-issues.md 第 14 条与
+  // `.tmp-probe/zai/RESULT.md`（含重新抓帧的确切步骤）。
   decoder: 'openai-sse', stream: true, experimental: true,
   loginProbe: {
     bad: 'button:has-text("登录"), a:has-text("登录"), button:has-text("Sign in"), a:has-text("Sign in")',

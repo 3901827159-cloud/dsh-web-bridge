@@ -14,7 +14,7 @@
 | `lib/` 模块数 / 总行数 | **30 / 15,175** | `Get-ChildItem lib -Filter *.js` |
 | 最大模块 | `browser-driver.js` **2,734 行** | 同上 |
 | 次大 | `index.js` **2,325 行**、`agent-preset.js` **1,537 行**、`web-control.js` **917 行** | 同上 |
-| 测试文件 | **52 个** `*.test.mjs` | `test/` 目录计数（与 `check-ledger.mjs` 同一口径） |
+| 测试文件 | **109 个** `*.test.mjs` | `test/` 目录计数（与 `check-ledger.mjs` 同一口径，2026-09-27 实测） |
 | 真机夹具 | **14 份** `dsml-real-*.txt` + 5 份具名形态 | `test/fixtures/` |
 | 入口 | `main: ./lib/index.js`；`exports` 另含 `.client`、`./cordis.patch.yml` | `package.json` |
 
@@ -161,7 +161,12 @@ prompt-variants.js  -> agent-preset
 
 ---
 
-## 六、测试分布（52 个文件按被保护的对象归类）
+## 六、测试分布（按被保护的对象归类）
+
+> **计数口径更新（2026-09-27）**：本节标题原写「52 个文件」，那是 2026-09-17 的读数；
+> 同一目录今天实测是 **109 个** `*.test.mjs`（`check-ledger.mjs` 同一口径）。
+> 下表的分组与代表文件仍然成立，只是每组的文件数都涨了——需要精确数字时以
+> `check-ledger.mjs` 的读数为准（它是机器判的，本节的数字是人写的）。
 
 | 保护对象 | 代表测试 |
 | --- | --- |
@@ -175,7 +180,7 @@ prompt-variants.js  -> agent-preset
 | **任务图 / 花名册** | `roster`、`task-graph`、`task-plan`、`task-ledger` |
 | **指标 / 等待** | `metrics`、`wait-stats`、`bench`、`prompt-variants`、`prompt-bench-harness` |
 
-> **一个必须知道的计数口径**：`check-ledger.mjs` 数的是 `test/*.test.mjs` 的**文件数**（当前 52），
+> **一个必须知道的计数口径**：`check-ledger.mjs` 数的是 `test/*.test.mjs` 的**文件数**（当前 109，
 > 不是断言数。文件数变了必须同步台账，否则闸门红。
 
 ---

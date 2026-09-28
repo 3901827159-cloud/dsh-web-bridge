@@ -1601,7 +1601,57 @@ export function firstCallFenceAt(text, from = 0) {
  *   balanced  —— JSON 已配平且其后能找到闭合围栏
  *   unclosed  —— JSON 没配平（流式途中）或闭合围栏还没到
  */
+/**
+ * 一个 ``` 是不是**某个混合形状调用的收尾围栏**（0.19.41）。
+ *
+ * 混合形状（GLM 真机，见 `fenceCallBodyAt` 的注释）：
+ *
+ *     <tool_call>工具名\n{…配平调用 JSON…}\n```
+ *
+ * 判据三条同时成立才认，缺一不可：
+ *   ① 这个 ``` **之前的文本**里，存在一个 `<tool_call>` / `<function>` 开标签；
+ *   ② 该开标签后紧跟一个**裸工具名**（`[\w.$-]+`），再跟一个**配平 JSON 对象**；
+ *   ③ 那个 JSON 的结束位置与本围栏之间**只有空白**（即围栏正好是它的收尾）。
+ *
+ * 为什么必须收窄到「紧挨着」：「收尾围栏」与「下一个调用的开围栏」在文本上
+ * 一模一样（都是三个反引号）——唯一的区别就是**它前面是什么**。只有紧贴在
+ * 配平 JSON 之后的那个，才是收尾。放宽到「前面某处有标签」会开始吃真的开围栏。
+ *
+ * @param {string} src 全文
+ * @param {number} fenceStart 该 ``` 的起点下标
+ * @returns {boolean} true = 它是收尾围栏，不是开启围栏
+ */
+function closesHybridCallFence(src, fenceStart) {
+  const before = src.slice(0, fenceStart);
+  const tagRe = /<\s*(?:tool_call|function)\s*>\s*([\w.$-]+)\s*/gi;
+  let m;
+  let last = null;
+  while ((m = tagRe.exec(before)) !== null) last = m;
+  if (!last) return false;
+  const hit = readCallAt(before, last.index + last[0].length);
+  if (!hit) return false;
+  // ③ JSON 收尾与围栏之间只允许空白。
+  return before.slice(hit.end).trim() === '';
+}
+
 function fenceCallBodyAt(src, fenceStart) {
+  // 0.19.41：**混合形状的收尾围栏**不得当成开启围栏。
+  //
+  // 真机形状（`webcode-bridge-replies.glm.log` 记录[3]，一条正文里两个调用）：
+  //
+  //     <tool_call>pwsh\n{…pwsh 的调用 JSON…}\n```
+  //     <tool_call>glob\n{…glob 的调用 JSON…}\n```
+  //
+  // 两个 ``` 被 fenceSpans 配成**一对**，于是第一个（其实是 pwsh 的**收尾**）
+  // 成了「开启围栏」，而它后面第一个 `{` 是 **glob 的 JSON** —— 解析器把 glob
+  // 提前认下，pwsh 反而排到后面，调用**顺序与原文相反**（真机复现 ['glob','pwsh']）。
+  // 顺序错在派发侧就是「先跑后一个、再跑前一个」，对有依赖的连续调用是实质错误。
+  //
+  // 与本文件 0.19.23 修的 `closingFenceAfter` 是**同一族**缺陷：把一个已经收尾的
+  // 围栏当成新围栏的开头。判据刻意收窄到「这个 ``` 前面紧挨着的、是某个
+  // `<tool_call>工具名` 标签的**配平 JSON**」——只有混合形状满足：
+  // 普通 ```json 围栏的开围栏之前没有标签，普通围栏后的散文也不带配平 JSON。
+  if (closesHybridCallFence(src, fenceStart)) return null;
   const tail = src.slice(fenceStart + 3);      // 跳过 ``` 本身
   const open = tail.indexOf('{');
   // 这个 ``` 与它后面第一个 `{` 之间还有另一个 ``` ⇒ 它是**闭合**围栏，不是开头。
@@ -2303,6 +2353,67 @@ function resolveRecoverableName(args, tools) {
 const RECOVERABLE_TOOLS = new Set(['read', 'glob', 'grep']);
 
 /**
+ * 解析 GLM 原生调用体的 `key=value` 行（真机 2026-09-27，变体 A）。
+ *
+ * 输入是「`<tool_call>` 之后、工具名之后」的原文，例如：
+ *
+ *   \nfile_path=D:\…\README.zh-CN.md\nlimit=150\n
+ *
+ * 规则：按行切；行形如 `键=值` 则开一个新键；不以 `键=` 开头的行**续到上一个键的值**
+ * （值本身可以多行，例如 markdown 正文）。取不出任何键值对返回 null。
+ *
+ * ## 为什么必须有一道「键必须在 schema 里」的闸（调用方 obligationKeys 负责）
+ *
+ * 真机缺陷（2026-09-27，DSH 会话 session-75d52255 的 turn3 step2）：
+ * 模型写了 `file_path=D:\…\README.zh-CN.md\nlimit=150`，旧实现的兜底正则
+ * `([a-zA-Z_][\w]*)\s*\n([\s\S]*?)</arg_value>` 取到的是 **`md`**（`README.md` 的行尾）
+ * 与整段残文，派发出去是 `read {"md":"limit=150\n<tool_call>glob\n…"}`，
+ * DSH 回 `invalid arguments: missing required property "file_path"`。
+ * 也就是说：**错误不是「没解出调用」，而是「解出了一个参数全错的调用」**——
+ * 后者更坏，因为它让模型以为格式已经对了，于是只微调格式反复重试，一路烧窗口。
+ * 因此本函数只负责「忠实切分」，键的合法性由调用方按本会话工具表判定，
+ * 判不出就**不**入账（宁可留一条诊断，也不执行一件参数错的事）。
+ *
+ * @param {string} raw 工具名之后的原文
+ * @param {Set<string>|null} [declaredKeys] 该工具 schema 声明的参数键；给定时**每个键
+ *   都必须命中**，否则整块拒绝（`null` = 不做判定，用于纯切分场景）
+ * @returns {Record<string,string>|null} 键值对；切不出任何键、或键未过 schema 闸时 `null`
+ */
+export function parseNativeKeyValueLines(raw, declaredKeys = null) {
+  const out = {};
+  let last = null;
+  for (const line of String(raw ?? '').split(/\r?\n/)) {
+    // 收尾标签（模型自己写的 `</arg_value>` / `</tool_call>`）不是内容，先剥掉：
+    // 不剥的话值里会拖一条标签，既污染参数又让同一调用的两种写法算成两条。
+    const l = line.replace(/<\s*\/\s*(?:arg_value|tool_call|function)\s*>\s*$/i, '');
+    if (/^\s*<\s*arg_value\s*>\s*$/.test(l)) continue;
+    const m = l.match(/^\s*([A-Za-z_][\w.-]*)\s*=\s*([\s\S]*)$/);
+    if (m) {
+      last = m[1];
+      out[last] = m[2];
+      continue;
+    }
+    // 「键独占一行、值在下一行」的形状（真机 2026-09-17 夹具 test/glm-session-replay
+    // 的 `pwsh\ncommand\nGet-ChildItem …</arg_value>\ndescription\nList …</arg_value>`）：
+    // 一行只有一个标识符、且它**是本次要解的工具声明的键**，就当新键开始。
+    // 为什么必须加「在 declaredKeys 里」这一条：不加的话任何英文单词行都会被当成键，
+    // 而参数值本身可能是多行文本（write 的 content）——那样会把正文切成键值垃圾。
+    const bare = l.trim();
+    if (declaredKeys && /^[A-Za-z_][\w.-]*$/.test(bare) && declaredKeys.has(bare)) {
+      last = bare;
+      out[last] = '';
+      continue;
+    }
+    if (last !== null && bare !== '') {
+      out[last] = out[last] ? out[last] + '\n' + l : l;
+    }
+  }
+  if (!Object.keys(out).length) return null;
+  if (declaredKeys && Object.keys(out).some((k) => !declaredKeys.has(k))) return null;
+  return out;
+}
+
+/**
  * 把网页回复解析成工具调用列表（同时原样返回归一化后的全文）。
  *
  * 宽容地接受调用围栏周围的散文——这正是围栏协议的意义——但每个围栏必须是一个
@@ -2332,6 +2443,10 @@ const RECOVERABLE_TOOLS = new Set(['read', 'glob', 'grep']);
 export function parseAgentReply(text, options = {}) {
   if (!text) return { calls: [], text: '', diagnostics: [] };
   const tools = Array.isArray(options?.tools) ? options.tools : [];
+  // 本会话工具名集合（唯一取值处）。三条「名字必须在表里」的闸共用它——
+  // 闸门分散在三支里（围栏信封 / GLM 原生 key=value / 裸名+JSON），但**依据只有一份**：
+  // 「同一个判据写两份必然漂移」是本仓库反复记下的教训。
+  const knownToolNames = new Set(tools.map((t) => t?.name).filter(Boolean));
   // 0.19.11：可选严格模式（默认关）。关着时本函数与 0.19.10 逐字同行为。
   const jsonQuoteRepair = options?.jsonQuoteRepair === true;
   let s = String(text);
@@ -2402,6 +2517,21 @@ export function parseAgentReply(text, options = {}) {
     }
     let name = nameIsWrapper ? '' : rawName;
     let inferred = false;
+    // **刻意不加「名字必须在工具表里」的闸**——这是本层的一条边界，不是遗漏。
+    //
+    // 2026-09-27 曾试图在这里拒绝「写了名字、名字却不在本会话工具表内」的调用，
+    // 动机是真实日志里模型在思考通道写教学模板
+    // （`{"mcp_action":"call","name":"工具名",…}`，夹具 test/fixtures/glm-native/
+    // glm-native-d-teaching-placeholder.txt）会被解析成假调用。该改动被既有护栏
+    // 挡下，且挡得对：
+    //   · test/nameless-call.test.mjs ⑨「未知工具名**原样保留**，交给 TOOL_UNKNOWN 判定」
+    //     —— 调用带未知名字时必须**照常返回**，由 lib/index.js:1793 的 unknownNames
+    //     分支把「本会话可用工具清单」交回模型（那是可行动提示，丢在这里就没了）；
+    //   · test/official-tool-calls.test.mjs「教学骨架」—— 无工具表时骨架里的占位名
+    //     必须仍解析出 1 条（按内容签名去重），按名字拒绝会把它变成 0 条。
+    // 两条判据合起来说明：**「这个名字是占位符还是模型真写错了」在本层不可判定**
+    // （同一段文本配不同工具表，答案相反）。真正的过滤层是 index.js 的工具表过滤
+    // （`valid`/`unknownNames`），它按本会话真实工具表判定，且有对应的用户可见提示。
     if (fenceCall) {
       // 0.15.9：**没有 name 的调用不再静默丢弃**。真机证据（网页会话 49ab6330，
       // 夹具 test/fixtures/nameless-*.txt）里模型连着两轮把调用写成
@@ -2461,6 +2591,69 @@ export function parseAgentReply(text, options = {}) {
     if (!body || !body.jsonRaw) continue;
     takeObj(body.jsonRaw);
   }
+  // GLM-5.3 原生形状**变体 A**（真机 2026-09-27，夹具 test/fixtures/glm-native/
+  // glm-native-a-keyeq-lines.txt）：`<tool_call>` + 裸工具名 + `key=value` 行，
+  // 且**没有任何 `<arg_key>` 标签**，块尾是模型自己写的 `</arg_value>`（无配对开标签）。
+  //
+  // 为什么必须独立成一支、且必须排在 tagRe 之前：tagRe 要求标签成对
+  // （`<tool_call>…</tool_call>`），而这条回复里三个块共用收尾、开标签只有两个，
+  // 于是 tagRe 一个都取不到；而 tagRe 体内的 `</arg_value>` 分支会把整段残文
+  // 当键值硬解（那正是 `{"md": …}` 的来源）。这一支按「开标签逐个切块」取，
+  // 切块规则与 tagRe 无关。
+  //
+  // 判据三道（缺一不入账）：
+  //   ① 裸名必须**在本会话工具表里**——教学模板里的 `工具名` 因此被挡住（理由同下）；
+  //   ② 至少切出一个 `key=value`；
+  //   ③ **每个键都必须由该工具声明**（schema.properties）。第 ③ 道是真机缺陷的直接
+  //      产物：模型漏写 `<arg_key>` 时旧实现会解出 `md` 这种垃圾键并派发出去。
+  //      宁可丢这一条（留诊断），也不派发参数错的东西。
+  const nativeRe = /<\s*(?:tool_call|function)\s*>\s*([\w.$-]+)[ \t]*\r?\n?/gi;
+  const nativeSpans = [];
+  while ((m = nativeRe.exec(s)) !== null) {
+    nativeSpans.push({ name: m[1], start: m.index + m[0].length, tagAt: m.index });
+  }
+  for (let i = 0; i < nativeSpans.length; i += 1) {
+    const cur = nativeSpans[i];
+    // 边界：下一个开标签（可能跟在 `</arg_value></tool_call>` 之后，也可能直接跟）
+    // 或闭标签或 ` ``` ` 围栏；都找不到就取到文末。
+    // **顺序要紧**：先找下一个开标签（真机里三个块是连写的），再找任意终止符——
+    // 反过来会把第一个块的边界切在第二个块的开标签之前，丢掉整块。
+    const rest = s.slice(cur.start);
+    const cands = [
+      rest.search(/<\s*(?:tool_call|function)\s*>/i),
+      rest.search(/<\s*\/\s*(?:tool_call|function)\s*>/i),
+      rest.search(/```/),
+    ].filter((v) => v >= 0);
+    const body = cands.length ? rest.slice(0, Math.min(...cands)) : rest;
+    if (!body.trim()) continue;
+    if (knownToolNames.size && !knownToolNames.has(cur.name)) {
+      diagnostics.push(`native key=value call body skipped (名字不在本会话工具表内): ${cur.name}`);
+      continue;
+    }
+    const tool = tools.find((t) => t?.name === cur.name);
+    const props = tool?.parameters && typeof tool.parameters === 'object' ? tool.parameters.properties : null;
+    const declared = props && typeof props === 'object' ? new Set(Object.keys(props)) : null;
+    // 判据③：每个键都必须由该工具声明。不通过就**整块**丢（`declaredKeys` 闸在
+    // parseNativeKeyValueLines 里），只留一条诊断——理由见该函数的注释。
+    const kv = parseNativeKeyValueLines(body, declared);
+    if (!kv) {
+      diagnostics.push(`native key=value call body rejected (参数键不在 ${cur.name} 的 schema 内或切不出键): `
+        + JSON.stringify(body.trim().slice(0, 120)));
+      continue;
+    }
+    const args = {};
+    for (const [k, v] of Object.entries(kv)) {
+      const t = String(v).trim();
+      // 值按 JSON 字面量解释（`limit=150` 要变成数字 150，否则 DSH 的 schema 会拒），
+      // 解不出就保留字符串——与既有 arg_value 分支逐字同一口径。
+      if (/^-?\d+(\.\d+)?$/.test(t) || t === 'true' || t === 'false'
+        || (t.startsWith('{') && t.endsWith('}')) || (t.startsWith('[') && t.endsWith(']'))) {
+        try { args[k] = JSON.parse(t); continue; } catch { /* 非 JSON：按下面的字符串处理 */ }
+      }
+      args[k] = v;
+    }
+    takeObj(JSON.stringify({ mcp_action: 'call', name: cur.name, arguments: args }), true);
+  }
   const tagRe = /<\s*(?:tool_call|function|stories|seed:tool_call)\s*>([\s\S]*?)<\s*\/\s*(?:tool_call|function|stories|seed:tool_call)\s*>/gi;
   while ((m = tagRe.exec(s)) !== null) {
     // GLM / Z.ai 原生 arg_value 形状（真机 session-2411bccd 与开源 GLM-4.5/4.6/5.1 模板）：
@@ -2486,20 +2679,15 @@ export function parseAgentReply(text, options = {}) {
           args[k] = v;
           count++;
         }
-        // 若无 <arg_key> 则匹配 key\nval</arg_value> 形式
-        if (count === 0) {
-          const argRe = /\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\n([\s\S]*?)<\s*\/\s*arg_value\s*>/gi;
-          let match;
-          while ((match = argRe.exec(rest)) !== null) {
-            const k = match[1];
-            let v = match[2].trim();
-            if ((v.startsWith('{') && v.endsWith('}')) || (v.startsWith('[') && v.endsWith(']')) || v === 'true' || v === 'false' || /^-?\d+(\.\d+)?$/.test(v)) {
-              try { v = JSON.parse(v); } catch {}
-            }
-            args[k] = v;
-            count++;
-          }
-        }
+        // 若无 <arg_key>：旧实现在这里用 `([a-zA-Z_]\w*)\s*\n([\s\S]*?)</arg_value>`
+        // 硬猜键名——**真机事故（2026-09-27）正是它**：模型写的是
+        // `<tool_call>read\nfile_path=D:\…\README.md\nlimit=150</arg_value></tool_call>`
+        // （无 arg_key），该正则把键取成 `md`（`README.md` 的行尾）、值取成整段残文，
+        // 派发 `read {"md":"limit=150\n<tool_call>glob\n…"}` → DSH 回
+        // `invalid arguments: missing required property "file_path"`。
+        // **错参数比丢调用更坏**：模型以为格式对了，于是只微调格式反复重试。
+        // 这一形状现在由下面 parseNativeKeyValueLines 那一支处理：它按 `key=value`
+        // 行取键，并要求**每个键都由 schema 声明**——取不出就留诊断、不入账。
         if (count > 0) {
           takeObj(JSON.stringify({ mcp_action: 'call', name: toolName, arguments: args }), true);
           continue;
@@ -2512,15 +2700,65 @@ export function parseAgentReply(text, options = {}) {
   // 跟随，没有 name 字段——<tool_call>pwsh{"command":"Get-ChildItem …"}</tool_call>。
   // tagRe 对它取到的 body 以工具名开头（不以 { 开头）而跳过，这里单独还原：
   // 裸名 + 配平 JSON + 紧跟闭标签三件齐才认，散文里的举例不会误报。
+  //
+  // 0.19.41 三处真机缺陷修复（GLM，证据见 test/probe 与 doc/research/
+  // 2026-09-27-glm-native-tool-call.md）。三支**都只放宽终止符与入账形状**，
+  // 不改「什么算调用」的判据，deepseek 官方模板路径不经此处、零位移。
+  //
+  // 本轮**新增的第三支是收紧**（②-前置的名字闸），它由一次对真实日志的复算逼出来：
+  // `test-mock/probe-glm-parse-replay.mjs` 把 `webcode-bridge-replies.glm.log` 里
+  // 41 条真实 GLM 回复逐条喂给生产解析器复算，前两支放宽后出现 **3 条假调用**
+  // （记录[25] 09:07:16、[34] 09:18:53、[38] 09:19:55），名字分别是
+  // `工具名` / `tool name` / `tool_name`——全部来自**思考文本里写的教学模板**，
+  // 例如思考里写「调用形如 `<tool_call>工具名{"参数":…}</tool_call>`」。
+  // 没有这道闸，桥会因为模型**描述**协议而真的去执行一个不存在的工具。
   const bareNameRe = /<\s*(?:tool_call|function)\s*>\s*([\w.$-]+)\s*/gi;
   while ((m = bareNameRe.exec(s)) !== null) {
     const hit = readCallAt(s, m.index + m[0].length);
     if (!hit) continue;
-    if (!/^\s*<\s*\/\s*(?:tool_call|function)\s*>/i.test(s.slice(hit.end))) continue;
+    // ②-前置 名字闸：本会话工具表非空时，裸名必须**真的是**表里的工具。
+    //
+    // 为什么这道闸只加在裸名支：裸名支的判据是「标签 + 紧随的名字 + 配平 JSON」，
+    // 其中**只有名字**能证明这段是调用而不是举例——参数 JSON 在举例里同样配平
+    // （模型写模板时会把真实参数写进去）。闭标签支（tagRe）另一路不受影响，
+    // 因为它的体是完整信封（mcp_action/name/arguments 齐全），形状本身已自证。
+    //
+    // 工具表为空（纯文本解析、无会话上下文）时不做判定——缺依据就不拒绝，
+    // 与 `inferToolNameFromArgs` 对空表的处理同一立场。
+    if (knownToolNames.size && !knownToolNames.has(m[1])) {
+      diagnostics.push(`bare-name call body skipped (名字不在本会话工具表内): ${m[1]}`);
+      continue;
+    }
+    const bareTail = s.slice(hit.end);
+    // ① 终止符放宽：闭标签 **或** 收尾的 ``` 围栏。
+    //
+    // 真机现场（webcode-bridge-replies.glm.log 记录[11]，2026-09-27）：GLM 把两套
+    // 形状**混着写**——标签开头 + 裸工具名 + 调用 JSON + ``` 收尾。它不是任何一种
+    // 已教形状，但**调用本身是完整的**（JSON 配平、name/arguments 齐全）。旧守卫
+    // 只认 `</tool_call>`，于是这条被判「不是调用」静默丢弃，用户侧就是「写了调用
+    // 却没执行」。同一份日志里该形状出现 5 条，其中 1 条整条丢、1 条丢了 2 个里的 1 个。
+    //
+    // 为什么敢认围栏收尾：`<tool_call>` 开标签本身就把「这是调用」钉死了（散文举例
+    // 要触发得先写出开标签 + 紧跟裸工具名 + 配平 JSON 三件齐），围栏只是它的收尾。
+    // 与既有纪律一致：**终止符形态不构成「算不算调用」的判据**。
+    const closedByTag = /^\s*<\s*\/\s*(?:tool_call|function)\s*>/i.test(bareTail);
+    const closedByFence = /^[ \t]*\r?\n?[ \t]*```/.test(bareTail);
+    if (!closedByTag && !closedByFence) continue;
     try {
-      const args = JSON.parse(hit.raw);
-      if (args && typeof args === 'object' && !Array.isArray(args)) {
-        takeObj(JSON.stringify({ mcp_action: 'call', name: m[1], arguments: args }), true);
+      const body = JSON.parse(hit.raw);
+      if (!body || typeof body !== 'object' || Array.isArray(body)) continue;
+      if (body.mcp_action === 'call' || (typeof body.name === 'string' && body.name.trim() && body.arguments !== undefined)) {
+        // ② 体内已是**完整调用信封**时，把原文交给 takeObj 按信封入账。
+        //
+        // 旧实现一律把它当「参数对象」，于是 arguments 被多嵌一层（真机实测派发到
+        // 的是 {"mcp_action":…,"name":…,"arguments":{…}}，工具拿到的是错参数）；
+        // 更糟的是 bareObjRe 随后扫到**同一段原文**又收一次——两支各收一次，
+        // 同一轮解析出 2 个同名调用（真机复现 calls=2），派发侧就执行两遍。
+        // 交给 takeObj 后两边共用 seen 的**原文去重**，第二个自然被挡掉。
+        takeObj(hit.raw);
+      } else {
+        // GLM-5.3 原生形状（2026-09-13 真机）：JSON 本身就是参数体，工具名在标签后。
+        takeObj(JSON.stringify({ mcp_action: 'call', name: m[1], arguments: body }), true);
       }
     } catch { /* 配平但非对象：不算调用 */ }
   }

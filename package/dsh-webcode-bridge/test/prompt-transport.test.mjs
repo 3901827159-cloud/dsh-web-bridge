@@ -226,3 +226,61 @@ test('⑩ 站点禁令必须可核对：status 投影带 attachForbidden，且 s
   assert.doesNotMatch(String(glmOut.transportLine), /永不使用附件投递/,
     '站点禁令文案被套用到了非禁站点（GLM 需要附件投递）');
 });
+
+// ── ⑪ 用户选了「纯文本」时，站点硬上限必须仍然兜得住 ─────────────────────────
+//
+// 真机事故（2026-09-27，kimi，用户报障原话「一句话就处理失败」）：用户把投递形态
+// 设成「纯文本」，于是 38,807 字符全量灌进 contenteditable，回读只有 20,158——
+// 内容被静默丢掉，桥如实报 `PROMPT_TRUNCATED`，而**用户侧看到的是「你好，请你了解
+// 这个插件项目」这句话处理失败**。同一站点上附件投递实测可用（.tmp-probe/kimi/
+// RESULT.md：模型读出了只在附件正文里的标记值，3,004 与 38,032 两个尺寸都验过）。
+//
+// 因此判据是：**「用户偏好」不能压过「这条消息根本发不完整」**。这一条必须同时钉住
+// 两件相反的事，缺一条就会退化成另一种错误：
+//   · 超硬上限 + transport:'inline' ⇒ 必须改走附件（否则必然半截）；
+//   · 未超硬上限 + transport:'inline' ⇒ **必须仍然 inline**（否则就是夺掉用户的选择，
+//     而 inline 在上限内完全正常：真机 38.8k 一次性写入被模型正确回答）。
+test('⑪ 用户选「纯文本」时，超过站点硬上限必须改走附件；上限内仍尊重用户选择', () => {
+  const HARD = 200_000;
+  // ① 超上限：改了用户的纯文本选择，但原因是「纯文本在此长度必然发不完整」。
+  const over = promptTransportPlan({
+    chars: 250_000, inlineLimit: 8_000, attachEnabled: true, attachSupported: true,
+    transport: 'inline', hardLimit: HARD,
+  });
+  assert.equal(over.mode, 'attach', '超过站点硬上限却仍走纯文本 ⇒ 内容必然被网页静默截断，'
+    + '而报错文本会把它说成「网页端长度上限」，把人引向「压缩上下文」这个错误方向');
+  assert.equal(over.reason, 'inline-unsafe',
+    'reason 必须是新的 inline-unsafe（面板/日志据此区分「用户选择」与「站点底线被触发」）；'
+    + '实际 ' + over.reason);
+  assert.equal(over.payloadChars, 250_000, '未配 maxChars 时不得截断消息');
+  // ② 边界：恰好等于硬上限仍然 inline（off-by-one 不能把正常轮次推去附件）。
+  const edge = promptTransportPlan({
+    chars: HARD, inlineLimit: 8_000, attachEnabled: true, attachSupported: true,
+    transport: 'inline', hardLimit: HARD,
+  });
+  assert.equal(edge.mode, 'inline', '恰好等于硬上限就必须尊重用户的纯文本选择');
+  assert.equal(edge.reason, 'transport-inline');
+  // ③ 上限内：reason 一字未变（旧行为零位移）。
+  const under = promptTransportPlan({
+    chars: 38_807, inlineLimit: 8_000, attachEnabled: true, attachSupported: true,
+    transport: 'inline', hardLimit: HARD,
+  });
+  assert.equal(under.mode, 'inline', '上限内的长轮次不得被这条底线改道');
+  assert.equal(under.reason, 'transport-inline', '上限内的 reason 必须与 0.19.40 逐字相同');
+  // ④ 站点没有实测上限（hardLimit=null/undefined/非法）⇒ 行为与旧版逐字相同。
+  for (const none of [undefined, null, 0, -1, NaN, 'abc']) {
+    const p = promptTransportPlan({
+      chars: 900_000, inlineLimit: 8_000, attachEnabled: true, attachSupported: true,
+      transport: 'inline', hardLimit: none,
+    });
+    assert.equal(p.mode, 'inline', 'hardLimit=' + String(none) + ' 时不得改变既有行为');
+    assert.equal(p.reason, 'transport-inline', 'hardLimit=' + String(none) + ' 的 reason 必须逐字不变');
+  }
+  // ⑤ 页面没有附件入口时**不假装能救**：如实回落 inline，让「写不完整」这条错暴露出来。
+  const noInput = promptTransportPlan({
+    chars: 250_000, inlineLimit: 8_000, attachEnabled: true, attachSupported: false,
+    transport: 'inline', hardLimit: HARD,
+  });
+  assert.equal(noInput.mode, 'inline', '没有上传入口时改道只会失败得更晚；必须如实回落');
+  assert.equal(noInput.reason, 'transport-inline');
+});

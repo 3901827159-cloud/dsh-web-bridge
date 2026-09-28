@@ -40,6 +40,8 @@
 | 26 | **`empty response from web AI`：思考-only 流走硬失败**（2026-09-19 新登记，**0.16.11 已修**） | 高 | 否 | `lib/index.js`、`lib/browser-driver.js`；与 #22 同族 |
 | 27 | **站点品牌图标的来源无法在本机复核**（0.16.36 新登记，**0.16.37 已解决**） | 低 | 否 | `lib/client.cjs`（`SITE_ICON_PATHS`） |
 | 28 | **思维链退化重复（同段内容原地打转）**（2026-09-26 新登记，**已修 0.19.26**）——#22 的一个可判定子形态 | 中 | 否 | `lib/repeat-detect.js`、`lib/index.js`（`thinkingOnlyNotice`）、`test/repeat-detect.test.mjs` |
+| 29 | **Z.ai 自带风控闸门（验证通过前不发请求）**（2026-09-27 新登记）——**代码无法解决**，已改为提前如实报错 | 高 | 否 | `lib/providers.js`（`captchaSelector`）、`lib/browser-driver.js`（`WEB_CAPTCHA_REQUIRED`）、`test/captcha-gate.test.mjs` |
+| 30 | **Z.ai 真实流帧格式未录制**（2026-09-27 新登记）——9 个既有 decoder 都读不了它 | 高 | 否 | `lib/decoder.js`、`lib/providers.js`（ZAI 的 `decoder` 刻意未改） |
 
 > **一览表完整性（2026-09-16 修正；2026-09-26 补上闸门）**：本表此前**漏登记 #19 与 #20**（正文有、表里没有）。
 > 这两条都是可机检的登记错误，而当时没有任何闸门覆盖「正文条目 ↔ 表格条目」的一致性。
@@ -1654,3 +1656,95 @@ node .tmp/icon-source-verify.mjs    # 退出码 0 = 九条逐字相同
 `test/watchdog-first-byte.test.mjs` 第 ① 项抓出（期望 `'网页答复'`、实际 `THINKING_ONLY_NO_ANSWER`）；
 `git stash` 对照 **HEAD = 9/9 通过**、带本轮改动 = **8/9** ⇒ 确认是本轮引入的回归。修法即补回
 `continue`，教训写进代码注释。
+
+---
+
+## 29. **Z.ai 自带风控闸门：验证通过前根本不发请求**（2026-09-27 新登记）
+
+### 现象（用户原话）
+
+> 「然后z.ai:本轮运行失败WEB_NO_PROGRESS: 网页侧超过 120s 没有任何新内容（页面在，判定相位=
+> 网页还没开口且驱动不在忙（按常规窗口未宽限），最近驱动活动时间 1s 前，**页面已有 7 字回复未回传**）」
+
+### 两件事，都不是报错里说的那件
+
+**① 那 7 个字不是回复。** 旧 `answerSelector` 是宽特征串
+`div.markdown-body, .markdown-body, [class*="prose"], [class*="message"], main`，
+而驱动读的是 `[...querySelectorAll(sel)].pop()`（文档序最后一个）。尾部那条
+`[class*="message"]` 命中的是**输入框容器** `div.messageInputContainer`，它的 innerText
+恰好是「深度思考\n最高」= **7 字**。三处独立读数逐字吻合：293 元素真机夹具复算 / 落地页实测 /
+事故现场 `replyChars:7`。（**已修 0.19.41**：`answerSelector` 改为语义特征
+`div.chat-assistant, #response-content-container`，护栏 `test/zai-answer-selector.test.mjs`。）
+
+**② 真因不在解码器，也不在超时：请求根本没发出去。** 站点自带前端
+（`z-cdn.chatglm.cn/z-ai/frontend/prod-fe-1.1.96/assets/index-p_7VciLU.js`）逐字写着：
+
+```js
+if (l()?.features?.enable_captcha) { try { lc = await HN() } catch { …return } }
+const bu = await bhe(localStorage.token, {stream, model, messages, params, files, mcp_servers, features}, …, lc)
+```
+
+`bhe` 就是 `fetch(`${base}/api/chat/completions?…`)`。`GET /api/config` 的唯一命中读数是
+`features.enable_captcha = true`；自动化环境下 `await HN()`（阿里云滑块验证）**不返回**，
+于是 `bhe` 永不执行 ⇒ wire 上**零帧**。四轮真机复现（headless×3 含一轮完整 `driver.sendTurn`、
+headed×1）**全部 0 帧**；把 UA 从 `HeadlessChrome` 换成正常 Chrome 也**没过闸**。
+
+### 为什么不修它（这是有意的现状）
+
+**绕站点风控属破解行为，本项目不做。** 因此本轮只做两件事：
+
+1. 把真因如实暴露出来：新增站点声明位 `captchaSelector`
+   （`#chat-captcha-element, #aliyunCaptcha-window-popup.window-show`），驱动在
+   **发送确认之后**做一次采样，命中可见节点即抛 `WEB_CAPTCHA_REQUIRED`，文案说明
+   「消息未被网页受理」「wire 上零帧」、要求「在弹出的浏览器窗口里手动完成验证后重试」，
+   并**明确否掉**「解码器 / 网页没回传」这两个误导方向；有头时把窗口带到前台。
+   护栏 `test/captcha-gate.test.mjs`（5 项，含「必须晚于发送确认与回读校验」
+   「不得按站点名硬编码」「必须是一次采样而不是轮询等超时」）。
+2. 把「换掉 decoder 就能好」这条错误方向钉死在档案里（见 #30）。
+
+### 未取证（不猜）
+
+人肉过一次验证之后 `enable_captcha` 是否仍每次触发：`lc` 是每次发送的局部变量、
+`await HN()` 每次发送重跑，但 `HN()` 内部是阿里云无痕验证语义（分低静默通过、分高弹滑块），
+而**我们一次 `HN()` 成功返回都没观测到** ⇒ 答不了。决定性下一步：
+`$env:PROBE_HEADED='1'; node .tmp-probe/zai/probe-zai-chat-frames.mjs`（有头窗停在页面 150s，
+人肉拖过滑块后 fetch tee 自动落盘真机帧）。这条同时能回答 #30。
+
+---
+
+## 30. **Z.ai 真实流帧格式未录制：现有 9 个 decoder 都读不了它**（2026-09-27 新登记）
+
+### 结论来自站点 bundle 的逐字片段（**不是**一次真实响应）
+
+站点自带前端里 `"parts"` 出现 **0** 次、`choices` **0** 次、`reasoning_content` **0** 次
+⇒ z.ai **既不是** GLM 的 `parts[].content[].type`（`GlmDecoder`），
+**也不是** OpenAI 的 `choices[].delta.content`（`OpenAiSseDecoder`）。
+真实帧是扁平字段（帧处理器 `di` 的解构，逐字）：
+
+```
+{id, done, content, delta_content, edit_content, sources, …, phase="other", …,
+ tool_name, delta_arguments, status, metadata, content_blocks}
+```
+
+其中 **`delta_content` 是增量、`content` 是全量快照**——混用必须做前缀差分，
+否则整段播两遍（与 #21「SET 重发吞掉流式增量」同一族坑）。
+
+### 为什么 `decoder` 字段**刻意没改**
+
+现有 9 个 decoder kind 没有一个读 `delta_content`。把 ZAI 的 `decoder` 换成 `'glm'`
+就是「猜着解不出」——比维持现状更糟：现状至少报的是「零帧」，换错会报出一堆错读数。
+因此 0.19.41 只改了 `answerSelector`（那是**已被真机证伪的假读数**，不修会继续误导排查）
+与本条登记，**decoder 留待有真机帧的那一次**。
+
+### 取帧的方法（已备好，缺一次人肉过验证）
+
+`$env:PROBE_HEADED='1'; node .tmp-probe/zai/probe-zai-chat-frames.mjs`：有头窗停在页面等
+150s，人肉拖过滑块后，页面侧 fetch tee 自动把真机帧落盘。拿到帧后按上面字段形状写 decoder，
+并把帧样本存成 `test/fixtures/` 的夹具（**逐字**，会话 id 可脱敏）。
+
+### 与此条同时被推翻的一条假设
+
+「z.ai 用 GLM 的 `parts` 帧，所以只是 `decoder` 选错了」——**证伪**。
+`completionPaths`（`/api/chat/completions`）是**对的**；会话地址形状 `/c/<uuid>`
+虽然**观察到**了但 `goto` 被打回根地址、标记 0 次命中 ⇒ 与 kimi 的 `/chat/<uuid>`
+（goto 后地址逐字不变、读回上轮标记）形成对照，z.ai **继续维持 `unsupported`**。

@@ -37,10 +37,27 @@
  * @param {number} o.max 文本长度上限（文件名长度 + 80）。
  * @param {string} o.transcriptSel 正文节点选择器。
  * @param {string[]} o.sels 类名候选选择器。
+ * @param {boolean} [o.stemFallback] 允许按**去扩展名的 stem** 再匹配一次（真机 kimi 的卡片不带扩展名）。
  */
 export function pickAttachEvidence(o) {
-  const { doc, input, ta, name, max, transcriptSel, sels } = o;
+  const { doc, input, ta, name, max, transcriptSel, sels, stemFallback } = o;
   const NAME = String(name || '');
+  // 站点只渲染「去扩展名的 stem」时的第二把尺子（真机 2026-09-27，kimi）。
+  //
+  // 真机现场（.tmp-probe/kimi/RESULT.md §3/§7）：kimi 上传 `webcode-context.md` 后
+  // 附件卡里渲染的是 `<p class="file-card-info-name">webcode-context</p>`——**没有扩展名**。
+  // 完整文件名证据因此恒 `nameHit: null` ⇒ `ATTACH_NOT_CONFIRMED` ⇒ 回落 inline ⇒
+  // 38,027 字符灌进输入框 ⇒ PROMPT_TRUNCATED。而**附件其实是成功的**（模型读出了只在
+  // 附件正文里的标记值，3,004 与 38,032 两个尺寸都验过）。
+  //
+  // 为什么第二条只认 stem、绝不放宽成「任意候选」：kimi 页面上 `[class*='file-card']`
+  // 有 42 个可见节点、`img[src^='blob:']` 为 0（同一份读数）。按类名放行会把历史附件卡
+  // 全部算成本轮证据——那正是本文件头注记的假阳性形态。stem 仍然是我们传给
+  // setInputFiles 的那个名字的**前缀**，且照样要过「在 composer 作用域内、不在正文里、
+  // 文本长度 ≤ stem+80」三道闸。
+  const STEM = NAME ? (NAME.replace(/\.[^.]*$/, '') || NAME) : '';
+  const stemOk = stemFallback === true && STEM.length >= 4 && STEM !== NAME;
+  const needle = stemOk ? STEM : NAME;
   const skip = (el) => ['SCRIPT', 'STYLE', 'INPUT', 'TEXTAREA'].includes(el.tagName);
   const qsa = (root, sel) => { try { return [...root.querySelectorAll(sel)]; } catch { return []; } };
 
@@ -67,7 +84,7 @@ export function pickAttachEvidence(o) {
   const hits = qsa(doc, 'body *').filter((el) => {
     if (skip(el)) return false;
     const t = (el.textContent || '').trim();
-    if (NAME && !t.includes(NAME)) return false;
+    if (needle && !t.includes(needle)) return false;
     if (t.length > max) return false;
     if (inTranscript(el)) return false;              // ② 正文排除
     if (scope && !scope.contains(el)) return false;  // ③ composer 作用域
@@ -83,6 +100,10 @@ export function pickAttachEvidence(o) {
       cls: String(node.getAttribute('class') || '').slice(0, 120),
       id: node.id || null,
       snippet: String(node.outerHTML || '').replace(/\s+/g, ' ').trim().slice(0, 200),
+      // 命中是用哪把尺子得到的：`exact` = 完整文件名（含扩展名），`stem` = 去扩展名。
+      // 这个字段是给**读数字的人**用的——真机上「附件确认了没有」与「页面渲染的是不是
+      // 完整名」是两件事，混在一句 `nameHit` 里下次归因又得从头取证。
+      matched: stemOk ? 'stem' : 'exact',
     };
   }
   let near = null;

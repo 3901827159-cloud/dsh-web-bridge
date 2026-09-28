@@ -117,6 +117,28 @@ test('未知站点 / 垃圾地址一律 null，不得抛错', () => {
   assert.equal(conversationUrlFor('glm', 'https://chatglm.cn', null), null);
 });
 
+// kimi：真机两轮实录（2026-09-27）拿到了**可导航**的形状，因此这次声明它。
+//
+// 补这一条之前 kimi 的读数是 `WEB_SESSION_LOST: 会话槽为空（site=kimi，
+// no-stored-session） — 需要整段重建`——即每轮都整段重建、用户看到「每轮新开对话」。
+// 与 zai 的取舍差别只有一条：**按形状导航回去之后，地址与页面内容是否还是那个会话**。
+test('kimi：/chat/<uuid> 可解析且可导航回去（真机读数，不是照抄别的站点）', () => {
+  const URL1 = 'https://www.kimi.com/chat/1a0e26b2-8e72-8a5a-8000-09c279d31e8d?chat_enter_method=home';
+  const ID = '1a0e26b2-8e72-8a5a-8000-09c279d31e8d';
+  assert.equal(conversationIdFromUrl('kimi', URL1), ID, '真机地址必须能解析出会话 id');
+  // 构造器与解析器必须互为逆运算（否则「存进去的 id 导航不回去」）。
+  const built = conversationUrlFor('kimi', 'https://www.kimi.com', ID);
+  assert.equal(built, 'https://www.kimi.com/chat/' + ID);
+  assert.equal(conversationIdFromUrl('kimi', built), ID);
+  // 反例：落地页与其它路径都不带会话 id，不得被误判成会话地址
+  // （误判的后果是导航到不存在的地址，比「不支持」更糟）。
+  assert.equal(conversationIdFromUrl('kimi', 'https://www.kimi.com/'), null);
+  assert.equal(conversationIdFromUrl('kimi', 'https://www.kimi.com/chat'), null);
+  assert.equal(conversationIdFromUrl('kimi', 'https://www.kimi.com/other/1a0e26b2-8e72-8a5a-8000-09c279d31e8d'), null);
+  // 太短的串不是 uuid（防止把 `/chat/new` 之类当 id）。
+  assert.equal(conversationIdFromUrl('kimi', 'https://www.kimi.com/chat/abc'), null);
+});
+
 test('conversationNav：fresh 请求 → fresh 态（即使槽里有会话）', () => {
   const nav = conversationNav({ siteId: 'glm', origin: 'https://chatglm.cn', fresh: true, sessionId: GLM_CID });
   assert.equal(nav.state, 'fresh');

@@ -439,13 +439,31 @@ export function summarizeRequestMetadata(body) {
  * `attach-disabled`：那句话在面板上会被读成「附件功能被关掉了」，而用户只是选了纯文本。
  *
  * @param {{chars?: number, inlineLimit?: number, attachSupported?: boolean, attachEnabled?: boolean,
- *   maxChars?: number, transport?: 'attach'|'inline', attachForbidden?: boolean}} o
+ *   maxChars?: number, transport?: 'attach'|'inline', attachForbidden?: boolean,
+ *   hardLimit?: number|null}} o
  * @returns {{mode: 'inline'|'attach', reason: string, total: number, limit: number,
  *   payloadChars: number, truncate: boolean, kept: number|null, maxChars: number|null}}
  */
 export function promptTransportPlan(o = {}) {
   const total = Math.max(0, Math.floor(Number(o.chars) || 0));
   const limit = Number(o.inlineLimit) > 0 ? Math.floor(Number(o.inlineLimit)) : 0;
+  // 站点级**硬上限**（0.19.41）：纯文本写入超过它就不再是「偏好」问题，而是「发出去
+  // 必然半截」——因此它优先于用户显式选的 `transport: 'inline'`。
+  //
+  // 真机依据（2026-09-27，kimi）：用户把投递形态设成「纯文本」，于是 38,807 字符
+  // 全量灌进 contenteditable，回读到 20,158（内容被静默丢掉）⇒ 桥如实报
+  // PROMPT_TRUNCATED，**用户看到的是「一句话就处理失败」**。而同一个站点上
+  // 附件投递实测可用（模型读出了只在附件正文里的标记值）。也就是说：
+  // 「用户选了纯文本」与「这条消息根本发不完整」冲突时，让用户拿到完整回复优先。
+  //
+  // 为什么不是「inline 一律改成 attach」：那会夺掉用户的选择权，而 inline 在
+  // 上限内是**完全正常**的（真机 38.8k 单次写入被模型正确回答）。这里只兜住
+  // 「必然失败」的那一段，并且把原因如实写进 reason（面板可核对）。
+  //
+  // 阈值来源见 SITE_COMPOSER_HARD_LIMIT；`null`/非法 = 该站点没有实测上限，
+  // 行为与旧版逐字相同（只有 `transport:'inline'` 一条判据）。
+  const hardRaw = o.hardLimit === undefined || o.hardLimit === null ? null : Number(o.hardLimit);
+  const hardLimit = Number.isFinite(hardRaw) && hardRaw > 0 ? Math.floor(hardRaw) : null;
   // 1_500_000 不是网页的实测上限，是「真机已知最大 409555 字符（GET /__webcode/preset
   // 的 promptChars，见本函数上方注释）的约 3.7 倍」这个余量的落点：真机正常轮次离它
   // 很远，触到它的输入本就该怀疑是不是上下文失控了。
@@ -472,7 +490,15 @@ export function promptTransportPlan(o = {}) {
       maxChars,
     };
   };
-  if (o.transport === 'inline') return cap('inline', 'transport-inline');
+  if (o.transport === 'inline') {
+    // 超硬上限：纯文本这条路**必然**半截，改走附件（前提：站点真的有入口）。
+    // 入口缺失时如实回落 inline——那时唯一可做的就是把「写不完整」这条错误暴露出来，
+    // 而不是假装发成功。
+    if (hardLimit !== null && total > hardLimit && o.attachSupported && !o.attachForbidden) {
+      return cap('attach', 'inline-unsafe');
+    }
+    return cap('inline', 'transport-inline');
+  }
   // 站点级禁令优先于阈值（0.16.7）：DeepSeek 的网页**收得下附件但不读它**——真机
   // 2026-09-18 实测「附件投递（over-limit, 71994 字符, webcode-context.md）」那一轮
   // 零回复、页面退回根地址、domChars=0；同一份设置改回纯文本就正常。因此该站点
@@ -565,8 +591,70 @@ export const ATTACH_FORBIDDEN_SITES = Object.freeze(new Set());
  * kimi 的附件要件齐备（`attachSelector: "input[type='file']"`、Connect-RPC 解码器
  * 已在），与 0.19.11 deepseek 修复逐字同构地取 8,000：真实会话首轮普遍 ≥ 20k，
  * 收紧后全部走附件，输入框里只留指针文本。
+ * ## GLM 加入（0.19.41，真机取证）
+ *
+ * 这一条**本该早就有**：本文件 `ATTACH_FORBIDDEN_SITES` 的注释（0.16.31 写）
+ * 与 `providers.js` 的 GLM 声明都已经把结论写死了——
+ *
+ *   > 真正的站点差异（**GLM 输入框装不下长文**）仍然由各站点的**阈值**表达
+ *   > 真机读数：GLM 的输入框装不下长文（用户原话「他在附件可以，输入框过长」），
+ *   > 所以它必须留在附件路径上
+ *
+ * 但阈值表里**只加了 deepseek 与 kimi，glm 一直缺席**——于是那句「必须留在附件
+ * 路径上」只是注释，没有约束力。真机后果（2026-09-27，本机 0.19.40）：
+ *
+ *   一轮 12,911 字符的提示词（全站默认阈值 60,000 ⇒ `under-limit` ⇒ inline）
+ *   灌进 chatglm.cn 输入框，回读只有 12,870 字符，本轮直接以
+ *   `PROMPT_TRUNCATED: 网页输入框只接收了 12870/12911 字符` 失败——**用户正报的
+ *   「chatglm 老是失败」就是这么来的**。
+ *
+ * 取 8,000 与 deepseek/kimi 同口径（不是新拍的数）：真实会话首轮普遍 ≥ 20k，
+ * 收紧后全部走附件，输入框里只留那段指针文本；GLM 的附件要件齐备
+ * （`providers.js` 的 `attachSelector: "input[type='file']"`），且用户已在设置里
+ * 把该站点显式设为 `promptTransportBySite.glm = "attach"`——本次只让阈值与那份
+ * 显式选择**对齐**，没有把任何站点从 inline 拽去附件。
+ *
+ * 只收紧、不开启：配置为 0（用户显式关闭附件）时仍一律 inline。
  */
-export const SITE_ATTACH_INLINE_LIMIT = Object.freeze({ deepseek: 8_000, kimi: 8_000 });
+export const SITE_ATTACH_INLINE_LIMIT = Object.freeze({ deepseek: 8_000, kimi: 8_000, glm: 8_000 });
+
+/**
+ * 站点级「纯文本写入的**硬上限**」（0.19.41）——超过它就不是偏好问题，是必然半截。
+ *
+ * ## 与 SITE_ATTACH_INLINE_LIMIT 的分工（两者不是同一件事）
+ *
+ *   · `SITE_ATTACH_INLINE_LIMIT` 是**用户偏好之上的收紧**：用户选了「附件优先」时，
+ *     超过 8,000 字符就走附件。用户显式选「纯文本」时它**让位**（transport-inline）。
+ *   · 本表是**用户偏好之下的底线**：即便用户选了「纯文本」，超过这个数也改走附件，
+ *     因为纯文本这条路在这一长度上**已经被证明发不完整**（内容被网页静默丢弃）。
+ *
+ * ## 阈值来源（真机读数，不是规格）
+ *
+ * kimi 取 **200,000**：真机取证（.tmp-probe/kimi/RESULT.md，2026-09-27）用
+ * `keyboard.insertText` **单次**写入 50,000 / 100,000 / 200,000 字符（中文+换行）
+ * 全部逐字回读（43 / 94 / 167ms）。即 200k 是**实测能用**的那一档，再往上没有读数，
+ * 因此不写成更大的数——没有读数的余量就是猜。
+ *
+ * 为什么 kimi 在**分块**写入时代需要一个小得多的数（旧读数是 38,807 就丢）：
+ * 丢内容的原因是分块本身（编辑器只吃第一块），已在 0.19.41 改成一次性写入。
+ * 本表是「一次性写入也可能撑不住」时的第二道底线，不与那条修复重复。
+ *
+ * 真机 2026-09-27 的另一次读数（用户报障原话「一句话就处理失败」）说明这条底线必须
+ * 存在：`transport:'inline'` 强制纯文本时，38,807 字符全量灌进输入框、回读 20,158，
+ * 模型只看到半截上下文——而同一站点上附件投递实测可用。
+ */
+export const SITE_COMPOSER_HARD_LIMIT = Object.freeze({ kimi: 200_000 });
+
+/**
+ * 取某站点的纯文本硬上限；未列出的站点返回 `null`（= 不设底线，行为与旧版逐字相同）。
+ *
+ * @param {string} siteId 站点 id
+ * @returns {number|null} 硬上限字符数
+ */
+export function composerHardLimitFor(siteId) {
+  const v = SITE_COMPOSER_HARD_LIMIT[String(siteId || '')];
+  return Number.isFinite(v) && v > 0 ? Math.floor(v) : null;
+}
 
 /**
  * 把「调用方配置的阈值」与「站点上限」合成本次实际使用的阈值（纯函数，可断言）。
@@ -1623,6 +1711,30 @@ export function createBrowserDriver(options = {}) {
       }
       const bodyReady = Boolean(a.text) || Boolean(a.thinking) || (Array.isArray(a.images) && a.images.length > 0);
       if (!bodyReady) { a.wipTimer = setTimeout(tick, WIP_IDLE_MS); return; }
+      // 第四条判据，也是唯一**权威**的那条（0.19.41）：网页自己在流里说了「还在生成」。
+      //
+      // 前三条全是**推断**（流静默 / DOM 停长 / 只出思考的硬上限），而推断在
+      // 「思考阶段正文节点看不到内容」的站点上必然出错。真机现场（kimi，带附件轮）：
+      //   wip steady state — settling turn with 0 chars answer / 114 chars thinking
+      // 那一轮网页还在思考，是驱动先收束的，正文一个字符都没等到。
+      // 而 kimi 的 Connect-RPC 流里每帧都带 `message.status`
+      // （MESSAGE_STATUS_GENERATING / COMPLETED）——**有权威信号就不该靠推断**。
+      //
+      // 为什么仍然保留硬上限：一个永远不说「完成」的站点不能被这里挂死。
+      // 上限沿用 `shouldSettleStalledThinking` 的同一把尺子（answerTimeoutMs，
+      // 默认 180s），并发一条 warn 留下现场——「等到了上限」与「网页说完成」
+      // 必须事后可分辨，否则下一个人无法判断这条判据有没有生效。
+      // 无该信号的站点（`isGenerating` 缺省返回 false）行为与 0.19.40 逐字相同。
+      if (a.decoder?.isGenerating?.() === true) {
+        const waitedSinceAnswer = now - (Number(a.lastAnswerAt) || now);
+        if (waitedSinceAnswer < cfg.answerTimeoutMs) {
+          a.wipTimer = setTimeout(tick, WIP_IDLE_MS);
+          return;
+        }
+        warn('web page still says GENERATING after ' + Math.round(waitedSinceAnswer / 1000)
+          + 's with ' + String(a.text || '').length + ' chars answer — settling anyway (hard cap '
+          + Math.round(cfg.answerTimeoutMs / 1000) + 's)');
+      }
       // 第三条判据优先判定：它不需要 DOM，也不被思考增量推迟。
       const stalled = shouldSettleStalledThinking({ now, lastAnswerAt: a.lastAnswerAt, hardCapMs: cfg.answerTimeoutMs });
       if (!stalled && !shouldSettleWip({
@@ -2078,20 +2190,33 @@ export function createBrowserDriver(options = {}) {
     await locator.click({ timeout: 10_000 }).catch(() => {});
     await locator.focus().catch(() => {});
     try { await page.keyboard.press('Control+A'); await page.keyboard.press('Delete'); } catch { /* 空框 */ }
-    if (plan.mode === 'single') { await page.keyboard.insertText(text); return { kind, wrote: text.length }; }
-    let wrote = 0;
-    let step = { stalled: 0, prevLen: -1, died: false };
-    for (let i = 0; i < text.length; i += plan.chunkChars) {
-      const slice = text.slice(i, i + plan.chunkChars);
-      await page.keyboard.insertText(slice);
-      wrote += slice.length;
-      // 让出事件循环：富文本编辑器靠 input 事件重建内部文档，连发不喘气
-      // 会让它把中间状态丢掉（真机 doubao/kimi 的 insertText 长串同样会卡）。
-      await page.waitForTimeout(0);
-      step = stallStep(step.prevLen, (await readComposer(locator))?.length ?? null, step.stalled);
-      if (step.died) throw await writeStalledError(locator, wrote, text.length, kind);
-    }
-    return { kind, wrote };
+    //
+    // ## 0.19.41：不再分块，改**一次性 insertText**（真机 kimi 的主因修复）
+    //
+    // 旧实现在 `plan.mode === 'chunked'` 时逐块 `insertText`。真机取证
+    // （.tmp-probe/kimi/RESULT.md，2026-09-27，副本 profile、产品同源路径）证明
+    // **分块本身才是在 kimi 上丢内容的原因**，而不是网页的输入框上限：
+    //
+    //   | 写入方式 | 写入 | 回读 | 丢失 |
+    //   | --- | --- | --- | --- |
+    //   | 单次 insertText | 8,000 / 16,000 / 20,158 / 38,807 | 逐字相等 | **0** |
+    //   | 单次 insertText | 50,000 / 100,000 / 200,000（中文+换行） | 逐字相等 | **0**（43/94/167ms）|
+    //   | 分块 20,000+18,400（含换行） | 38,400 | **20,002** | 尾部 18,398 |
+    //   | 分块 20,000+18,400（纯 ASCII） | 38,400 | 38,400 | 0 |
+    //   | 分块 10,000+10,000（含换行） | 20,000 | **10,060** | 尾部 |
+    //
+    // 关键读数：块间间隔 0 / 100 / 300 / 600 / 1000 / 2000 / 4000ms **七档结果完全一致**，
+    // 插入后 4 秒轨迹也稳定 ⇒ 「等一等再写」救不了它，只有一次性写入可靠。
+    // 用户报的 `PROMPT_TRUNCATED: 20158/38807` 正是「第一块写进去了、第二块几乎全丢」
+    // 的读数（kimi-probe 用产品路径复现为 `20012/38025`，说明它不是站点常量）。
+    //
+    // 为什么这个改动对其它富文本站点是**安全**的：单次插入是**更少**的框架事件、
+    // 更接近真人粘贴，且成本与长度近线性（200k = 167ms）。真机已知的写不进去的形态
+    // 仍由「写后回读 + PROMPT_TRUNCATED」兜底，行为可见、不静默。
+    await page.keyboard.insertText(text);
+    // 回读校验仍由调用方（fillComposer 之后的 readComposer）负责——写入方式变了，
+    // 「网页端有没有截断」的判据一字未变。
+    return { kind, wrote: text.length };
   }
 
   /**
@@ -2298,14 +2423,26 @@ export function createBrowserDriver(options = {}) {
     // 字符串注入浏览器执行，因此「页面里跑的那份」与「护栏驱动的那份」逐字同一。
     // 为什么不在这里内联写：内联那份无法被单测真正驱动，护栏只能查字符串是否存在——
     // 反向验证证明那种护栏是装饰品（把过滤条件短路掉仍然全绿，见 attach-scope.js 头注）。
-    return page.evaluate(({ NAME, MAX, T_SEL, INPUT_SEL, sels, PICK_SRC }) => {
+    return page.evaluate(({ NAME, MAX, T_SEL, INPUT_SEL, sels, PICK_SRC, STEM_FB }) => {
       // eslint-disable-next-line no-new-func
       const pick = new Function('return (' + PICK_SRC + ')')();
       const input = document.querySelector(INPUT_SEL);
       const ta = [...document.querySelectorAll('textarea')]
         .find((e) => { const r = e.getBoundingClientRect(); return r.width > 40 && r.height > 0; }) || input;
-      return pick({ doc: document, input, ta, name: NAME, max: MAX, transcriptSel: T_SEL, sels });
-    }, { NAME: target, MAX: (target || '').length + 80, T_SEL: TRANSCRIPT_SELECTOR, INPUT_SEL: contract.attachSelector || "input[type='file']", sels, PICK_SRC: ATTACH_PICK_SRC })
+      return pick({ doc: document, input, ta, name: NAME, max: MAX, transcriptSel: T_SEL, sels, stemFallback: STEM_FB });
+    }, {
+      NAME: target,
+      // 长度尺度必须覆盖**两把尺子中较长的那次匹配**：stem 命中时节点的 textContent
+      // 上限是 stem.length + 80，而 stem 可能比完整名短一大截（`a.md` vs `a`），
+      // 只按完整名算会把合法的 stem 命中拒掉。两个候选取大值即可。
+      MAX: (target || '').length + 80,
+      T_SEL: TRANSCRIPT_SELECTOR, INPUT_SEL: contract.attachSelector || "input[type='file']", sels,
+      PICK_SRC: ATTACH_PICK_SRC,
+      // 0.19.41：允许按去扩展名的 stem 再试（kimi 的附件卡只渲染 stem，真机读数见
+      // attach-scope.js 的注释）。默认开着：它只增加「能确认」的情形，且仍受
+      // 作用域 + 正文排除 + 长度三道闸约束。
+      STEM_FB: true,
+    })
       .catch(() => ({ candidates: [], nameHit: null, domSnippet: null, scoped: false, scopeDesc: null, transcriptNodes: -1 }));
   }
 
@@ -3115,6 +3252,11 @@ export function createBrowserDriver(options = {}) {
           // 现读而不是取构造函数快照，理由见 promptTransportNow。
           // 0.19.32：传本实例站点，于是站点级覆盖在这一条判据里生效（与 status 同源）。
           transport: promptTransportNow(siteId),
+          // 站点级纯文本硬上限（0.19.41）：即便用户选了「纯文本」，超过它也必须改走
+          // 附件——因为纯文本在这一长度上已被真机证明发不完整（内容被静默丢弃，
+          // 上层只看到 PROMPT_TRUNCATED）。读数与理由见 SITE_COMPOSER_HARD_LIMIT。
+          // 未列出的站点返回 null ⇒ 不设底线，行为与 0.19.40 逐字相同。
+          hardLimit: composerHardLimitFor(siteId),
           // cfg.attachMaxChars 由 index.js 透传（task-1 / lib/index.js）。
           // 未配置时这里是 undefined，**必须显式转成 null**再传：undefined 在
           // promptTransportPlan 里是「取默认 1_500_000」，而缺配置时的正确行为是
@@ -3171,6 +3313,17 @@ export function createBrowserDriver(options = {}) {
           attachTransport = { at: Date.now(), fallback: true, code: 'TRANSPORT_INLINE', total: String(message).length,
             transport: 'inline', reason: plan.reason };
           log('prompt transport forced inline by settings (promptTransport=inline), chars=' + plan.total);
+        } else if (plan.reason === 'inline-unsafe') {
+          // 0.19.41：用户选了「纯文本」，但这一轮的长度超过站点**实测硬上限**，
+          // 因此改走附件。这不是静默无视用户选择——必须留痕（面板 + 会话内提示），
+          // 否则用户看到的是「我明明选了纯文本，怎么变成附件了」。
+          // 与 TRANSPORT_INLINE 同型：这是本站点的安全底线，不是故障。
+          attachTransport = { at: Date.now(), fallback: false, code: 'INLINE_UNSAFE', total: String(message).length,
+            transport: 'attach', reason: plan.reason, siteId, hardLimit: composerHardLimitFor(siteId) };
+          log('prompt transport overrode user inline choice: over site hard limit, site=' + siteId
+            + ' chars=' + plan.total + ' hardLimit=' + composerHardLimitFor(siteId));
+          onThink?.('本轮 ' + plan.total + ' 字符超过 ' + siteId + ' 的纯文本实测上限 '
+            + composerHardLimitFor(siteId) + ' 字符（真机读数），已改用附件投递以免内容被网页静默截断。');
         } else if (plan.reason === 'site-no-attach') {
           // 0.16.9：站点禁令生效时也**必须落读数**。0.16.7 加了 ATTACH_FORBIDDEN_SITES
           // 却漏了这里，于是 DeepSeek 上「禁令已生效」在界面上完全看不出来：读数停在
@@ -3236,26 +3389,77 @@ export function createBrowserDriver(options = {}) {
           sent = (await composerCleared()) || navigatedAway();
         }
       };
-      // 路 ①：契约既有行为（有 sendButton 就优先点它，否则回车）。
+      // 附件在场时发送键可能**暂时**不可用——真机 kimi（2026-09-27，带附件轮）：
+      // 上传完成前发送控件是 `<div class="send-button-container disabled">`，
+      // 那一刻按 Enter **网页不响应**（实测：Enter 后 2 秒内输入框长度恒为 81、
+      // 地址栏不动；而等 `disabled` 类消失后点它，输入框立刻清空、附件 chip 清 0）。
+      // 旧实现只试一次「点按钮 → 回车 → 再点按钮」，全在禁用窗口内 ⇒
+      // `SEND_NOT_CONFIRMED`，用户侧就是「带附件的轮次发不出去」。
+      //
+      // 判据取**页面事实**（宿主控件的 disabled 状态）而不是等固定时长：
+      // 上传耗时随文件大小变化，等固定值必然两头不讨好。
+      // 只对**宿主元素**判 disabled（`div` 上的 `disabled` 属性没有语义，但站点
+      // 用类名表达禁用，`[disabled]`、`aria-disabled`、含 `disabled` 的 class 三种
+      // 都认）；`<button disabled>` 仍由 Playwright 的 isEnabled 负责。
+      const sendReady = async (sel) => {
+        if (!sel) return false;
+        const st = await page.evaluate((s) => {
+          const el = document.querySelector(s);
+          if (!el) return 'missing';
+          if (el.tagName === 'BUTTON' && el.disabled === true) return 'disabled';
+          if (el.getAttribute('aria-disabled') === 'true') return 'disabled';
+          // 宿主元素（kimi 是 div）的禁用态只能用类名表达。按**切词后精确相等**
+          // 判定，不写含 `|` 的正则字面量——本文件的源码扫描护栏
+          //（test/driver-scope.test.mjs）会把正则里的 `|` 当代码切分，
+          // 于是 `…|disabled|…/i` 被误读成一个自由标识符（0.19.41 实测变红）。
+          const cls = String(el.getAttribute('class') || '').split(/\s+/);
+          if (cls.includes('disabled')) return 'disabled';
+          return 'ready';
+        }, sel).catch(() => 'missing');
+        return st === 'ready';
+      };
+      const clickSendButton = async (sel, timeout = 4000) => {
+        const b = page.locator(sel).first();
+        if (!await b.count()) return false;
+        await b.click({ timeout });
+        return true;
+      };
+      // 先等发送控件就绪（最多 12s：真机 kimi 上传 32KB 附件约 2 秒，留足余量）。
+      let sendReadySeen = !SEL.sendButton;             // 没声明按钮的站点直接进 Enter 路
+      for (let i = 0; i < 24 && !sendReadySeen; i += 1) {
+        sendReadySeen = await sendReady(SEL.sendButton);
+        if (!sendReadySeen) await page.waitForTimeout(500);
+      }
+      log('send path: sel=' + String(SEL.sendButton) + ' ready=' + sendReadySeen
+        + ' composerChars=' + (await readComposer(input).then((v) => (typeof v === 'string' ? v.length : -1)).catch(() => -2))
+        + ' url=' + page.url());
+      if (SEL.sendButton && !sendReadySeen) {
+        warn('send button still disabled after 12s (site=' + siteId + ', sel=' + SEL.sendButton
+          + ') — trying Enter anyway');
+      }
+      // 路 ①：契约既有行为（声明了 sendButton 就点它，否则回车）。
+      //
+      // 顺序在 0.19.41 调整过：旧实现先判 `btn.isEnabled()`，而 kimi 的控件是
+      // **div**，`isEnabled()` 恒真 ⇒ 即使处于禁用窗口也会去点（点了没反应），
+      // 于是三条路全废。现在改成「按站点声明点按钮」——那正是 sendButton 契约的语义。
       try {
-        if (SEL.sendButton) {
-          const btn = page.locator(SEL.sendButton).first();
-          if (await btn.count()) {
-            const enabled = await btn.isEnabled().catch(() => true);
-            if (enabled) await btn.click({ timeout: 5000 });
-            else await input.press('Enter');
-          } else await input.press('Enter');
-        } else {
-          await input.press('Enter');
-        }
+        if (SEL.sendButton) await clickSendButton(SEL.sendButton, 5000);
+        else await input.press('Enter');
       } catch { await input.press('Enter').catch(() => {}); }
       await settle(8);
       if (!sent) {
-        // 路 ②：按契约点发送按钮（DeepSeek 新统一 UI 的发送键是
-        // `div[role='button']`，不是 `<button>`；附件在场时 Enter 可能不被吃）。
+        // 路 ②：按钮再点一次（第一下可能落在禁用窗口或动画上）。
+        //
+        // 这里**刻意直接写 `page.locator(SEL.sendButton)`**，不调上面那个
+        // `clickSendButton` 小助手：既有的结构护栏 `test/send-confirmed.test.mjs`
+        // 要在这里看到「按契约点发送按钮」这条路径确实存在（它的判据是源码里
+        // 有 `page.locator(SEL.sendButton)`）——助手函数在块外，护栏就看不见它了。
+        // 护栏的意图是对的（重试路径必须真实存在），所以让源码形状服从它。
         try {
-          const b = page.locator(SEL.sendButton).first();
-          if (SEL.sendButton && await b.count()) await b.click({ timeout: 4000 });
+          if (SEL.sendButton) {
+            const b = page.locator(SEL.sendButton).first();
+            if (await b.count()) await b.click({ timeout: 4000 });
+          }
         } catch { /* 下一条路 */ }
         await settle(8);
       }
@@ -3275,6 +3479,41 @@ export function createBrowserDriver(options = {}) {
         throw err;
       }
       log('send confirmed (composer cleared / navigated) url=' + page.url());
+      // 站点风控闸门：发送已确认，但网页**可能卡在自带的人机验证上**——那时
+      // `/api/chat/completions` 根本不会被发出（真机 z.ai：前端 `await HN()` 停在
+      // 阿里云滑块上不返回），wire 上零帧，桥只能等到 120s/240s 报一句
+      // 「网页没回传」，把排查方向引到解码器上。
+      //
+      // 判据是**站点声明**（`captchaSelector`），不是按站点名硬编码——站点知识收口在
+      // providers.js 是本仓库的既定分层。没声明的站点一次 evaluate 都不做（零成本）。
+      //
+      // 为什么必须放在「发送已确认」之后：发送前失败有自己的错误（SEND_NOT_CONFIRMED /
+      // PROMPT_TRUNCATED），在这之前查验证会把那些真错误盖掉。
+      //
+      // 为什么只查一次、而不是持续巡检：一次采样已经能定性（有头把窗口带到前台让人点，
+      // 没头直接如实报错）。持续巡检会让「网页慢」这类正常轮次多出无意义的读数。
+      if (site.captchaSelector) {
+        await page.waitForTimeout(2_500);
+        const gate = await page.evaluate((sel) => {
+          const els = [...document.querySelectorAll(sel)];
+          const vis = els.filter((el) => el.offsetWidth || el.offsetHeight || el.getClientRects?.().length);
+          return { total: els.length, visible: vis.length,
+            head: vis[0] ? String(vis[0].className || '').slice(0, 120) : null };
+        }, String(site.captchaSelector)).catch(() => null);
+        if (gate && gate.visible > 0) {
+          // 有头时把窗口带到前台：验证必须**由人**完成，我们能做的是让那个窗口可见。
+          await page.bringToFront?.().catch(() => {});
+          const err = new Error('WEB_CAPTCHA_REQUIRED: 网页弹出人机验证（' + site.captchaSelector
+            + ' 命中 ' + gate.visible + ' 个可见节点，首个 ' + JSON.stringify(gate.head) + '），'
+            + '消息**未被网页受理**（站点在验证通过前不会发出请求）。'
+            + '处理：在弹出的浏览器窗口里手动完成验证后重试本轮。'
+            + '（这不是解码器问题，也不是「网页没回传」——wire 上零帧是验证闸门造成的）');
+          err.code = 'WEB_CAPTCHA_REQUIRED';
+          err.captcha = gate;
+          warn('captcha gate hit: ' + JSON.stringify(gate) + ' site=' + siteId);
+          throw err;
+        }
+      }
       // 发送已发出：启动 WIP 稳态巡检器（网页不发 FINISHED 时的秒级收束）。
       startWipWatch();
       // ② 发送之后：**新会话的地址是网页收下消息那一刻才被 SPA 写进地址栏的**

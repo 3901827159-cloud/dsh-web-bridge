@@ -62,7 +62,15 @@
   // `finish_reason === 'rate_limited'` 精确相等判断，一旦帧尾丢失就漏判，
   // 整轮退化成 no_response_frames —— 长任务（含子代理）被反复打死却看不出
   // 真因。这里改为「前缀匹配 + 服务端原话兜底」，两种证据任一命中即算限流。
-  const RATE_HINT_TEXT = /过于频繁|请求频繁|too\s*(?:many|frequent)|rate\s*limit|slow\s*down/i;
+  //
+  // 0.19.41 补两类**真机遇到的**限流原话（在此之前它们都不命中，用户看到的是一句
+  // 无信息量的 `invalid_stream`）：
+  //   · kimi（Connect-RPC，2026-09-27）：`error.code = 'resource_exhausted'` +
+  //     protobuf 里一段 base64 中文原文
+  //     「和Kimi聊天的人太多了，请根据当前速率限制信息后重试。（Request ID…）」
+  //     —— **服务端自己的措辞一个字都不含 rate/frequent**，纯文本判据必然漏；
+  //   · GLM 系的「当前访问人数过多，请稍后重试」同族。
+  const RATE_HINT_TEXT = /过于频繁|请求频繁|访问人数过多|人数太多|聊天的人太多|too\s*(?:many|frequent)|rate\s*limit|slow\s*down/i;
   function rateLimitHint(hintError, rawText) {
     const fr = String(hintError?.finish_reason || '');
     // 前缀匹配：'rate_l' / 'rate_limited' / 'rate_limit_exceeded' 都算
@@ -514,6 +522,20 @@
       // 里认字段名后填上。放在基类是为了让**所有**解码器的 finish() 输出形状一致
       // ——驱动只认 result.conversationId，不必按站点分支。
       this.conversationId = null;
+      // 「网页自己说它还在生成」的状态位（0.19.41）。默认 false = 没有这个信号的
+      // 站点行为与既有实现逐字相同（驱动侧只在它为 true 时才多等）。
+      //
+      // 为什么必须由**流**来回答「生成完了没有」：驱动侧已有的三条收束防线都是
+      // **推断**（流静默 N 秒 + 页面 DOM 停止增长 + 只出思考的硬上限），而推断在
+      // 「思考阶段 DOM 看不到内容」的站点上必然出错——真机 kimi：一轮带附件的轮次
+      // 在思考阶段被 2.5s 稳态收束，正文一个字符都没等到
+      // （`wip steady state — settling turn with 0 chars answer / 114 chars thinking`）。
+      // kimi 的 Connect-RPC 流里**本来就有**权威信号：`message.status` =
+      // MESSAGE_STATUS_GENERATING / MESSAGE_STATUS_COMPLETED。有权威信号就不该靠推断。
+      this.generating = false;
+      // 失败时的**服务端原话**（默认 null ⇒ finish() 退回 'invalid_stream'）。
+      // 放在基类让所有解码器的 finish() 形状一致，与 conversationId 同一考虑。
+      this.failureReason = null;
     }
     push(c) {
       this.buf += c;
@@ -536,7 +558,11 @@
       // （browser-driver 的 `!result.complete && !result.partial` 等）分不开
       // 「跑完了」与「只跑了一半」。
       const partial = Boolean(content.text || content.thinking || content.images.length);
-      if (this.failed) return { complete: false, partial, reason: 'invalid_stream', conversationId: this.conversationId, ...content };
+      // 失败原因优先用**解码器自己解出的服务端原话**（kimi 的错误帧），
+      // 没有时才退回泛化码。旧实现只有 `invalid_stream` 一个词，真机上
+      // 用户看到的就是它——而服务端其实说了「聊天的人太多了，请稍后重试」。
+      const failReason = this.failureReason || 'invalid_stream';
+      if (this.failed) return { complete: false, partial, reason: failReason, conversationId: this.conversationId, ...content };
       if (!this.done) return { complete: false, partial, reason: 'incomplete', conversationId: this.conversationId, ...content };
       return {
         complete: true, ...content,
@@ -548,6 +574,12 @@
       let j; try { j = JSON.parse(l); } catch { return; }
       this.obj(j);
     }
+    /** 网页**自己**说它还在生成吗？（默认：没有这个信号 ⇒ 永远 false）
+     *
+     *  只有拿到权威信号的站点才实现它（当前是 kimi 的 Connect-RPC）。
+     *  驱动侧只在返回 true 时推迟「稳态收束」，且**仍受硬上限约束**——
+     *  一个永远不说「完成」的站点不会被这里挂死。 */
+    isGenerating() { return this.generating === true; }
     emitText(t) { if (!t) return; this.text += t; try { this.onDelta?.(t); } catch {} }
     emitThink(t) { if (!t) return; this.think += t; try { this.onThink?.(t); } catch {} }
     pushImage(img) { this.images.push(img); try { this.onImage?.(img); } catch {} }
@@ -865,6 +897,42 @@
     }
   }
 
+  /**
+   * 把 kimi Connect-RPC 的错误帧解成人能读的一句话（0.19.41）。
+   *
+   * 真机原始帧（2026-09-27）：
+   *   {"error":{"code":"resource_exhausted","details":[{"type":"common.error.v1.ErrorDetail",
+   *     "value":"CHUSSQoFemgtQ04SQOWSjEtpbWnogYrlpKnnmoTkurrlpKrlpJrkuobvvIzor7fm…"}]}}
+   * `value` 是 base64；前 8 字节是 protobuf 头部（`\x08\x75\x12\x49\x0a\x05\x7a\x68\x2d\x43\x4e`），
+   * 其后是 UTF-8 原话：「和Kimi聊天的人太多了，请根据当前速率限制信息后重试。（Request ID…）」。
+   *
+   * 做法与边界：先整体 base64 解码，再从第一个可打印段里取连续 UTF-8 文本；
+   * **解不出来就原样返回**（含 code 与 value 前缀），绝不编造一句「服务繁忙」——
+   * 编造的文案会让人以为桥知道发生了什么，而它其实不知道。
+   *
+   * @param {object} err kimi 错误帧的 error 对象
+   * @returns {string} 可读原话（含 code）；任何异常都退回 JSON 摘要
+   */
+  function kimiErrorText(err) {
+    const code = String(err?.code || 'unknown');
+    try {
+      const value = String(err?.details?.[0]?.value || '');
+      if (!value) return code;
+      const buf = Buffer.from(value, 'base64');
+      // 从第一个 \n（protobuf 文本字段的分隔）之后取到末尾，替换掉非文本控制字节。
+      let s = buf.toString('utf8');
+      // protobuf 头（tag+len）在第一个 `\n` 之前，其后是服务端原话。
+      const cut = s.indexOf('\n');
+      if (cut >= 0 && cut + 1 < s.length) s = s.slice(cut + 1);
+      // 去掉残留的控制字符（protobuf 头被切剩的字节），保留正文与标点。
+      s = s.replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, '').trim();
+      if (!s) return code + '（服务端未给出可读原话，value 前缀 ' + value.slice(0, 24) + '）';
+      return code + '：' + s;
+    } catch {
+      return code;
+    }
+  }
+
   // ---------- Kimi Connect-RPC（2026-09-21 真机确证）----------
   // kimi 网页已从旧 SSE（/api/chat/{id}/completion/stream）全面迁移到 Connect-RPC
   // （POST /apiv2/kimi.gateway.chat.v1.ChatService/Chat，application/connect+json）。
@@ -883,15 +951,44 @@
   class KimiConnectDecoder extends JsonLinesDecoder {
     obj(j) {
       if (!isRecord(j)) return;
-      if (j.error) { this.failed = true; return; }
+      // 错误帧的**可读化**（0.19.41）。真机 2026-09-27 原始帧：
+      //   {"error":{"code":"resource_exhausted","details":[{"type":"common.error.v1.ErrorDetail",
+      //             "value":"CHUSSQoFemgtQ04SQOWSjEtpbWnogYrlpKnnmoTkurrlpKrlpJrkuobvvIzor7fm…"}]}}
+      // 旧实现只置 `failed = true`，于是整轮变成
+      //   `web capture ended incomplete: invalid_stream | 流首段: {"heartbeat":{}}`
+      // ——**用户与排查者都看不到服务端到底说了什么**，而这正是本项目纪律里
+      // 「报错必须带现场」的反面。`value` 是 base64，前 8 字节是 protobuf 头部
+      // （tag+len），其后是 UTF-8 原话；解不出来就原样留着，绝不编造。
+      if (j.error) {
+        this.failed = true;
+        this.failureReason = kimiErrorText(j.error);
+        return;
+      }
       const cid = readId(j.chat?.id);
       if (cid) this.conversationId = cid;
       if (isRecord(j.done) || j.done === true) { this.done = true; return; }
       if (isRecord(j.message) && /assistant/i.test(String(j.message.role || ''))) {
-        // 终态裁定：assistant 消息 status 变 COMPLETED/ERROR 即该轮走完（正文由
-        // block.text 独立给出，此处只做 completion 锚点）。
+        // 终态裁定（0.19.41 由「注释」变成「代码」）。
+        //
+        // 旧实现这里只有一句 `if (… && !this.text) { /* 不误判 */ }`——即**什么都没做**，
+        // 于是 assistant 消息的 status 是这份流里唯一权威的「生成完了没有」信号，
+        // 却被丢掉了。驱动侧只能靠「流静默 2.5s + DOM 停长」推断，而 kimi 的思考阶段
+        // 正文节点看不到内容 ⇒ 推断恒真 ⇒ 真机把一轮**还在思考**的轮次判成稳态收束
+        // （现场：`settling turn with 0 chars answer / 114 chars thinking`）。
+        //
+        // 两件事一起做：
+        //   · `generating` 状态位 —— 驱动据此**推迟**稳态收束（权威信号优先于推断）；
+        //   · status 变终态时**真的**置 `done` —— 这样 `finish()` 交回的就是
+        //     `complete:true`，而不是让调用方把一轮正常完成的回复当部分流落账
+        //     （那正是「partial web stream accepted (incomplete…)」那条读数的来历）。
         const st = String(j.message.status || '');
-        if (/COMPLETED|DONE|ERROR/.test(st) && !this.text) { /* 正文可能未及下落，不误判 */ }
+        if (/GENERATING/i.test(st)) this.generating = true;
+        if (/COMPLETED|DONE|ERROR|FAILED|CANCEL/i.test(st)) {
+          this.generating = false;
+          // ERROR 类终态不算正常完成：交给 finish() 的失败分支（failed 由 j.error 置位），
+          // 这里只停止「还在生成」的判定，避免把一个失败的轮次挂到硬上限。
+          if (!/ERROR|FAILED|CANCEL/i.test(st)) this.done = true;
+        }
       }
       const block = j.block;
       const text = block?.text?.content;

@@ -35,10 +35,17 @@ test('kimi 的站点上限同样收紧（2026-09-25：38,807 字符轮被输入�
   assert.equal(limit, SITE_ATTACH_INLINE_LIMIT.kimi);
 });
 
-test('未列出的站点逐字维持旧行为（能力边界：只改 deepseek 与 kimi）', () => {
-  for (const site of ['glm', 'chatgpt', 'qwen', 'doubao', 'grok', 'gemini', 'zai', '', undefined]) {
+test('未列出的站点逐字维持旧行为（能力边界：只改 deepseek / kimi / glm）', () => {
+  // glm 于 0.19.41 从本组**移出**（它当时就在这一行里，正是缺口本身）：
+  // 真机 2026-09-27，一轮 12,911 字符的提示词在 chatglm.cn 上以
+  // `PROMPT_TRUNCATED: 网页输入框只接收了 12870/12911 字符` 失败——
+  // 60,000 的全站默认把长文判成 under-limit ⇒ inline ⇒ 撞输入框上限。
+  // GLM 的专属护栏见 test/glm-attach-limit.test.mjs。
+  for (const site of ['chatgpt', 'qwen', 'doubao', 'grok', 'gemini', 'zai', '', undefined]) {
     assert.equal(effectiveAttachInlineLimit(site, 60_000), 60_000, `${site} 不得被本次改动影响`);
   }
+  // glm 现在必须被收紧（与 deepseek/kimi 同口径），不再是「未列出的站点」。
+  assert.equal(effectiveAttachInlineLimit('glm', 60_000), 8_000);
 });
 
 test('站点上限只做上限：配置值更小时取配置值（用户显式收紧优先）', () => {
