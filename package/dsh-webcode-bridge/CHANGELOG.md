@@ -5,9 +5,9 @@ All notable changes to this package. Newest first.
 The canonical, in-progress record of what was changed and why lives in [doc/progress.md](../../doc/progress.md);
 this file is the package-facing release history.
 
-## Unreleased
+## 0.19.42
 
-**模型选择器按站点分组：一个网站一层。**（刻意不升版本号，见下）
+**模型选择器按站点分组：一个网站一层。**
 
 此前全部站点挤在一个 provider 里，下拉只有「Harness Web Bridge」一组，10 个站点的
 模型平铺在一起。现在每个站点各占一组，组名是站点短键/域：
@@ -27,8 +27,10 @@ DSH 每次发消息都会校验存储的 provider 是否仍被服务。
 已取证：`node .tmp/verify-groups.mjs` 模拟 DSH 目录构建器 → 11 个 provider 注册、
 10 个组可见、空壳不生成组且旧值仍解析。护栏：`test/model-labels.test.mjs` 新增 3 条。
 
-**版本号刻意不动**（用户 2026-09-28 明确要求：「只做修改 git 不要更新版本号，
-以后还有很多哦小更新」）。
+**版本号**：分组改造落地时用户明确要求「只做修改 git 不要更新版本号」（2026-09-28），
+因此它先以未升版形态提交（`e365eef`）；0.19.42 是**把它打包安装**时才补的版本号——
+用户随即要求「打包安装新版本 42，现有刚刚改完的站点模型选择」。两个提交的内容一致，
+差别只在 `package.json` 的 `version` 与本小节标题。
 
 ---
 
