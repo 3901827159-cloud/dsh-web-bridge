@@ -21,10 +21,21 @@ test('普通回复完成、模型传递、游标提交与同长度历史改写',
   const user = text => ({ role: 'user', content: [{ type: 'text', text }] });
   const collect = async options => { const chunks = []; for await (const c of adapter.stream(options)) chunks.push(c); return chunks; };
   try {
-    const models = await adapter.listModels('webcode');
+    // 2026-09-28 分组改造：模型目录按站点拆到多个 provider。
+    //   · 兼容空壳 `webcode` 的 listModels **必须**为空（它只在 routeServed 里
+    //     存在，用于兜住旧会话；目录侧按 models.length>0 过滤，故不生成组）；
+    //   · 站点自己的 provider 才公布模型。
+    // 这一格同时是「兼容空壳不会被当成一组显示出来」的护栏。
+    assert.deepEqual(await adapter.listModels('webcode'), [], '兼容空壳不得公布模型');
+    const models = await adapter.listModels('webcode-deepseek');
     const ids = models.map(m => m.id);
     assert.ok(ids.includes('deepseek:deepseek'));
-    assert.ok(ids.includes('glm:auto') && ids.includes('chatgpt:auto') && ids.includes('kimi:auto'));
+    for (const [pid, want] of [['webcode-glm', 'glm:auto'], ['webcode-chatgpt', 'chatgpt:auto'], ['webcode-kimi', 'kimi:auto']]) {
+      const list = await adapter.listModels(pid);
+      assert.ok(list.map(m => m.id).includes(want), `${pid} 必须公布 ${want}`);
+      // 组内行名是**裸模型名**，不带站点前缀（组标题已经写着站点）
+      for (const m of list) assert.ok(!m.name.includes('/'), `${pid} 的行名不得含站点前缀: ${m.name}`);
+    }
     const base = { sessionId: 'regression', model: 'flash', messages: [user('第一句')] };
     const chunks = await collect(base);
     assert.equal(chunks.at(-1).type, 'finish');

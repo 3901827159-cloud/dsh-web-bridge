@@ -9,7 +9,7 @@
 
 import os from 'node:os';
 import fs from 'node:fs';
-import { DEEPSEEK, resolveWebModel, listAllModels, getSite, SITES, qualifyModelId, MODEL_ALIAS_IDS } from './providers.js';
+import { DEEPSEEK, resolveWebModel, listAllModels, getSite, SITES, qualifyModelId, MODEL_ALIAS_IDS, MODEL_PROVIDER_COMPAT_ID, siteIdForProvider, providerGroupName, modelGroupEntryName, providerIdsForRegistration } from './providers.js';
 import {
   DEFAULT_SLOT, parseAccountKey, formatAccountKey, formatModelId, normalizeAccounts, slotsForSite,
   slotProfileDir, accountLabel, sendGapForSlot,
@@ -967,8 +967,30 @@ export function apply(ctx, config = {}) {
     throw err;
   }
 
+  /**
+   * provider id → 该 provider 承载的站点 id（2026-09-28 分组改造）。
+   *
+   * 三条语义，各自有判据：
+   *   · `webcode`（兼容空壳）→ 返回**全部**站点 id 的哨兵 `null`，表示
+   *     「不限定站点」：listModels 对它返回空数组（不生成组），resolveModel 对它
+   *     接受全站点的限定 id（旧会话的 `webcode` + `glm:glm-5.3` 因此照旧解析）。
+   *   · `webcode-<siteId>` → 该站点，只服务本站点的模型。
+   *   · 其它 → null（不认识的 provider 不猜站点）。
+   */
+  function siteIdOfProvider(provider) {
+    if (provider === MODEL_PROVIDER_COMPAT_ID) return null;   // 哨兵：不限定
+    return siteIdForProvider(provider);
+  }
+
   const adapter = {
-    providerInfo(provider) { return { id: provider, name: cfg.displayName }; },
+    // 组标题取这里：每站点一组的组名 = 站点短键/域（chatglm / deepseek / z.ai …）。
+    // 兼容空壳仍然是旧名字，但它 listModels 为空 ⇒ 目录侧 `models.length > 0`
+    // 的过滤会让它不生成组，用户在下拉里看不到它。
+    providerInfo(provider) {
+      const sid = siteIdOfProvider(provider);
+      if (sid) return { id: provider, name: providerGroupName(sid) };
+      return { id: provider, name: cfg.displayName };
+    },
     providerRetryPolicy() { return undefined; },
     // 必须同步、无 I/O、绝不抛——每次 token meter 测量都会调到这里
     //（dsh-token-meter/lib/index.js:644 → :689 → dsh-llm/lib/index.js:1964）。
@@ -983,14 +1005,46 @@ export function apply(ctx, config = {}) {
       return webcodeImageRequestPricing({ acceptsImages });
     },
     async listModels(provider) {
+      // 兼容空壳 `webcode`：**刻意返回空数组**。目录侧 `group.models.length > 0`
+      // 的过滤据此不生成组（下拉里看不到多余项），而 routeServed('webcode')
+      // 仍为真 ⇒ 旧会话照旧能发消息。见 providers.js 的兼容空壳说明。
+      if (provider === MODEL_PROVIDER_COMPAT_ID) return [];
+      const sid = siteIdOfProvider(provider);
+      if (!sid) throw new Error('[webcode-bridge] 未知 provider: ' + provider);
       // 选择器下拉过滤兼容别名（deepseek-web 与 deepseek:deepseek 显示名逐字相同，
       // 照单渲染就是两行同名项）。别名本身仍可被 resolveModel 解析——历史会话与
       // OpenAI 前端的旧值依赖它，所以只过滤「展示」，不动「解析」。
-      return WEB_MODELS.filter((m) => !MODEL_ALIAS_IDS.has(m.id)).map((m) => ({ provider, id: m.id, name: m.name }));
+      //
+      // 组内行名用**裸模型名**（GLM-5.3 / GLM-5.3-Flash）：组标题已经写着站点，
+      // 再带 `glm/` 前缀就是重复。多账户槽仍带 `(账户N)` 消歧——那个信息组标题
+      // 给不了。模型 id 不变，仍是 `glm:glm-5.3`。
+      const st = getSite(sid);
+      return WEB_MODELS
+        .filter((m) => m.siteId === sid && !MODEL_ALIAS_IDS.has(m.id))
+        .map((m) => {
+          // 条目上没有 modelId 字段，从站点模型表反查裸名（`GLM-5.3`）。
+          // 查不到就退回 m.name —— 宁可显示成 `glm/glm-5.3`，也不显示空字符串。
+          const modelId = m.id.includes(':') ? m.id.split(':')[1] : m.id;
+          const def = st?.models.find((x) => x.id === modelId);
+          const bare = def ? modelGroupEntryName(def) : m.name;
+          return {
+            provider,
+            id: m.id,
+            // 多账户槽带 `(账户N)` 消歧——组标题给不了这个信息，只有模型行能给。
+            name: m.slot && m.slot !== DEFAULT_SLOT ? accountLabel(bare, m.slot) : bare,
+          };
+        });
     },
     async resolveModel(provider, model) {
       const m = resolveWebModel(model);
       if (!m) throw new Error('[webcode-bridge] 未知模型: ' + model);
+      // provider 与模型必须自洽：`webcode-glm` 不许解析出 `kimi:auto`。
+      // 兼容空壳（哨兵 null）放行全部站点。这条判据是「分组」这一层唯一的正确性
+      // 保证——宿主只校验 provider 名字非空，不会替我们比对站点。
+      const sid = siteIdOfProvider(provider);
+      if (sid && sid !== m.siteId) {
+        throw new Error(`[webcode-bridge] 模型 ${m.id} 不属于 provider ${provider}（它属于 ${m.siteId}）`);
+      }
       // 声明值来自 `contextWindowFor(m)`，取值链的第一段是 `DEFAULTS.contextWindowBySite`
       // ⇒ deepseek 今天声明 **1,000,000**，其余站点 64k。
       //
@@ -2251,7 +2305,15 @@ export function apply(ctx, config = {}) {
       yield* finishChunks(turn, proseBlock + thinkAcc, 'stop');
     },
   };
-  llm.registerAdapter([cfg.providerId], adapter);
+  // 每站点一个 provider —— 模型选择器按站点分组（2026-09-28）。
+  //
+  // 一个 provider 就是一组（组标题取 providerInfo().name），所以「一个网站一层」
+  // 只能靠多注册 provider 实现。列表**必须**同时含兼容空壳 `webcode`：
+  // 旧会话/默认模型/子代理白名单里存的是它，缺了它 DSH 会在发消息前抛
+  // `session/model-unavailable`。空壳的 listModels 返回空数组 ⇒ 不生成组、
+  // 下拉里看不到，但 routeServed 为真。完整理由见 providers.js 的同一段注释。
+  const providerIds = providerIdsForRegistration();
+  llm.registerAdapter(providerIds, adapter);
 
   /** Valid minimal text chunk sequence. */
 async function* emitText(text, turn, index = 0) {

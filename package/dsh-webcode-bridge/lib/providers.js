@@ -535,6 +535,96 @@ export function modelDisplayName(st, m, slot) {
 export const MODEL_ALIAS_IDS = Object.freeze(new Set(['deepseek-web']));
 
 /**
+ * 每站点一个 provider —— 模型选择器分组（2026-09-28）。
+ *
+ * ## 为什么必须这样做
+ *
+ * DSH 模型选择器的分组**唯一来源**是 `ctx.llm.listProviders()`：**一个 provider
+ * 就是一组**，组标题取 `providerInfo(provider).name`，组 id 必须逐字等于 provider
+ * id（实读 `dsh-api-session-controller/lib/index.js` 的 buildModelCatalog，
+ * 2026-09-28；目录侧还有一条 `group.models.length > 0` 的过滤）。
+ *
+ * 此前全部站点挤在**一个** `webcode` provider 里 ⇒ 下拉只有一组，10 个站点的
+ * 模型平铺在一起。用户要的是「一个网站一层」。
+ *
+ * ## 兼容空壳 `webcode` 为什么必须留着（这一条不能删）
+ *
+ * 升级前写下的选择记录里 provider 恒为 `webcode`。真机证据（`~/.dsh/settings.yaml`）：
+ * `agent-default-model.provider: webcode`，以及 `subagent-model-selection.allowedModels`
+ * 里 20 条 `provider: webcode`。而 DSH 在**每次发消息前**都会校验
+ * `routeServed(ctx, selection.provider)`，不成立就抛
+ * `session/model-unavailable: no adapter serves provider "webcode"`
+ *（`dsh-api-session-controller/lib/index.js:760` 逐字实读）。
+ * 也就是说：**移除 `webcode` 会让所有旧会话、默认模型、子代理白名单当场全部报错**。
+ *
+ * 处置：仍然注册 `webcode`，但它的 `listModels` 返回**空数组**。目录侧那条
+ * `models.length > 0` 的过滤会让它**不生成组**（下拉里看不到多余项），而
+ * `routeServed('webcode')` 仍为真 ⇒ 旧会话照旧可跑、可解析。
+ * 这是「分组」与「不砸旧会话」同时成立的唯一解。
+ */
+export const MODEL_PROVIDER_COMPAT_ID = 'webcode';
+
+/** 站点 id → provider id。带前缀是为了不与官方/第三方 provider 撞名。 */
+export function providerIdForSite(siteId) {
+  return MODEL_PROVIDER_COMPAT_ID + '-' + String(siteId);
+}
+
+/** provider id → 站点 id；不属于本站点的 provider 一律 null（不猜、不回落）。 */
+export function siteIdForProvider(providerId) {
+  const prefix = MODEL_PROVIDER_COMPAT_ID + '-';
+  const id = String(providerId ?? '');
+  if (!id.startsWith(prefix)) return null;
+  const siteId = id.slice(prefix.length);
+  return SITES.some((s) => s.id === siteId) ? siteId : null;
+}
+
+/**
+ * 组标题 = **站点短键/域**（用户 2026-09-28 指定）。
+ *
+ * 刻意不用 `st.name`：那些是「智谱清言 (GLM)」「Kimi (月之暗面)」这类描述性名字，
+ * 而用户要的是一眼看出「哪个网站」；并且 glm 与 zai 必须分得开 —— z.ai 的
+ * shortKey 恰好就是它的真实域名（见 ZAI 的 shortKey 注释），语义正好吻合。
+ */
+export function providerGroupName(siteId) {
+  const st = SITES.find((s) => s.id === siteId);
+  if (!st) return String(siteId);
+  // 组名覆盖表：只在「站点 id 不足以当组名」时使用。
+  //
+  // 为什么 GLM 需要覆盖，而 Z.ai 不需要：z.ai 的 shortKey 本来就是它的真实
+  // 域名（见 ZAI 的 shortKey 注释），直接可用；而 GLM 站点 id 是 `glm`，用户
+  // 要的组名是 **chatglm**（它的真实域名）。
+  //
+  // 刻意**不**去改 GLM 的 shortKey：那个字段同时决定扁平显示名
+  //（modelDisplayName -> `glm/glm-5.3`），改它会让历史设置值、既有护栏
+  //（test/model-labels.test.mjs 的 `glm/glm-5.3` 断言）与设置页 optgroup
+  // 一起漂移——而这次只需要「组标题」这一处改名。
+  const override = PROVIDER_GROUP_NAME_OVERRIDES[siteId];
+  return override || st.shortKey || st.id;
+}
+
+/** 组名覆盖表（见 providerGroupName 注释）。值必须是用户可读的真实站点域名。 */
+const PROVIDER_GROUP_NAME_OVERRIDES = Object.freeze({ glm: 'chatglm' });
+
+/** 注册给 `llm.registerAdapter` 的 provider id 全集（各站点 + 兼容空壳）。 */
+export function providerIdsForRegistration() {
+  return [MODEL_PROVIDER_COMPAT_ID, ...SITES.map((s) => providerIdForSite(s.id))];
+}
+
+/**
+ * 模型在**选择器组内**的显示名：裸模型名（`GLM-5.3` / `GLM-5.3-Flash`）。
+ *
+ * 与 `modelDisplayName`（`glm/glm-5.3`）的分工：后者是**扁平列表**时代的产物
+ *（见其注释：当时没有分组，只能把站点键塞进名字里，否则分不清 glm-5.3 是
+ * chatglm.cn 还是 z.ai）。现在组标题已经写着站点，行内再带一次前缀就是重复。
+ *
+ * 注意这**只是显示名**：模型 id 仍是 `glm:glm-5.3`，别名表、历史设置值、
+ * 会话游标、路由全部不动。
+ */
+export function modelGroupEntryName(m) {
+  return String(m?.name ?? m?.id ?? '');
+}
+
+/**
  * 全站点模型目录（限定 id + 能力元数据）——DSH 模型选择器与
  * OpenAI /v1/models 共用这一份，保证两边模型列表一致。
  *

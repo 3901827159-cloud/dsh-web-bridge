@@ -16,6 +16,124 @@
 
 ---
 
+## 模型选择器按站点分组（2026-09-28，**刻意不动版本号**）
+
+**用户原话**：「请你只做修改 git 不要更新版本号，以后还有很多哦小更新」；
+「请你查看现在的模型选择-只有一层，把同一个网站变为一层，具体 glm5.3 和 flash
+例如这样放在 chatglm 一组内」。
+
+**本轮不升 `package.json` 版本**（用户明确要求），也不新增测试文件（只改 2 个既有
+测试文件），因此 `check-ledger` 的 `version` / `testFiles` 两格读数**保持本棵树原有的值**
+不变。本段刻意不写死具体数字：它写在**上一轮 0.19.41 改动尚未提交**的树上，
+「提交后的树」与「当前工作树」这两个读数本来就不同（前者 0.19.40 / 103，
+后者 0.19.41 / 109）——写死任一个都会在另一边变成假陈述。
+
+### 一、先纠正一个前提：选择器本来就是两层，缺的是**分组**
+
+用户看到的是「模型选择只有一层」。实读官方客户端后确认：
+
+- 选择器**本身就是两层**——根菜单是「模型 / 推理强度」两行，点进去才是模型列表
+  （`dsh-client-ui-model-selection/lib/client.js` 的 `ModelSelect` 头注释、`rowId()`、
+  `_7KE1Ra_group` 样式，2026-09-28 实读）。
+- 真正的问题是**只有一组**：`buildModelCatalog` 里「**一个 provider = 一组**」
+  （`dsh-api-session-controller/lib/index.js:1964-2010` 逐字实读）：
+  组标题取 `providerInfo(provider).name`，组 id 必须逐字等于 provider id，
+  且目录只保留 `models.length > 0` 的组。
+- 而插件此前只注册**一个** provider `webcode`（`lib/index.js` 的
+  `registerAdapter([cfg.providerId], …)`），名字是整包共用的
+  「Harness Web Bridge」⇒ 10 个站点的模型全平铺在同一组里。
+
+**所以「一个网站一层」= 每个站点注册成一个独立 provider。** 这是本轮唯一的机制。
+
+### 二、兼容空壳 `webcode`：不加它，所有旧会话当场报错
+
+这是本轮**最重要的发现**，也是改动形状的决定者。
+
+真机证据（`~/.dsh/settings.yaml`）：
+
+```
+agent-default-model: { provider: webcode, model: glm:glm-5.3 }
+subagent-model-selection.allowedModels: 20 条，**全部** provider: webcode
+```
+
+而 DSH 在**每次发消息前**校验：
+
+```js
+if (!routeServed(ctx, selection.provider))
+  throw new RemoteError("session/model-unavailable", …)
+// dsh-api-session-controller/lib/index.js:760
+```
+
+⇒ **移除 `webcode` 会让所有旧会话、默认模型、20 条子代理白名单当场全部报错。**
+
+处置：仍然注册 `webcode`，但它的 `listModels` 返回**空数组**。目录侧那条
+`models.length > 0` 的过滤让它**不生成组**（下拉里看不到多余项），而
+`routeServed('webcode')` 仍为真 ⇒ 旧会话照旧可跑、可解析。
+这是「分组」与「不砸旧会话」同时成立的唯一解。
+
+### 三、改动（两个源文件 + 两个测试）
+
+| 文件 | 改动 |
+| --- | --- |
+| `lib/providers.js` | 新增 `MODEL_PROVIDER_COMPAT_ID` / `providerIdForSite` / `siteIdForProvider` / `providerGroupName` / `providerIdsForRegistration` / `modelGroupEntryName`；组名覆盖表（`glm → chatglm`） |
+| `lib/index.js` | 新增 `siteIdOfProvider`；`providerInfo` 按 provider 给组名；`listModels` 空壳返回 `[]`、站点只公布本站模型且行名用**裸模型名**；`resolveModel` 增 provider↔站点自洽校验；`registerAdapter` 注册 11 个 provider |
+| `test/model-labels.test.mjs` | 新增 3 条分组护栏（组名对照表 / GLM 与 Z.ai 可分辨 / 空壳仍解析） |
+| `test/regression.test.mjs` | 原 `listModels('webcode')` 断言改为「空壳必须为空 + 站点 provider 公布模型 + 行名不带前缀」 |
+
+**组名**（用户 2026-09-28 指定「站点短键/域」）：
+`deepseek` / **`chatglm`** / `chatgpt` / `kimi` / `qwen` / `doubao` / `grok` /
+`claude` / `gemini` / **`z.ai`**。
+
+**为什么 `glm` 的组名要单独覆盖成 `chatglm`**：站点 id 是 `glm`，而用户要的组名是它的
+真实域名。刻意**不**改 `GLM.shortKey` —— 那个字段同时决定扁平显示名
+（`modelDisplayName` → `glm/glm-5.3`），改它会让历史设置值、既有护栏
+（`glm/glm-5.3` 断言）与设置页 `optgroup` 一起漂移；本次只需改「组标题」一处。
+
+### 四、验证（可复现）
+
+`node .tmp/verify-groups.mjs` 模拟 DSH 的 `buildModelCatalog` 打印真实分组：
+
+```
+=== 注册的 provider 数: 11 ===
+=== 下拉里可见的组数: 10 ===
+[deepseek]  DeepSeek（深度思考） -> deepseek:deepseek
+[chatglm]   GLM-5.3 / GLM-5.3-Flash / 智谱清言
+[z.ai]      GLM-5.3-Flash / GLM-5.3 / GLM-5.2 / Z.ai
+[kimi] / [qwen] / [doubao] / [grok] / [claude] / [chatgpt] / [gemini] …
+=== 不生成组（仍然可解析）的 provider: webcode ===
+resolveModel(webcode, glm:glm-5.3)  -> ok（旧会话兼容）
+resolveModel(webcode-glm, glm:glm-5.3) -> ok
+resolveModel(webcode-glm, kimi:auto)   -> 被拒（正确）
+```
+
+闸门读数（2026-09-28）：
+
+| 闸门 | 读数 |
+| --- | --- |
+| `lint-comments` | 229 文件，error 0 / warn 0 |
+| `check-ledger` | version 0.19.41 == 台账；testFiles 109 == 台账 |
+| `model-labels.test.mjs` | **11 / 11**（原 8 条 + 新 3 条） |
+| `regression.test.mjs` | 53 pass / 1 fail |
+| 契约/连续性/看门狗批次 | client-server-contract 2/2、wiring-roster 2/2、session-continuity 14/14、markdown-block-integrity 5/5、watchdog-first-byte 9/9 |
+
+### 五、那一处 fail **不是本轮引入的**（反向验证过）
+
+`regression.test.mjs` 的
+「网页会话丢失时用整段首轮提示词重放」失败。用 `git stash push -- lib/index.js`
+把本轮改动摘掉后**原样复现**（`pass 53 / fail 1`，同一格同一断言），
+⇒ 它是**既有**失败，不是分组改造引入的。按纪律如实记录，不在本轮顺手「修绿」。
+
+### 六、未取证（不猜）
+
+1. **真机未验证**：本轮未重启 DSH、未装机（用户要求「只做修改 git」），
+   分组效果由离线模拟 DSH 目录构建器得出，**尚未在真实 GUI 上肉眼核对**。
+2. **多账户槽的行名**未真机核对（默认槽不跟 `(账户N)`，沿用既有约定）。
+3. 设置页自己的 `optgroup`（`lib/client.cjs`）**刻意未改**：它按 `siteName(sid)`
+   分组且用 `m.name`（带站点前缀）。那是插件自有设置界面、与 DSH 选择器是两条
+   渲染路径；本轮只按用户所指改 DSH 选择器，未动它。
+
+---
+
 ## 0.19.33 设置写入后派生读数跟不上 + `sleep is not defined`（2026-09-27）
 
 **用户原话**：「现在设置界面分站点的投递选择更改后提示词更新跟不上，请你修复」；

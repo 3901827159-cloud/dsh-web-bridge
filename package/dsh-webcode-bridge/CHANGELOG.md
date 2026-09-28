@@ -5,6 +5,33 @@ All notable changes to this package. Newest first.
 The canonical, in-progress record of what was changed and why lives in [doc/progress.md](../../doc/progress.md);
 this file is the package-facing release history.
 
+## Unreleased
+
+**模型选择器按站点分组：一个网站一层。**（刻意不升版本号，见下）
+
+此前全部站点挤在一个 provider 里，下拉只有「Harness Web Bridge」一组，10 个站点的
+模型平铺在一起。现在每个站点各占一组，组名是站点短键/域：
+
+```
+deepseek · chatglm · chatgpt · kimi · qwen · doubao · grok · claude · gemini · z.ai
+```
+
+GLM 与 Z.ai 各自成组（同名的 `glm-5.3` 不再看起来像同一个网站的重复项），
+组内行名改为**裸模型名**（`GLM-5.3` / `GLM-5.3-Flash`），模型 id 不变。
+
+**兼容性**：仍然注册一个 `webcode` provider 作为兼容空壳，但它的模型列表为空
+（目录侧按 `models.length > 0` 过滤，因此不会多出一个空组）。**没有它，所有旧会话、
+默认模型与 20 条子代理白名单都会在发消息前报 `session/model-unavailable`** ——
+DSH 每次发消息都会校验存储的 provider 是否仍被服务。
+
+已取证：`node .tmp/verify-groups.mjs` 模拟 DSH 目录构建器 → 11 个 provider 注册、
+10 个组可见、空壳不生成组且旧值仍解析。护栏：`test/model-labels.test.mjs` 新增 3 条。
+
+**版本号刻意不动**（用户 2026-09-28 明确要求：「只做修改 git 不要更新版本号，
+以后还有很多哦小更新」）。
+
+---
+
 ## 0.19.40
 
 **交付前审计：修两条真缺陷 + 摘掉一条环境假红。全量单测首次跑通（1162/1162）。**

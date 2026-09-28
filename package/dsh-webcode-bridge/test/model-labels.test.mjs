@@ -1,8 +1,12 @@
 // model-labels.test.mjs — 模型显示名必须是「站点短键/模型 id」（0.14.0）。
 //
 // 为什么需要这个护栏：DSH 的模型选择器**只渲染 model.name**，不拼 provider
-// （dsh-client-ui-model-selection 的 option 渲染只读 model.name，分组标题来自
-// providerInfo(provider).name，而那一个是整包共用的「Harness Web Bridge」）。
+// （dsh-client-ui-model-selection 的 option 渲染只读 model.name）。
+//
+// 2026-09-28 更新：分组标题来自 providerInfo(provider).name，而它**不再**是整包
+// 共用的「Harness Web Bridge」——模型目录已按站点拆成多个 provider，每组标题
+// 取站点短键/域（chatglm / deepseek / z.ai …）。本文件末尾那三条测试钉住拆分
+// 本身：组名、组内裸名、以及旧 provider 兼容空壳仍然可解析。
 // 旧目录里 8 个站点都叫 `auto`、GLM 有两个站点都叫 `glm-5.3`，选择器上根本
 // 分不出这一行是哪个网站——用户的原话就是「不能只有模型名不知道哪个网站的」。
 //
@@ -17,7 +21,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { SITES, listAllModels, resolveWebModel, MODEL_ALIAS_IDS } from '../lib/providers.js';
+import { SITES, listAllModels, resolveWebModel, MODEL_ALIAS_IDS, MODEL_PROVIDER_COMPAT_ID, providerIdForSite, siteIdForProvider, providerGroupName, providerIdsForRegistration } from '../lib/providers.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const read = (p) => fs.readFileSync(path.resolve(here, '..', p), 'utf8');
@@ -125,4 +129,72 @@ test('z.ai 的显示名用域名短键，内部路由 id 不变（历史设置�
   // glm-4.x 是**国内站点**的历史写法，收敛到 chatglm.cn 而不是 z.ai
   assert.equal(resolveWebModel('glm-4.6').siteId, 'glm');
   assert.equal(resolveWebModel('glm-4.6').name, 'glm/glm-5.3');
+});
+
+// ---------------------------------------------------------------------------
+// 分组（2026-09-28）：模型选择器「一个网站一层」
+//
+// DSH 侧机制（实读 dsh-api-session-controller 的 buildModelCatalog）：
+//   一个 provider = 一组；组标题取 providerInfo(provider).name；组 id 必须逐字
+//   等于 provider id；且 `group.models.length > 0` 的组才会出现在目录里。
+// 因此本文件的判据就是那三条的直接推论。
+// ---------------------------------------------------------------------------
+
+/** 期望的组名（2026-09-28 用户指定：站点短键/域）。手写对照表，见下方断言注释。 */
+const EXPECTED_GROUP_NAMES = Object.freeze({
+  deepseek: 'deepseek',
+  glm: 'chatglm',          // 站点 id 是 glm，但真实域名是 chatglm.cn
+  chatgpt: 'chatgpt',
+  kimi: 'kimi',
+  qwen: 'qwen',
+  doubao: 'doubao',
+  grok: 'grok',
+  claude: 'claude',
+  zai: 'z.ai',             // 短键即真实域名
+  gemini: 'gemini',
+});
+
+test('注册表里每个站点各占一个 provider，且组名是站点短键/域', () => {
+  const ids = providerIdsForRegistration();
+  // 兼容空壳必须在，且必须**只有一个** —— 多注册一个不存在的 provider 会让
+  // DSH 的 prepareRoutes 抛 DUPLICATE_ADAPTER，整个插件起不来。
+  assert.equal(ids.filter((x) => x === MODEL_PROVIDER_COMPAT_ID).length, 1, '兼容空壳必须恰好一次');
+  assert.equal(new Set(ids).size, ids.length, 'provider id 不得重复（重复 = 插件无法加载）');
+  for (const st of SITES) {
+    const pid = providerIdForSite(st.id);
+    assert.ok(ids.includes(pid), `${st.id} 必须有自己的 provider`);
+    // 反查必须闭合：providerIdForSite -> siteIdForProvider -> 同一站点
+    assert.equal(siteIdForProvider(pid), st.id, pid + ' 反查不回原站点');
+    // 组名 = 站点短键/域。写成**显式对照表**而不是复用实现里的 shortKey||id：
+    // 复用实现等于用实现验证实现，覆盖表改了它也跟着改，等于没护栏。
+    assert.equal(providerGroupName(st.id), EXPECTED_GROUP_NAMES[st.id], st.id + ' 的组名不对');
+  }
+  // 反向：不认识的 provider 一律 null，不许猜站点
+  assert.equal(siteIdForProvider('webcode-nope'), null);
+  assert.equal(siteIdForProvider('deepseek-official'), null);
+});
+
+test('GLM 与 Z.ai 各自成组，组名可分辨（同名模型不再混在一起）', () => {
+  // 用户原话：「glm5.3 和 flash 例如这样放在 chatglm 一组内」。
+  // 而 z.ai 是**另一个网站**，必须自成一组、组名不同 —— 否则两条 glm-5.3
+  // 在选择器上看起来仍是同一个网站的重复项。
+  assert.equal(providerGroupName('glm'), 'chatglm');
+  assert.equal(providerGroupName('zai'), 'z.ai');
+  assert.notEqual(providerIdForSite('glm'), providerIdForSite('zai'));
+  // 两个站点确实各有一个 glm-5.3（同名），这正是必须分组的原因
+  const g = resolveWebModel('glm:glm-5.3');
+  const z = resolveWebModel('zai:glm-5.3');
+  assert.equal(g.id, z.id, '两个站点的模型 id 同名，是分组要解决的问题');
+  assert.notEqual(g.siteId, z.siteId);
+});
+
+test('旧 provider webcode 仍解析得开（否则所有历史会话当场报 session/model-unavailable）', () => {
+  // 真机证据（~/.dsh/settings.yaml）：agent-default-model.provider = webcode，
+  // 以及 subagent-model-selection.allowedModels 里 20 条 provider: webcode。
+  // DSH 在每次发消息前校验 routeServed(selection.provider)；webcode 必须仍在
+  // 注册表里。这里钉住「兼容空壳存在」，而它 listModels 为空（不生成组）由
+  // regression.test.mjs 钉住。
+  assert.ok(providerIdsForRegistration().includes('webcode'), '兼容空壳 webcode 必须在注册表里');
+  // 它承载的是**全站点**语义：不限定站点，所以反查刻意返回 null（哨兵）
+  assert.equal(siteIdForProvider('webcode'), null);
 });
