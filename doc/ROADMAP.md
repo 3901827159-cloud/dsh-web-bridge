@@ -11,21 +11,79 @@
 
 ---
 
-## 一、当前坐标（2026-09-17 实测读数）
+## 〇、站点差异外移：`lib/sites/<siteId>.js`（P2）
+
+> **本节是 [`CODE-STRUCTURE.md`](CODE-STRUCTURE.md) 与 [`diagnosis-2026-09-16.md`](diagnosis-2026-09-16.md) §6.1
+> 所引用的「站点差异外移」的落点。**
+> 2026-09-30 补写：此前那两处引用写的是「`ROADMAP.md` 第 2 节」，
+> 而本文件的分节里**没有**对应内容——那是死引用。补节而不是删引用，因为要做的事是真的。
+
+**要解决的问题**：站点知识散落在 **4 个文件**（`providers.js` / `contract.js` / `decoder.js` /
+`browser-driver.js`），于是「新增一个站点要改 4 处」、「网页改版要跨文件找」、
+以及最贵的一种——「改一个站点，影响到所有人」。后者**已经真实发生过**：
+`git log -S` 取证显示 `e828f20`（GLM/z.ai 会话身份）同时改了上下文预算闸与限流截断帧识别。
+
+**目标形态**（每站点一个文件，导出**同一形状**的对象）：
+
+```
+lib/sites/<siteId>.js
+  { meta,          // origin / 选择器 / 模型目录（现 providers.js 的 site() 载荷）
+    decoder,       // 解码器族选择（现 decoder.js 的按站点注册项）
+    modelSelect,   // 选模型（现 model-picker.js 的站点分支）
+    teaching,      // 教学立场与传输形状（现 agent-preset.js 的 2 个特例）
+    nav,           // 会话地址三态（现 contract.js 的 navContractFor）
+    capabilities } // antiBot / rootPathForSpa / staticOrigins / experimental
+```
+
+**为什么是这个形态，而不是按站点复制隔离**——三条实测理由
+（完整论证见 [`research/2026-09-26-dwb-site-modularity-audit.md`](research/2026-09-26-dwb-site-modularity-audit.md) §五）：
+
+1. **复制在本仓库产生过漂移，而不是隔离。** `lib/browser-driver.js` 里曾有三份**逐字相同**的
+   `ANSWER_SELECTOR` 字面量，代价是「修一处、忘两处」：判据用的节点与兜底交出去的节点
+   不是同一个，读数自相矛盾且看不出来。
+2. **复制会让公共缺陷的修复成本乘以站点数。** 0.19.16 的 `finish()`「失败分支丢弃已解内容」
+   缺陷**一次修了 4 个解码器族**（`JsonLinesDecoder` / `OpenAiSseDecoder` / `ChatGptDecoder` /
+   `ClaudeSseDecoder`）；若按站点复制，那一次要改 4 份且必然漏修。
+3. **真正提供隔离的是「文件边界」，不是代码副本。** 前者改一个站点只动一个文件；
+   后者改一个公共判据要动 N 个文件。
+
+**风险与做法**：**风险中**。迁移期两套路径并存，必须靠护栏钉住行为不变。
+**逐站点迁移，DeepSeek 先行**（它特例最多、收益最大）；其余 9 站继续走 `genericContract`
+兜底，**一行不动**；每迁一个站点跑一次全量单测。
+
+**判据（每步都要满足）**：迁移前后 `providers.js` 的 `SITES`、`providerIdsForRegistration()`、
+`listAllModels()` 的输出**逐字相同**——写成护栏断言，不是肉眼比对。
+
+**明确不动的三处**（本轮与以后都不要顺手改）：
+
+| 位置 | 为什么不动 |
+| --- | --- |
+| `agent-preset.js` 的站点 if 链 | [`CODE-STRUCTURE.md`](CODE-STRUCTURE.md) §四明确：它**不该拆**——5 代分支服务同一个协议，拆开会制造两套协议漂移（本仓库三次泄漏事故的老路） |
+| `index.js` 的 `siteId === 'deepseek'` ×5 | 它是**测试注入契约**而非站点特例（`driverFor('deepseek')` 必须仍返回注入的 driver）。只抽具名谓词，不改行为 |
+| `decoder.js` 的族内继承 | 这是**正向**耦合（共用基类 + 按站点子类），正是「既不复制、又隔离」的形态。保持并推广 |
+
+**工作量未知（如实）**：`diagnosis-2026-09-16.md` 说「不是大重构」，但**没给行数/文件数读数**，
+本文件也没有。**以 DeepSeek 的实际改动量作为估算基线**，再决定其余 9 站的排期。
+
+---
+
+## 一、当前坐标（2026-09-30 实测读数）
 
 | 项 | 读数 | 取法 |
 | --- | --- | --- |
-| 工作树 | **0.16.4** | `package/dsh-webcode-bridge/package.json` |
-| 已装（web / headless） | 均 **0.16.3** | `~/.dsh/profiles/*/node_modules/dsh-webcode-bridge/package.json` |
-| 运行中的进程 | **0.16.3**，`hash=412c7c099919` | `GET http://127.0.0.1:3080/__webcode/status` |
-| 上游 | `origin/main = HEAD = 6b836d2`（0.15.12），**0 个未推送提交** | `git log origin/main..HEAD` |
-| 未提交改动 | **59 项**（19 改 + 40 新） | `git status --porcelain` |
-| 单测文件 | **57 个**（台账 `单测基线` 必须与它逐字相等） | `Get-ChildItem package/dsh-webcode-bridge/test/*.test.mjs` |
+| 工作树 | **0.19.49** | `package/dsh-webcode-bridge/package.json` |
+| 已装（web profile） | **0.19.48**（profile 钉 `dsh-webcode-bridge-0.19.48.tgz`） | `~/.dsh/profiles/web/package.json` |
+| 运行中的进程 | **0.19.48**，`hash=605d7d3b1297` | `GET http://127.0.0.1:3080/__webcode/status` |
+| 宿主 DSH（实装） | **0.1.7-alpha.2** | `npm ls -g --depth=0` |
+| 宿主 DSH（npm 标签） | `latest = next = 0.2.0-rc.2`，`alpha = 0.1.7-alpha.2` | `npm view @deepseek-ai/dsh dist-tags --json` |
+| 未提交改动 | **0 项**（干净） | `git status --short` |
+| `lib/` 规模 | **48 个模块 / 34,570 行** | 同 `wiki/tools/gen-index.mjs` 口径 |
+| 单测文件 | **116 个**（台账 `单测基线` 必须与它逐字相等） | `node scripts/check-ledger.mjs` |
 
-**这个坐标里最重要的一行是「未提交改动 59 项」**：0.16.0–0.16.4 五轮的产品代码、
-护栏与真机夹具全部只在工作树里。工作树一旦被误删或误覆盖，五轮修复与全部真机夹具
-（`test/fixtures/dsml-real-*.txt`、`marker-typo-dsh-calls.txt`）会同时消失——而它们
-正是「真实调用被丢 / 标记畸变 / 会话槽丢失」那几族缺陷的**唯一离线防线**。
+> **本表最重要的一行已从「未提交改动」换成「已装 ≠ 工作树」**（0.19.48 vs 0.19.49）：
+> 0.16.x 那次「59 项未提交」的欠账已经还清，而**装机漂移**是现在真实存在的那一个——
+> 它会让「改完看着好了」与「用户实际跑的还是旧的」同时成立。
+> 消掉它的完整流程见 [`../wiki/tasks.md`](../wiki/tasks.md) 的 R7 与 R8。
 
 ---
 

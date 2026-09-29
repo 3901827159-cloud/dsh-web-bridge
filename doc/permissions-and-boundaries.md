@@ -23,7 +23,7 @@
 | 开发依赖 | `ws@^8.21.3` | 同文件的 `devDependencies` |
 | 可选 peer | `@deepseek-ai/dsh-client-ui-sidebar-right@^0.1.5-alpha.1` | 同文件的 `peerDependencies` + `peerDependenciesMeta.optional: true` |
 | Node | `>=22.13` | 同文件的 `engines.node` |
-| DSH | `>=0.1.0-rc.6` | 同文件的 `engines.dsh` |
+| DSH | **`>=0.1.6-alpha.2`**（2026-09-30 收紧，原 `>=0.1.0-rc.6`） | 同文件的 `engines.dsh` |
 | 浏览器 | 本机 **Microsoft Edge**，或 playwright 自带的 Chromium | [`README.md`](../README.md)「初次启动」；`lib/browser-runtime.js` |
 | 浏览器扩展 | **不需要任何扩展** | `README.md`「初次启动」第 1 条 |
 
@@ -69,6 +69,45 @@ $f = Get-ChildItem 'package\dsh-webcode-bridge\lib','package\dsh-webcode-bridge\
 **不为了过闸而拆文件**：`client.cjs` 是 DSH 客户端要求的**单文件 CJS bundle**
 （它不能 `import` 自己的 `lib/`，理由写在 `lib/client.cjs` 文件头），拆分它会破坏官方
 契约。这一点如实记在此处，供审查方按「需要人工审查」处理。
+
+### 1.4 `engines.dsh` 从 `>=0.1.0-rc.6` 收紧为 `>=0.1.6-alpha.2`（2026-09-30）
+
+**为什么改**：旧值**没有任何证据**。`git log -S` 取证：
+
+```
+git log --oneline -S'"dsh": ">=0.1.0-rc.6"' -- package/dsh-webcode-bridge/package.json
+f1d1ca1 chore: initial snapshot of v0.5.1 working tree (pre-diagnosis)
+```
+
+它写于 **v0.5.1 的初始快照**，此后**再没有被重新看过**——那时插件只有今天约四分之一的体量，
+`slots` / `primitives` / `sidebarRight*` 这些能力**都还不存在**。也就是说：
+声明描述的是一个当前的代码从未跑过的宿主范围。
+
+**新值的依据（两条，都可复核）**：
+
+1. `doc/verify.md` 有两处**真机验收**记录在 DSH **0.1.6-alpha.2** 上完成
+   （2026-09-21，`:225` 与 `:274`）——这是「跑过」的一手记录；
+2. 客户端 bundle **刻意横跨 0.1.6 / 0.1.7 两代图标导出名**
+   （`lib/client.cjs` 的 `iconOf`：`IconXxxOutline14` → `IconXxxOutlineRegular`，
+   两代名字依次找，都取不到才回退空组件），因此它的**兼容下界就在 0.1.6 一代**。
+
+**为什么不是 `>=0.1.7-alpha.2`**：本机实装确实是 0.1.7-alpha.2，但客户端代码**刻意同时
+支持 0.1.6**（上面第 2 条）。把下界写成 0.1.7 会是一句**代码并不支持**的声明——
+那正是本文件存在要防的事。**声明取「代码真的支持的」，不取「我手边装的那个」。**
+
+**边界（如实）**：规范明写 `engines.dsh` **当前不被任何 reader 强制**
+（`Compatibility is declarative`，见 [`compliance-audit-0.19.1.md`](compliance-audit-0.19.1.md) §8.2），
+所以这次收紧
+**不会拦下任何现有安装**，它只是把一句猜测换成一句有出处的话。
+若将来某个 reader 开始强制它，早于 `0.1.6-alpha.2` 的宿主会被拒——而那与事实一致：
+那些宿主上本插件从未被验收过。
+
+**同轮**：`peerDependencies` 的 `^0.1.5-alpha.1` **刻意不动**——它满足实装的
+`sidebar-right@0.1.7-alpha.2`（`^0.1.5-alpha.1` ⇒ `>=0.1.5-alpha.1 <0.2.0`），
+而且**这个宽度是必要的**：客户端代码要同时支持 0.1.6 与 0.1.7 两代，
+收紧到 `^0.1.7-alpha.2` 会把 0.1.6 宿主排除在外，与上面第 2 条自相矛盾。
+**「看着旧」不等于「错了」**——这一条与 `--dsw-alias-label-caption` 那次
+（`official-contract-audit.md` §4）是同一形状：核查后结论是**不改**。
 
 ---
 

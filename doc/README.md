@@ -18,7 +18,7 @@
 | 文档 | 用途 | 什么时候读 |
 | --- | --- | --- |
 | [PROJECT-INTENT.md](PROJECT-INTENT.md) | **项目意图**：要做什么、不要做什么，每条附用户原话与出处 | 判断「这算不算这个项目该做的事」时 |
-| [CODE-STRUCTURE.md](CODE-STRUCTURE.md) | **代码结构归类**：`lib/` 30 个模块的分层、依赖方向、God file 清单、测试分布 | 改动跨模块、决定新模块放哪一层时 |
+| [CODE-STRUCTURE.md](CODE-STRUCTURE.md) | **代码结构归类**：`lib/` 48 个模块（+`lib/sites/` 2 个 = 索引口径 50）的分层、依赖方向、God file 清单、测试分布 | 改动跨模块、决定新模块放哪一层时 |
 | [ROADMAP.md](ROADMAP.md) | **未来框架**：阶段划分、每阶段判据与退出条件、与官方 AgentTeams / 外部调度插件的关系 | 决定下一轮做什么、按什么顺序做时 |
 | [REQUIREMENTS-TASKBOARD.md](REQUIREMENTS-TASKBOARD.md) | **任务面板需求**（用户原话逐条）：项目化、graph、审批闸门、参考实现对照 | 动任务面板 / 任务数据层之前 |
 | [PROMPT-ENGINEERING.md](PROMPT-ENGINEERING.md) | **提示词工程立场**：教原生协议、标记词形逐字教学、默认路径零位移；含真机对照读数与「不宣称最优」的元纪律 | 改提示词 / 改协议教学 / 改解析宽容度之前 |

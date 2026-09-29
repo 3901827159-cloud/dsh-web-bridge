@@ -1,9 +1,17 @@
-# 代码结构归类：lib 的 30 个模块分几层
+# 代码结构归类：lib 的 48 个模块分几层
 
-本文件把 `package/dsh-webcode-bridge/lib/` 的 **30 个模块 / 15,175 行**按**职责**归类，并给出实测依赖方向。
-目的：让「改一处要动几个文件」这个问题有确定答案。
+本文件把 `package/dsh-webcode-bridge/lib/` 的 **48 个模块 / 34,570 行**按**职责**归类，
+并给出实测依赖方向。目的：让「改一处要动几个文件」这个问题有确定答案。
 
-实测时间 2026-09-17，基线 0.16.3。行数含注释（本仓库注释密度极高，属有意设计）。
+**口径（重要）**：行数是 `readFileSync(...).split(/\r?\n/).length` 的读数，与
+`wiki/tools/gen-index.mjs` **同一口径**（比 `Measure-Object -Line` 多 1 行/文件，因为后者
+不计末尾空行）。模块数与测试文件数由机器判：`node scripts/check-ledger.mjs`。
+
+实测时间 2026-09-30，基线 `0.19.49`，宿主 `dsh@0.1.7-alpha.2`。
+
+> **本文件此前长期过期**（2026-09-17 的读数：30 个模块 / 15,175 行 / 109 个测试文件）。
+> 2026-09-30 全量重算。凡本节数字与 `check-ledger.mjs` 或 `wiki/modules.md` 冲突，
+> **以后两者为准**——它们是机器判的，本节的数字是人写的。
 
 ---
 
@@ -11,124 +19,171 @@
 
 | 项 | 值 | 取法 |
 | --- | --- | --- |
-| `lib/` 模块数 / 总行数 | **30 / 15,175** | `Get-ChildItem lib -Filter *.js` |
-| 最大模块 | `browser-driver.js` **2,734 行** | 同上 |
-| 次大 | `index.js` **2,325 行**、`agent-preset.js` **1,537 行**、`web-control.js` **917 行** | 同上 |
-| 测试文件 | **109 个** `*.test.mjs` | `test/` 目录计数（与 `check-ledger.mjs` 同一口径，2026-09-27 实测） |
-| 真机夹具 | **14 份** `dsml-real-*.txt` + 5 份具名形态 | `test/fixtures/` |
-| 入口 | `main: ./lib/index.js`；`exports` 另含 `.client`、`./cordis.patch.yml` | `package.json` |
+| `lib/` 模块数 / 总行数 | **48 / 34,570** | 同 `gen-index.mjs` 口径 |
+| 最大模块 | `client.cjs` **6,477 行** | 浏览器侧单文件 bundle（非 ESM） |
+| 次大 | `browser-driver.js` **4,682**、`index.js` **4,424**、`agent-preset.js` **3,018** | 同上 |
+| 再次 | `web-control.js` 1,863、`decoder.js` 1,049、`providers.js` 1,036、`think-effort.js` 1,024 | 同上 |
+| 测试文件 | **116 个** `*.test.mjs` | `check-ledger.mjs` 同一口径 |
+| 真机夹具 | `test/fixtures/` 下的 `dsml-real-*.txt` 与具名形态 | `test/fixtures/` |
+| 入口 | `main: ./lib/index.js`；`exports` 另含 `./client`、`./cordis.patch.yml` | `package.json` |
+
+> `client.cjs` 是**官方要求的单文件 CJS bundle**（它不能 `import` 自己的 `lib/`），
+> 因此它的行数**不构成**「该拆」的信号——拆分它会破坏官方客户端契约。
+> 这一点已写进 [`permissions-and-boundaries.md`](permissions-and-boundaries.md) §1.3。
 
 ---
 
 ## 二、分层（按职责，不是按目录）
 
-`lib/` 是**扁平目录**——30 个文件同层。下面这张表是**逻辑分层**，是新成员理解这份代码的最短路径。
+`lib/` 是**扁平目录**——48 个文件同层。下面这张表是**逻辑分层**，
+是新成员理解这份代码的最短路径。分层口径与 [`wiki/architecture.md`](../wiki/architecture.md) §3 的 A–J 一致。
 
-### 第 1 层 · 入口与适配（进程边界）
-
-| 模块 | 行数 | 职责 |
-| --- | --- | --- |
-| `index.js` | 2325 | **Host half**。LLM provider 适配器、流式块协议、会话游标、设置、路由挂载。**唯一的装配中心** |
-| `client.cjs` | (bundle) | **浏览器侧注入**（设置页 / 侧栏入口）。渲染契约由 `test/client-render.test.mjs` 钉住 |
-| `bin/bridge-standalone.js` | (bin) | 无 DSH 时的独立启动 |
-
-### 第 2 层 · 站点知识（「这个站点长什么样」）
+### A · 声明/真源（「这个站点长什么样」）
 
 | 模块 | 行数 | 职责 |
 | --- | --- | --- |
-| `providers.js` | 666 | 多站点内容服务注册表；`listAllModels` / `resolveWebModel` 严格解析 |
-| `contract.js` | 98 | 各站点网页契约收口（选择器/路径/解码器/严格模型校验） |
-| `decoder.js` | 744 | 各站点 SSE/JSON 流解码器（注册表形态） |
-| `model-picker.js` | 359 | 各站点「真的切换网页模型」的**唯一**实现 |
-| `accounts.js` | 229 | 「站点 × 账户槽」纯身份层（0.14.7） |
-| `metrics.js` | 282 | 速率推导、token 估算、`model_type` 期望值（按 UI 代际，纯函数） |
+| `providers.js` | 1036 | **多站点注册表真源**：`SITES` / 模型目录 / provider id 与分组名推导 |
+| `contract.js` | 102 | 各站点网页契约投影（选择器 / SSE 端点 / 解码器 / 元数据键） |
+| `decoder.js` | 1049 | 各站点 SSE/JSON 流解码器，以 `globalThis.WebCodeStreamDecoders` 注册 |
+| `model-picker.js` | 359 | 各站点「真的切换网页模型」的**唯一**实现（精确匹配 + 回读确认） |
+| `think-effort.js` | 1024 | 「思考等级」的**唯一真源**：档位清单 + 下发计划 + 回读判定（含页面侧函数） |
+| `image-pricing.js` | 131 | 图片计价契约 |
 
-### 第 3 层 · 协议与判据（纯函数，可离线反向验证）
-
-| 模块 | 行数 | 职责 |
-| --- | --- | --- |
-| `agent-preset.js` | 1537 | **工具协议的唯一定义处**：首轮预设 + 增量序列化 + 回复解析 |
-| `dsml-repair.js` | 100 | 网页原生 DSML 的**无名闭合标签**还原（0.16.2） |
-| `flatten.js` | 80 | 把 upstream 会话状态压成单条网页 prompt |
-| `prompt-variants.js` | 138 | 首轮提示词的只读变体清单（0.14.0） |
-| `bench.js` | 284 | 提示词基准实验的纯判据层（0.14.8） |
-| `idle-window.js` | 100 | 看门狗该用哪把尺子（分相位，0.16.3） |
-| `zero-progress.js` | 64 | 「本轮零进展」收尾判定（0.15.5） |
-
-### 第 4 层 · 浏览器驱动（最重、风险最高）
+### B · 身份（「这是哪个账号」）
 
 | 模块 | 行数 | 职责 |
 | --- | --- | --- |
-| `browser-driver.js` | **2734** | Playwright 驱动系统 Edge：登录判定、选模型、发车、抓流、会话槽、附件投递、看门狗接线 |
+| `accounts.js` | 229 | 「站点 × 账户槽」纯身份层：accountKey / 模型 id / profile 路径的唯一推导 |
+| `account-cache.js` | 117 | 账号昵称/头像落盘缓存 |
+| `bridge-lock.js` | 358 | 「同一账号不得同时桥接」的**跨进程**单实例锁 |
 
-### 第 5 层 · 镜像与网络（右栏真站点）
+### C · 执行（浏览器与排队）
 
 | 模块 | 行数 | 职责 |
 | --- | --- | --- |
-| `mirror.js` | 724 | 站点反代 + 同源改写 + bootstrap 注入 |
-| `upstream.js` | 177 | 面向镜像的 HTTP 客户端（Node 原生，不依赖全局 fetch 限制） |
+| `browser-driver.js` | **4682** | Playwright 驱动：登录判定、选模型、发车、抓流、会话槽、附件投递、看门狗接线 |
+| `browser-runtime.js` | 222 | 「用哪个浏览器」与「没装时怎么装」 |
+| `relay.js` | 433 | 单账号车道 + FIFO 队列 + 超时/中止 + consent |
+| `attach-scope.js` | 131 | 附件证据的**唯一**判定实现（纯函数，注入 `page.evaluate`） |
+
+### D · 解读与判据（纯函数，可离线反向验证）
+
+| 模块 | 行数 | 职责 |
+| --- | --- | --- |
+| `metrics.js` | 439 | 速率推导、token 估算、`model_type` 期望值、收束判据（按 UI 代际） |
+| `idle-window.js` | 112 | 「无进展」看门狗该用哪把尺子（prefill 与已开流必须分相位） |
+| `zero-progress.js` | 104 | 「本轮零进展」收尾判定（只有思考、正文零字符） |
+| `repeat-detect.js` | 144 | 思维链「退化重复」的通用检测（**无词表**，只按形态） |
+| `wait-stats.js` | 508 | 等待时长纯计算层（速览 = 本会话；设置页 = 历史累计，同一口径） |
+| `continue-budget.js` | 134 | 自动续跑的整会话累计与「完整提醒」升级点（**不是刹车**） |
+| `session-anchor.js` | 99 | 会话游标的内容锚定（锚尾部，不锚整体前缀指纹） |
+
+### E · 协议（只有一处定义）
+
+| 模块 | 行数 | 职责 |
+| --- | --- | --- |
+| `agent-preset.js` | **3018** | **协议真源**：首轮 preset + 逐轮增量 + `mcp_action` 围栏的解析与再教学 |
+| `tool-transport.js` | 78 | 「站点 → 工具调用传输形状」的**只读路由立面**（只路由，不实现协议） |
+| `prompt-variants.js` | 225 | 首轮提示词变体的**只读清单**（每条调真函数现算） |
+| `bench.js` | 284 | 提示词基准实验的纯判据层（不做模型自评、不算显著性） |
+
+### F · 控制面与对外接口
+
+| 模块 | 行数 | 职责 |
+| --- | --- | --- |
+| `web-control.js` | 1863 | 控制面路由 `/__webcode/*`（同源挂载 + 中继回落，带回环与 CSRF 判据） |
+| `openai.js` | 316 | OpenAI 兼容 HTTP 前端（`/v1/*`） |
+| `mirror.js` | 968 | 右栏同源镜像中继（固定上游的 same-origin relay，不是开放代理） |
+| `upstream.js` | 217 | 面向镜像的 HTTP 客户端（绕开 Node fetch 16KB 响应头上限） |
 | `cookies.js` | 205 | Set-Cookie 两个消费方向，各自按 RFC 6265 解析 |
-| `loopback.js` | 40 | 「这个 Host 是不是本机回环」的**唯一**判定实现 |
+| `loopback.js` | 104 | 「这个 Host 是不是本机回环」的唯一判定 |
+| `update.js` | 191 | 本插件「检查更新 / 安装 / 重启提醒」逻辑层（只提醒，绝不代重启） |
 
-### 第 6 层 · 执行与排队
-
-| 模块 | 行数 | 职责 |
-| --- | --- | --- |
-| `relay.js` | 331 | 单槽执行器 + FIFO 队列 + 超时 / 中止 + consent |
-| `wait-stats.js` | 205 | 「本次总等待发送时间」纯计算层 |
-
-### 第 7 层 · 对外接口与控制面
+### G · 界面
 
 | 模块 | 行数 | 职责 |
 | --- | --- | --- |
-| `openai.js` | 306 | OpenAI 兼容 HTTP 前端（`/v1/*`、`/bridge/*`）+ CSRF |
-| `web-control.js` | 917 | 同源控制面路由（`/__webcode/*`）+ 网页历史导入 |
-| `settings-page.js` | 393 | 独立设置页静态 HTML（纯展示模板，从 `index.js` 抽出） |
+| `client.cjs` | 6476 | DSH Web 客户端面（浏览器侧单文件 bundle，**非 ESM**，不能 import lib/） |
+| `settings-page.js` | 965 | 独立设置页 `/__webcode/settings-page` 的静态 HTML |
+| `comparison-view.js` | 522 | 多列对比视图 `/__webcode/comparison` 的静态 HTML |
 
-### 第 8 层 · 花名册与任务图（0.16.x 新增）
+### H · 记录/卫生
 
 | 模块 | 行数 | 职责 |
 | --- | --- | --- |
-| `roster.js` | 556 | 真实花名册投影：把「谁在跑」变成可从服务端读取的事实 |
-| `task-graph.js` | 237 | 任务板图诊断：就绪集、阻塞原因、关键路径、环与悬空边 |
-| `task-plan.js` | 427 | 任务图的**执行语义**：谁能开工、为什么不能、要不要重试、跑完没有 |
-| `task-ledger.js` | 439 | 桥**自己**的任务台账：任务是一等公民，不寄生在任何会话上 |
-| `task-split.js` | 238 | 把一个目标拆成依赖图：AI 拆分 + 分配 + 结构校验 |
-| `team-state.js` | 240 | Team / 任务状态的**磁盘**投影：AgentTeams 包不在时的权威来源 |
+| `reply-log.js` | 103 | 网页**原始回复全文**的落盘日志（未归一化、未截断） |
+| `prompt-store.js` | 181 | 提示词/上下文的每站点、每会话落盘 |
+| `notices.js` | 70 | 交回会话的**展示文案**（协议安全 + 不许静默降级） |
+
+### I · 任务/团队
+
+| 模块 | 行数 | 职责 |
+| --- | --- | --- |
+| `task-ledger.js` | 669 | 桥**自己**的任务台账：任务是一等公民，不寄生在任何会话上 |
+| `task-graph.js` | 237 | 任务图的**结构诊断**：就绪集、阻塞原因、关键路径、环与悬空边 |
+| `task-plan.js` | 427 | 任务图的**执行语义**：准入判定（能不能开工、为什么不能） |
+| `task-split.js` | 238 | 把一个目标拆成依赖图（AI 拆分 + 分配 + 结构校验） |
+| `team-state.js` | 240 | Team/任务状态的磁盘投影（AgentTeams 包不在时的权威） |
+| `roster.js` | 595 | 真实花名册投影：把「谁在跑」变成可从服务端读取的事实 |
+
+### J · 并列多会话
+
+| 模块 | 行数 | 职责 |
+| --- | --- | --- |
+| `column-context.js` | 181 | 并列多会话的列身份与工作区约定（**只做约定，不做拦截**） |
+| `column-fs.js` | 194 | 并列三列的产物围栏（照抄官方 canonicalize-then-contain 口径） |
+
+### 不在生产链路上
+
+| 模块 | 行数 | 状态 |
+| --- | --- | --- |
+| `tool-parser.js` | 53 | ⚠ **未接线**，只被单测引用。留着是一份**待决的产品决定**，不是死代码——删之前先读它的文件头 |
 
 ---
 
-## 三、依赖方向（实测的内部 import 边）
+## 三、依赖方向（2026-09-30 实测的内部 import 边）
 
 ```
-index.js            -> accounts, agent-preset, browser-driver, flatten, idle-window,
-                       metrics, mirror, openai, providers, relay, roster,
-                       settings-page, upstream, wait-stats, web-control, zero-progress
-                       （16 个出边 —— 唯一的装配中心）
+index.js            -> 27 个 lib 模块（providers, accounts, account-cache, relay, think-effort,
+                       openai, browser-driver, zero-progress, repeat-detect, idle-window,
+                       web-control, agent-preset, tool-transport, notices, image-pricing,
+                       continue-budget, reply-log, session-anchor, prompt-store, mirror,
+                       upstream, flatten, roster, metrics, wait-stats, settings-page,
+                       comparison-view）—— 唯一的装配中心
 
-browser-driver.js   -> accounts, contract, cookies, metrics, model-picker
-roster.js           -> task-graph, task-plan, team-state
-web-control.js      -> accounts, loopback, prompt-variants, providers, upstream, wait-stats
-mirror.js           -> cookies, loopback, upstream
-openai.js           -> flatten, loopback, metrics, providers
-contract.js         -> metrics, providers
-agent-preset.js     -> dsml-repair, flatten
-providers.js        -> accounts
+browser-driver.js   -> browser-runtime, cookies, contract, accounts, model-picker, metrics,
+                       zero-progress, account-cache, think-effort, bridge-lock, attach-scope
+web-control.js      -> providers, accounts, prompt-variants, prompt-store, wait-stats,
+                       loopback, browser-runtime, upstream, update, column-context,
+                       column-fs, task-ledger
+roster.js           -> task-graph, task-plan, team-state, task-ledger
+mirror.js           -> upstream, loopback, cookies
+openai.js           -> flatten, providers, metrics, loopback
+contract.js         -> providers, metrics
+providers.js        -> accounts, think-effort
+agent-preset.js     -> flatten
+prompt-variants.js  -> agent-preset, providers
+tool-transport.js   -> prompt-variants, agent-preset
 relay.js            -> metrics
 bench.js            -> agent-preset
-prompt-variants.js  -> agent-preset
+column-fs.js        -> column-context
+continue-budget.js  -> prompt-store
+upstream.js         -> loopback
+tool-parser.js      -> agent-preset, tool-transport   （未接线，仅单测）
 ```
 
-**三条结构性事实**：
+**四条结构性事实**：
 
-1. **`index.js` 是唯一装配中心**，16 个出边；它自己不被任何模块 import。
+1. **`index.js` 是唯一装配中心**，27 个出边；它自己不被任何模块 import。
    改任何一个「谁被谁用」的关系，第一个要看的就是它。
-2. **`agent-preset.js` 是协议层的心脏**：`bench.js` 与 `prompt-variants.js` 都依赖它，
-   它自己只依赖 `dsml-repair` 与 `flatten`。这条边说明「协议只有一处定义」不是口号，
-   是依赖图上的事实（`doc/review-guide.md:72-73` 的第三条不可越界约束）。
-3. **`roster.js` 是任务子系统的唯一出口**：`task-graph` / `task-plan` / `team-state`
-   三个模块只被它引用，`index.js` 通过它间接拿到任务图。这条边是 0.16.1
-   「磁盘回落让『卸载 AgentTeams』成立」的结构基础。
+2. **`agent-preset.js` 是协议层的心脏**：`bench.js` / `prompt-variants.js` / `tool-transport.js`
+   都依赖它。这条边说明「协议只有一处定义」不是口号，是依赖图上的事实
+   （[`review-guide.md`](review-guide.md) 第三条不可越界约束）。
+3. **`roster.js` 是任务子系统的唯一出口**：`task-graph` / `task-plan` / `team-state` / `task-ledger`
+   只被它引用，`index.js` 通过它间接拿到任务图。
+4. **`column-fs.js` 依赖 `column-context.js`** 是并列多会话子系统里唯一的内部边；
+   两者都**不**被驱动层引用（围栏只服务「本插件自己落盘」这一条路径，见
+   [`long-term-issues.md`](long-term-issues.md) #35）。
 
 **未发现环**：上表所有边都指向更底层或同层模块，没有出现 A→B→A。
 
@@ -138,10 +193,11 @@ prompt-variants.js  -> agent-preset
 
 | 模块 | 行数 | 为什么它是 God file | 有没有拆的可能 |
 | --- | --- | --- | --- |
-| `browser-driver.js` | 2734 | 站点差异化、DOM 契约、登录判定、发送、捕获、SSE、会话槽、附件投递**全在一个文件** | 可拆：站点差异可外移（见 `ROADMAP.md` 第 2 节） |
-| `index.js` | 2325 | provider 适配器 + 流式块协议 + 会话游标 + 设置 + 路由挂载；`apply()` 单函数跨度极大 | 已抽出 `settings-page.js`，可继续抽 |
-| `agent-preset.js` | 1537 | 协议编解码**内聚**，但已含 5 代兼容分支 | 内聚性高，优先加注释而非拆分 |
-| `web-control.js` | 917 | 控制面路由 + 网页历史导入 | 历史导入可独立 |
+| `browser-driver.js` | 4682 | 站点差异化、DOM 契约、登录判定、发送、捕获、SSE、会话槽、附件投递**全在一个文件** | **可拆**：站点差异可外移（见 [`ROADMAP.md`](ROADMAP.md) 第二节的 P2） |
+| `index.js` | 4424 | provider 适配器 + 流式块协议 + 会话游标 + 设置 + 路由挂载；`apply()` 单函数跨度极大 | 已抽出 `settings-page.js`，可继续抽 |
+| `agent-preset.js` | 3018 | 协议编解码**内聚**，但已含 5 代兼容分支 | **不拆**：内聚性高，优先加注释 |
+| `client.cjs` | 6476 | 浏览器侧全部 UI（四块面板） | **不可拆**：官方要求单文件 CJS bundle（见 §一 的注） |
+| `web-control.js` | 1863 | 控制面路由 + 网页历史导入 | 历史导入可独立 |
 
 **判据**：拆分的标准不是行数，而是「**改一处要不要动多个文件**」。
 `browser-driver.js` 满足拆分条件（站点差异散落其中）；
@@ -151,46 +207,64 @@ prompt-variants.js  -> agent-preset
 
 ## 五、什么不是运行链路（审查时可跳过）
 
-- `reference/`（37 个逆向参考仓库，纯 git clone，`.gitignore` 已排除）
+- `reference/`（逆向参考仓库，纯 git clone，`.gitignore` 已排除）
 - `doc/`（全部文档）
-- `test-mock/archive/`（58 个已归档的一次性探针 + 旧 `extension/`）
-- `.tmp/`（本机暂存，313 个文件，含大量可再生产物）
-- 根目录 `PLAN*.md`、`REPORT.md`（本地私有留痕，不入库）
+- `test-mock/archive/`（已归档的一次性探针 + 旧 `extension/`）
+- `.tmp/`（本机暂存，含大量可再生产物）
+- `.local-plans/` 下的 `PLAN*.md`、`REPORT.md`（本地私有留痕，不入库）
 
-出处：`doc/review-guide.md:27-31`。
+出处：[`review-guide.md`](review-guide.md)。
 
 ---
 
 ## 六、测试分布（按被保护的对象归类）
 
-> **计数口径更新（2026-09-27）**：本节标题原写「52 个文件」，那是 2026-09-17 的读数；
-> 同一目录今天实测是 **109 个** `*.test.mjs`（`check-ledger.mjs` 同一口径）。
-> 下表的分组与代表文件仍然成立，只是每组的文件数都涨了——需要精确数字时以
-> `check-ledger.mjs` 的读数为准（它是机器判的，本节的数字是人写的）。
+> **计数口径**：`check-ledger.mjs` 数的是 `test/*.test.mjs` 的**文件数**（当前 **116**），
+> 不是断言数。文件数变了必须同步台账，否则闸门红。
+> 下表的**分组**是稳定的，**每组的文件数会涨**——需要精确数字时以闸门读数为准。
 
 | 保护对象 | 代表测试 |
 | --- | --- |
-| **协议解析 / 泄漏** | `regression`(75KB)、`protocol-leak`(24KB)、`parse`、`nameless-call`、`dsml-native-close`、`dsml-real-reply-regression`、`fence-nested-call`、`fence-prose` |
+| **协议解析 / 泄漏** | `regression`、`protocol-leak`、`parse`、`nameless-call`、`dsml-native-close`、`dsml-real-reply-regression`、`fence-nested-call`、`fence-prose` |
 | **站点契约 / 解码** | `multi-site-decoder`、`glm-conversation`、`glm-session-replay`、`site-mount`、`mirror`、`model-picker`、`model-labels` |
-| **账户槽** | `accounts`(38 项)、`accounts-integration`(16 项) |
-| **驱动时序 / 收束** | `idle-window`(17)、`watchdog-first-byte`(9)、`timeout-order`(5)、`stall-settle`、`zero-progress`、`wip-settle`、`stream-tail`、`send-gap` |
-| **附件投递** | `prompt-transport`(8)、`prompt-transport-attach`(9)、`upload-attachment-structure`(4)、`attach-callsite`(6)、`context-budget` |
-| **UI 渲染契约** | `client-render`(69KB)、`client-server-contract`、`present-preset`、`hooks-order` |
+| **思考等级** | `think-effort`、`captcha-gate` |
+| **账户槽** | `accounts`、`accounts-integration` |
+| **驱动时序 / 收束** | `idle-window`、`watchdog-first-byte`、`timeout-order`、`stall-settle`、`zero-progress`、`wip-settle`、`stream-tail`、`send-gap`、`repeat-detect` |
+| **附件投递** | `prompt-transport`、`prompt-transport-attach`、`upload-attachment-structure`、`attach-callsite`、`context-budget` |
+| **UI 渲染契约** | `client-render`、`client-server-contract`、`present-preset`、`hooks-order`、`live-view` |
 | **控制面** | `control-routes`、`cookies`、`wiring-roster` |
 | **任务图 / 花名册** | `roster`、`task-graph`、`task-plan`、`task-ledger` |
 | **指标 / 等待** | `metrics`、`wait-stats`、`bench`、`prompt-variants`、`prompt-bench-harness` |
 
-> **一个必须知道的计数口径**：`check-ledger.mjs` 数的是 `test/*.test.mjs` 的**文件数**（当前 109，
-> 不是断言数。文件数变了必须同步台账，否则闸门红。
-
 ---
 
-## 七、当前结构性的三笔欠账
+## 七、当前结构性的欠账
 
 | # | 欠账 | 读数 | 影响 |
 | --- | --- | --- | --- |
-| 1 | **0.16.x 四轮改动全部未提交** | 44 项未提交（13 改 + 31 新）；`origin/main` 仍在 `6b836d2` | 工作树误删即丢四轮修复 + 14 份真机夹具；见 `ROADMAP.md` 第 3 节 |
-| 2 | **站点知识散落在 4 个文件** | `providers.js` / `contract.js` / `decoder.js` / `browser-driver.js` | 新增站点要改 4 处；UI 改版要跨文件找；见 `ROADMAP.md` 第 2 节 |
-| 3 | `test-mock` 顶层仍有 9 份 trace JSONL（约 1MB） | 无代码引用（仅 3 处文档提及） | 属「可归档」类；不影响运行 |
+| 1 | **站点知识散落在 4 个文件** | `providers.js` / `contract.js` / `decoder.js` / `browser-driver.js` | 新增站点要改 4 处；UI 改版要跨文件找。见 [`ROADMAP.md`](ROADMAP.md) 的「站点差异外移」一节 |
+| 2 | **兜底助手选择器只服务 DeepSeek 形状** | `browser-driver.js` 的 `ANSWER_SELECTOR` 内容只有 DeepSeek 类名；10 个站点里只有 **glm / zai** 在 `providers.js` 声明了 `answerSelector` | 其余 8 站落在兜底串上；形状不匹配时采样恒空。**但按本仓库纪律不得靠猜补**——没有真机读数就不声明选择器。见 `answerSelectorFor` 的注释 |
+| 3 | `test-mock` 顶层仍有 9 份 trace JSONL | 无代码引用（仅文档提及） | 属「可归档」类；不影响运行 |
 
-第 2 笔是**结构性**的，也是 `doc/diagnosis-2026-09-16.md` 第 6.1 节给出的唯一框架级建议。
+> **欠账 #2 的重要更正（2026-09-30）**：本项目此前的记载（`research/2026-09-26-dwb-site-modularity-audit.md` §C1
+> 与本文更早的版本）写的是「`providers.js` 的 `answerSelector` **尚不存在**（`grep` 零命中）」。
+> **那句话在写下时是真的，现在是假的**：0.19.19 已经把该字段落地（`contract.js:47` 投影、
+> `browser-driver.js` 按「声明优先、缺省回落」解析），glm 与 zai 均已声明，
+> `test/zai-answer-selector.test.mjs` 也已存在。
+>
+> 0.19.50 补的是**另一半**：那条「声明优先」的规则当时只活在一个内联表达式里，
+> 而 `createBrowserDriver` 需要真浏览器才跑得起来 ⇒ **规则写反了没有任何单测会红**。
+> 现抽出具名纯函数 `answerSelectorFor(siteId)` 并由 `test/answer-selector.test.mjs` 钉住
+> （含两条反向验证：把优先级调反、把兜底串改一个字符，护栏都必须变红）。
+>
+> **这条更正本身就是本文件存在的理由**：一份 2026-09-26 的调研结论被 2026-09-30 的我
+> 当成一手事实写进了这里。**研究文档是快照，改代码前必须 `grep` 现网。**
+
+第 1 笔是**结构性**的，也是 [`diagnosis-2026-09-16.md`](diagnosis-2026-09-16.md) 第 6.1 节给出的唯一框架级建议：
+**收成 `lib/sites/<siteId>.js`**（每站点一个文件、导出同一形状对象），逐站点迁移、DeepSeek 先行。
+
+> **关于「要不要按站点复制隔离」的正面回答**：**不要复制**。
+> 复制在本仓库**已经产生过漂移而不是隔离**（三份 `ANSWER_SELECTOR` 字面量「修一处、忘两处」）；
+> 且共用基类让 0.19.16 **一次修了 4 个解码器族**，复制会让它变 4 次。
+> 真正提供隔离的是「每站点一个文件 + 同一形状」，不是「同一段代码抄 N 份」。
+> 完整论证见 [`research/2026-09-26-dwb-site-modularity-audit.md`](research/2026-09-26-dwb-site-modularity-audit.md)。
