@@ -166,7 +166,32 @@ try {
   ok('provider adapter registered as route "webcode"', registered.adapterIds?.includes('webcode'));
   ok('provider NOT double-registered as configurable', registered.providers.length === 0);
   ok('adapter registered', typeof registered.adapter?.stream === 'function');
-  ok('model selector lists multiple models', (await registered.adapter.listModels('webcode')).length >= 2);
+  // 模型目录面（0.19.51 修正）。
+  //
+  // 旧断言是 `listModels('webcode').length >= 2`，写于 v0.5.1（`git log -S` 取证：
+  // 唯一引入提交是 `f1d1ca1 chore: initial snapshot of v0.5.1 working tree`）——
+  // 那时 `webcode` 是**唯一且真实**的 provider。
+  //
+  // 0.19.42 起模型选择器改为**按站点分组**（`webcode-deepseek` / `webcode-glm` / …），
+  // 而 `webcode` 退化为**兼容空壳**：它仍然注册（`routeServed('webcode')` 为真，
+  // 旧会话照旧能发消息），但 `listModels` **刻意返回空数组**，好让目录侧
+  // `group.models.length > 0` 的过滤不生成多余分组。
+  //
+  // 于是这条断言从那天起就是**假的**：它期望的能力已被设计刻意移除。
+  // 同一件事 `test/regression.test.mjs:29` 早就按新口径钉住了
+  // （`assert.deepEqual(await adapter.listModels('webcode'), [], '兼容空壳不得公布模型')`），
+  // 只有本文件漏改 ⇒ `pnpm test`（CI 跑的正是它）在任何一个平台上都恒红。
+  //
+  // 这里**不是**放宽判据去迁就实现：期望值按设计更新，且同时钉住两件真事——
+  // 空壳必须为空、站点 provider 必须真的公布模型。
+  ok('compat shell `webcode` publishes no models', (await registered.adapter.listModels('webcode')).length === 0);
+  // 站点 provider 必须有模型。用 `webcode-glm` 而不是 `webcode-deepseek`：实测
+  // deepseek 站只有 1 个模型行（它没有别名档），而这条断言想钉的是「目录侧非空」。
+  // 取一个**确实多行**的站点，断言才有分辨力（GLM 实测 2 行：glm-5.3 / glm-5.3-flash）。
+  ok('site provider publishes models',
+    (await registered.adapter.listModels('webcode-glm')).length >= 2);
+  ok('every registered provider is answerable',
+    (await Promise.all(registered.adapterIds.map((id) => registered.adapter.listModels(id)))).length === registered.adapterIds.length);
   ok('reasoner model resolvable', (await registered.adapter.resolveModel('webcode', 'deepseek-reasoner')).id === 'deepseek-reasoner');
   ok('unknown model rejected', await registered.adapter.resolveModel('webcode', 'nope-model').then(() => false, () => true));
   ok('same-origin routes mounted', ['/__webcode/status', '/__webcode/consent', '/__webcode/sessions', '/__webcode/history', '/__webcode/import', '/__webcode/preview', '/__webcode/settings'].every((p) => registered.routes.has(p)));

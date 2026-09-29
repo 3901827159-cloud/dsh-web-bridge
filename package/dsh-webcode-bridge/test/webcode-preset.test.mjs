@@ -39,13 +39,38 @@ const patch = fs.readFileSync(path.join(repoRoot, 'cordis.patch.yml'), 'utf8');
 /** 「真实会话里 0 次命中」的入口行：删它们是本模式存在的理由。 */
 const DROPPED_ROWS = [
   'tool-subagent-fork',
+  'tool-workflow',
+];
+
+/**
+ * standard 里**本来就 disabled** 的行：本模式不复制它们。
+ *
+ * 与 {@link DROPPED_ROWS} 的区别是硬性的：那些是「用读数删掉的启用项」，
+ * 这些在 standard 里就是 `disabled: true` ⇒ **不进提示词、不注册工具**，
+ * 省略它们不改变能力面，也不需要任何读数背书。
+ *
+ * 0.19.51 更正：0.19.50 的这份清单曾把 `tool-subagent-codex` /
+ * `tool-subagent-claude-code` / `workflow-ptc` / `tool-ralph` /
+ * `tool-plugin-manager` 与上面两条混在一起，断言文案是「0 次命中所以删」——
+ * 那对后五项**不是真的**（它们从未被本机读数评估过）。分表是为了让断言说的
+ * 与事实一致：一个判据如果理由写错，下次就会有人照着错理由删东西。
+ */
+const DISABLED_IN_STANDARD_ROWS = [
   'tool-subagent-codex',
   'tool-subagent-claude-code',
-  'workflow-ptc',
-  'tool-workflow',
   'tool-ralph',
   'tool-plugin-manager',
 ];
+
+/**
+ * `workflow-ptc`：随 `tool-workflow` 一起删的**服务提供者**，不是工具。
+ *
+ * 实测（0.2.0-rc.2）：`dsh-workflow` 定义服务缝 `ctx.workflowEngine`，
+ * `workflow-ptc` 是它的执行提供者，消费者只有 `dsh-tool-workflow` /
+ * `dsh-tool-ralph` / `workflow-ptc` 自己。前两者本模式都不启用 ⇒ 无消费者。
+ * 它不注册模型可见工具，所以删它不改变能力面。
+ */
+const PROVIDER_ROWS = ['workflow-ptc'];
 
 /** 必须留下的行（删多了就是静默砍能力）。 */
 const KEPT_ROWS = [
@@ -63,11 +88,65 @@ function officialPresetDir() {
   return fs.existsSync(dir) ? dir : null;
 }
 
-test('① 声明行形状与官方三个预设同型（id/name/config.id/order）', () => {
+/** 本模式里是否出现了某一行 `- id: <id>`。 */
+function hasRow(id) {
+  return new RegExp(`- id: ${id}\\b`).test(patch);
+}
+
+/**
+ * 读出**装机版**官方 `standard.patch.yml` 的 `config.plugins` 行 id（含 disabled 行）。
+ *
+ * 为什么读 patch 文件而不是 `dsh --dump-config`：后者要 spawn 一个 dsh 进程，
+ * 而本机 Node 里 `spawnSync` 调外部程序一律 `EPERM`（见 `doc/progress.md`
+ * 「已知环境约束」）。测试里**绝不能**引入一个在本机恒失败的探测方式——
+ * 那会让这条闸门变成永久 skip，看起来比谁都干净。读文件在两侧都成立。
+ *
+ * 解析刻意只从 `plugins:` 那一行**之后**开始：文件顶层还有一个 `- id: preset-standard`
+ * 声明（缩进更浅），把它算进来会让差集里凭空多出一项「官方有而我们没有」
+ * ——那正是本脚本第一版的样子（自测时抓到）。深度判据就是「缩进 ≥ plugins 的子项」。
+ *
+ * 找不到文件时返回 null，调用方据此 skip 并**在测试名里说明**（不静默假绿）。
+ */
+function officialStandardPluginIds() {
+  return officialStandardBlocks().map((b) => b.id);
+}
+
+/** 同上，但返回每个 plugin 块的行 id + 是否 disabled（②c 要区分启用/停用）。 */
+function officialStandardBlocks() {
+  const dir = officialPresetDir();
+  if (!dir) return null;
+  const f = path.join(dir, 'standard.patch.yml');
+  if (!fs.existsSync(f)) return null;
+  const lines = fs.readFileSync(f, 'utf8').split(/\r?\n/);
+  const start = lines.findIndex((l) => /^\s*plugins:\s*$/.test(l));
+  if (start === -1) return null;
+  const blocks = [];
+  let current = null;
+  for (const line of lines.slice(start + 1)) {
+    const m = line.match(/^(\s*)-\s*id:\s*(\S+)\s*$/);
+    if (m) {
+      if (current) blocks.push(current);
+      current = { id: m[2], disabled: false };
+      continue;
+    }
+    if (current && /^\s*disabled:\s*(true|!!js\b)/.test(line)) current.disabled = true;
+  }
+  if (current) blocks.push(current);
+  return blocks;
+}
+
+test('① 声明行形状与官方预设同型（id/name/config.id/order）', () => {
   assert.match(patch, /- id: preset-webcode\b/, '声明行 id 必须稳定（它是 Loader 编辑地址）');
   assert.match(patch, /name: '@deepseek-ai\/dsh-agent-preset'/, '必须由官方 preset 插件声明');
   assert.match(patch, /^\s+id: webcode$/m, 'config.id 是会话保存的模式标识（与用户可见的模式名对应）');
-  assert.match(patch, /^\s+order: 4$/m, '必须排在 standard(1)/ptc(2)/minimal(3) 之后，平级第四项');
+  // `order` 必须是 5：官方 preset-cordis 占的是 4（0.2.0-rc.2 实测 standard=1 /
+  // ptc=2 / minimal=3 / cordis=4），而 `order` 的语义是「Roster order」，同号两行
+  // 的排序官方没有定义 ⇒ 撞号 = 花名册位置不确定。
+  //
+  // 这条断言 0.19.50 及以前写的是 `order: 4` 并配文案「平级第四项」——它把
+  // **自己的一厢情愿**当成了事实：官方从来只有三个「标准族」预设，第四个位置
+  // 早被 cordis 占了。断言必须钉住「不与任何官方预设撞号」，不是钉住某个字面数字。
+  assert.match(patch, /^\s+order: 5$/m, '必须避开官方占用的 order（standard=1/ptc=2/minimal=3/cordis=4）');
   assert.match(patch, /^\s+name: wecode模式$/m, '展示名必须存在且逐字是「wecode模式」（用户原话），否则选择器里看不出它是什么');
 });
 
@@ -81,10 +160,78 @@ test('①b 展示名与描述是面向用户的短声明（不是解释文档、
   assert.ok(desc.length <= 40, `描述要短到一眼读完（当前 ${desc.length} 字）：${desc}`);
 });
 
-test('② 删掉的行正是「真实会话 0 次命中」的那些', () => {
+test('② 用读数删掉的启用项确实不在本模式里', () => {
   for (const id of DROPPED_ROWS) {
     assert.ok(!new RegExp(`- id: ${id}\\b`).test(patch),
       `${id} 在 23,636 次真实调用里 0 次命中，不该再出现在本模式的工具面里`);
+  }
+});
+
+test('②b standard 里 disabled 的行与随之删的提供者也不在本模式里', () => {
+  for (const id of [...DISABLED_IN_STANDARD_ROWS, ...PROVIDER_ROWS]) {
+    assert.ok(!new RegExp(`- id: ${id}\\b`).test(patch),
+      `${id} 在 standard 里就是 disabled（或只是 tool-workflow 的服务提供者），省略它不改变能力面`);
+  }
+});
+
+test('②c 官方 standard 的每一行都必须被交代：在本模式里，或在一份差集清单里（漂移闸门）', { skip: officialStandardBlocks() ? false : '找不到官方 standard 预设，跳过差集核对' }, () => {
+  // 这条是本轮补的**机制**，补的正是 F2 暴露的那个洞。
+  //
+  // 0.19.50 及以前，本模式的注释写着「从 standard 逐字复制」但**没写版本**，
+  // 也没有任何断言去读**当前装机的** standard。于是 0.2.0-rc.2 给 standard 加了
+  // `workflow-ptc` / `tool-subagent-codex` / `tool-subagent-claude-code` /
+  // `tool-plugin-manager` 之后：本模式既没有报错，也没有任何地方记录这件事，
+  // 只有一条注释在说一句**当时为真、现在不完整**的话。
+  //
+  // 判据的形状刻意是「**每一行都必须被交代**」而不是「差集必须为空」：本模式
+  // 存在的意义就是做减法。要钉的不是「一样」，而是「**每一处不一样都有名字**」。
+  //
+  // 遍历面刻意是**全部**官方行（含 disabled），不是只遍历启用的那些——只遍历启用项
+  // 会让「本该在 disabled 清单里的一项被悄悄拿掉」变成无人判定（反向验证实测：
+  // 那种改法在只遍历启用项的版本里是**全绿**的，见 ②e 的注释）。
+  const blocks = officialStandardBlocks();
+  const knownDelta = new Set([...DROPPED_ROWS, ...PROVIDER_ROWS, ...DISABLED_IN_STANDARD_ROWS]);
+  const undocumented = blocks
+    .map((b) => b.id)
+    .filter((id) => !hasRow(id) && !knownDelta.has(id));
+  assert.deepEqual(undocumented, [],
+    `官方 standard 有这些行，而它们既不在本模式里、也不在「有意删/随之删/本就 disabled」`
+    + ` 三份清单的任何一份里 ⇒ 本模式与 shipped standard 静默漂移了：${undocumented.join(', ')}`
+    + `\n处置方式：要么把它按 standard 原样加进 cordis.patch.yml，要么给出本机读数并加进清单（连同理由）。`);
+});
+
+test('②d 三份差集清单里的每一项都真的不在本模式里（反向：清单不得虚报）', () => {
+  // ②/②b 判的是「清单里的项确实删了」；这条判 ②c 用的清单本身**没有腐烂**：
+  // 一项如果被重新加回本模式，②c 就会把它当成「已在册」而放过 ⇒ 必须在这里红。
+  for (const id of [...DROPPED_ROWS, ...DISABLED_IN_STANDARD_ROWS, ...PROVIDER_ROWS]) {
+    assert.ok(!hasRow(id), `差集清单声明 ${id} 不在本模式里，但它出现在 cordis.patch.yml 中——清单与事实不符`);
+  }
+});
+
+test('②e 三份清单与官方 standard 的实际状态逐项相符（清单自身受检）', { skip: officialStandardBlocks() ? false : '找不到官方 standard 预设，跳过清单核对' }, () => {
+  // 这条是反向验证逼出来的。②c 只遍历「官方**启用**的行」，所以
+  // `DISABLED_IN_STANDARD_ROWS` 里的名字**从不参与** ②c 的判定——
+  // 那份清单是一句**不受检的声明**：从里面删掉一项，②c 照样全绿。
+  //
+  // 实测做过这个反向验证（把 `tool-ralph` 从清单里移掉）：**11 项全绿**，
+  // 闸门没有变红。那正是本仓库反复记过的失效形状——**一句没人验证的声明**
+  // （同型案例见 `official-contract-audit.md` §4 的 token 存在性推断）。
+  //
+  // 因此这里把三份清单钉回官方 standard 的事实上：
+  //   · DROPPED_ROWS / PROVIDER_ROWS —— 官方有，且是**启用**的（否则「有意删」这个理由不成立）；
+  //   · DISABLED_IN_STANDARD_ROWS   —— 官方有，且**确实 disabled**（否则省略它就是砍能力）；
+  //   · 三份都必须**真的存在于**官方 standard（名字写错 = 断言在判一个不存在的东西）。
+  const byId = new Map(officialStandardBlocks().map((b) => [b.id, b]));
+
+  for (const id of [...DROPPED_ROWS, ...PROVIDER_ROWS]) {
+    const b = byId.get(id);
+    assert.ok(b, `清单称 ${id} 是「官方 standard 里被有意删掉的入口」，但官方 standard 里没有这一项——清单在判一个不存在的东西`);
+    assert.ok(!b.disabled, `${id} 在官方 standard 里其实是 disabled 的，那么「按读数有意删除」这个理由不成立（它本就不进提示词）`);
+  }
+  for (const id of DISABLED_IN_STANDARD_ROWS) {
+    const b = byId.get(id);
+    assert.ok(b, `清单称 ${id}「在 standard 里本就 disabled」，但官方 standard 里没有这一项`);
+    assert.ok(b.disabled, `${id} 在官方 standard 里其实是**启用**的 ⇒ 省略它等于静默砍能力，必须改为按读数有意删除（并写明理由）`);
   }
 });
 

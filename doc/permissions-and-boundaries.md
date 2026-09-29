@@ -21,7 +21,7 @@
 | --- | --- | --- |
 | 运行依赖 | `playwright-core@^1.63.0` | `package/dsh-webcode-bridge/package.json` 的 `dependencies` |
 | 开发依赖 | `ws@^8.21.3` | 同文件的 `devDependencies` |
-| 可选 peer | `@deepseek-ai/dsh-client-ui-sidebar-right@^0.1.5-alpha.1` | 同文件的 `peerDependencies` + `peerDependenciesMeta.optional: true` |
+| 可选 peer | `@deepseek-ai/dsh-client-ui-sidebar-right@>=0.1.5-alpha.1 <1.0.0`（2026-09-30 放宽，原 `^0.1.5-alpha.1`） | 同文件的 `peerDependencies` + `peerDependenciesMeta.optional: true` |
 | Node | `>=22.13` | 同文件的 `engines.node` |
 | DSH | **`>=0.1.6-alpha.2`**（2026-09-30 收紧，原 `>=0.1.0-rc.6`） | 同文件的 `engines.dsh` |
 | 浏览器 | 本机 **Microsoft Edge**，或 playwright 自带的 Chromium | [`README.md`](../README.md)「初次启动」；`lib/browser-runtime.js` |
@@ -102,12 +102,75 @@ f1d1ca1 chore: initial snapshot of v0.5.1 working tree (pre-diagnosis)
 若将来某个 reader 开始强制它，早于 `0.1.6-alpha.2` 的宿主会被拒——而那与事实一致：
 那些宿主上本插件从未被验收过。
 
-**同轮**：`peerDependencies` 的 `^0.1.5-alpha.1` **刻意不动**——它满足实装的
+**同轮**：`peerDependencies` 的 `^0.1.5-alpha.1` **刻意不动**——它满足当时实装的
 `sidebar-right@0.1.7-alpha.2`（`^0.1.5-alpha.1` ⇒ `>=0.1.5-alpha.1 <0.2.0`），
 而且**这个宽度是必要的**：客户端代码要同时支持 0.1.6 与 0.1.7 两代，
 收紧到 `^0.1.7-alpha.2` 会把 0.1.6 宿主排除在外，与上面第 2 条自相矛盾。
 **「看着旧」不等于「错了」**——这一条与 `--dsw-alias-label-caption` 那次
 （`official-contract-audit.md` §4）是同一形状：核查后结论是**不改**。
+
+### 1.5 那条「刻意不动」在 0.2.0-rc.2 上变成了**整包被跳过**（2026-09-30 追加）
+
+> §1.4 最后一段的结论**在写下时是真的**，而它**在一天之后就过期了**。
+> 这段如实记录那次误判，因为它比这条 peer 本身更值钱。
+
+DSH 升到 **0.2.0-rc.2** 后，插件**整套没有被加载**。`dsh --profile web --dump-config`
+的 stderr 逐字：
+
+```
+dsh: skipping profile bundle "dsh-webcode-bridge": Error: Plugin dsh-webcode-bridge@0.19.50 is
+incompatible with dsh 0.2.0-rc.2: peerDependencies
+{"@deepseek-ai/dsh-client-ui-sidebar-right":"^0.1.5-alpha.1"}. ...
+Exact-version exemption: not active.
+```
+
+同一次 dump 里 `id: webcode-bridge` 与 `id: preset-webcode` **各 0 行**——即右栏面板、
+任务板、wecode模式 全部消失，界面上只表现为「插件不见了」。
+
+**根因不是猜的，是读代码读出来的。** `dsh-app-boot` 的 `evaluatePluginCompatibility`
+对每个 `@deepseek-ai/dsh*` peer 做：
+
+```js
+if (requirement.trim() === "" || !semver.satisfies(runtimeVersion, requirement, { includePrerelease: true }))
+  peers[name] = range;
+```
+
+`includePrerelease: true` **不救跨 minor 的 caret**。实测（宿主自带 semver 7.8.5）：
+
+| 范围 | 0.1.7-alpha.2 | 0.2.0-rc.2 |
+| --- | --- | --- |
+| `^0.1.5-alpha.1`（旧值） | true | **false** |
+| `>=0.1.5-alpha.1` | true | true |
+| `>=0.1.5-alpha.1 <1.0.0`（新值） | true | true |
+| `^0.2.0-rc.2` | false | true |
+
+即：旧值在 0.1.7-alpha.2 上**恰好为真**（所以 §1.4 当时核查、全套测试与真机验收全绿），
+一升到 0.2.0-rc.2 就**恰好为假**——而失效形态是**整包静默消失 + 一行 warn**。
+
+**两处必须记住的读数是本轮新采的**：
+
+1. **`optional: true` 不豁免这道闸门。** `evaluatePluginCompatibility` **完全不读**
+   `peerDependenciesMeta`（源码里没有这个字段名）。文档标题里的「可选 peer」是
+   **installer 语义**（装不上不报错），**不是** host 兼容语义。这是一个真实陷阱：
+   本文件此前正是按「它是可选的，所以写窄点无害」在理解它。
+2. **`engines.dsh` 不参与这道拒绝。** 全量检索 `dsh-*\lib\*.js` 与 dsh CLI 的
+   `lib\*.js`，`engines.dsh` **零命中**；`dsh-package-manifest` 的 README 逐字写着
+   「Current installers and loaders do not enforce `dsh.manifestVersion` or
+   `engines.dsh`」。⇒ **改 `engines.dsh` 修不了这件事**，只有 `peerDependencies` 管用。
+
+**新值 `>=0.1.5-alpha.1 <1.0.0` 的依据**：下界不动（仍然覆盖 0.1.5/0.1.6/0.1.7 三代，
+与 §1.4 第 2 条「客户端刻意横跨两代图标名」一致——实测 0.2.0-rc.2 里我们探测的
+每个 `*Outline14/16` 名字都**不存在**、而每个 `*Regular` 回落**都在**，即客户端
+确实同时支持两代）；上界写 `<1.0.0` 表示「0.x 全代」，语义与「客户端按**能力探测**
+而非版本号工作」相符——它对 `sidebarRightTabs` / `sidebarRight` 两个服务与八个槽位
+都是**运行时探测 + 回退**，不假定宿主小版本。
+
+**为什么不是 `^0.2.0-rc.2`**：那会把 0.1.6/0.1.7 宿主排除在外，与 §1.4 第 2 条
+自相矛盾——**声明要取「代码真的支持的」，不取「我手边装的那个」**（这条原则没变，
+只是上一轮把它用错了方向：当时用它论证「不动」，本轮用它论证「放宽」）。
+
+**这道闸门已经补进 `scripts/check-plugin-contract.mjs` 的判据 7**（形状臂 + 事实臂），
+见 §5。
 
 ---
 
@@ -241,8 +304,20 @@ node scripts\check-repo-hygiene.mjs         # 编码 / 索引 / Node 版本
 node scripts\ci-local.mjs --fast            # 本机可跑的 CI 离线步骤
 ```
 
-`check-plugin-contract.mjs` 把本文最容易漂移的四条变成红灯：仓库指向、许可证三处一致、
-运行依赖无死声明、本文存在且被索引。
+`check-plugin-contract.mjs` 把本文最容易漂移的**七条**变成红灯：仓库指向、许可证三处一致、
+运行依赖无死声明、本文存在且被索引、`dsh.client.inject` 的值是包名、显示元数据合法、
+**宿主兼容（`@deepseek-ai/dsh*` 的 peer 范围必须放行下一代宿主）**。
+
+第七条是 0.2.0-rc.2 那次整包消失换来的，两条臂：
+
+- **形状臂（离线，任何环境都跑，CI 也有效）**：`@deepseek-ai/dsh*` 的 peer 范围
+  **不得**是对 `0.x` 的 `^`/`~`（semver 下它只覆盖一个 minor 代）。要求写成显式
+  `>=<下界> <<上界>`，把「我不支持哪一版」从**默认**变成**作者的决定**。
+- **事实臂（本机装了 dsh 时跑）**：用**该 dsh 自带的 semver** 复算
+  `satisfies(运行时版本, 声明范围)`，即**直接跑宿主那道判据**；装了 dsh 却算不过 ⇒ 红。
+  没装 dsh ⇒ 标 SKIP 并**打印原因**（不静默假绿）。
+
+两条臂都做过反向验证：把 peer 改回 `^0.1.5-alpha.1` ⇒ 两条**同时**变红、退出码 1。
 
 ---
 

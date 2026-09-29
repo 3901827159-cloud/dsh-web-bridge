@@ -18,20 +18,54 @@
         requestTimeoutMs: 240000
         queueTimeoutMs: 300000
 
-# wecode模式：与 standard(order 1) / ptc(order 2) / minimal(order 3) 平级的 agent preset。
+# wecode模式：与 standard(order 1) / ptc(order 2) / minimal(order 3) / cordis(order 4) 平级的 agent preset。
+#
+# `order` 取 **5**（0.19.51 由 4 改）：官方 preset-cordis 占的就是 4（见
+# `.tmp/dump-config.yml` 的 standard=1 / ptc=2 / minimal=3 / cordis=4），
+# 而 `@deepseek-ai/dsh-agent-preset` 的 README 把 `order` 逐字定义为「Roster order」，
+# **没有定义同号两行怎么排**。撞号 = 花名册位置不确定，所以避开。
 #
 # 为什么需要它（用户指令，0.19.3）：「新增模式！保留必要 webbridge 需要调用工具！！
 # 以标准模式，ptc模式，简单模式等等平级的！agents预设！适合webcode的真实模式：
 # 可以查看长对话里面调用和没调用的真正工具！」
 #
+# ## 复制来源（必须随宿主升级重读，否则本段会静默漂移）
+#
+# **来源 = 官方 `@deepseek-ai/dsh-web-app` 组合出的 `preset-standard`，读取版本
+# DSH 0.2.0-rc.2**（取法：`dsh --profile web --dump-config`，见 `.tmp/dump-config.yml`
+# 与 `.tmp/preset-standard.yml`）。0.19.50 及以前本段注释只写「从 standard 逐字复制」
+# 而**没写版本**——于是 0.2.0-rc.2 给 standard 加了三项（`workflow-ptc`、
+# `tool-subagent-codex`、`tool-subagent-claude-code`）与 `tool-plugin-manager` 之后，
+# 这里既没有报错也没有任何地方记录，**正是「差集法」失效的那种静默**。
+#
 # 依据是**本机真实读数**（scripts/session-read.mjs 多帧 zstd 全解，2026-09-23）：
 #   · 303 份会话 / 817 轮 / 23,636 次工具调用；其中 webcode 路由 15,296 次（64.7%）。
 #   · webcode 路由真实出现过的工具目录 35 项，实际被调用 32 项。
-#   · 本模式删掉的三项（tool-workflow → workflow、tool-subagent-fork → subagent_fork、
-#     以及 tool-ralph 早已 disabled）在 23,636 次调用里命中 **0** 次。
+#   · 本模式删掉的 `tool-workflow`（→ workflow）与 `tool-subagent-fork`（→ subagent_fork）
+#     在 23,636 次调用里命中 **0** 次；`tool-ralph` 早已 disabled。
 #   · 差集法用桥自己的 buildPreset 现算教学成本：workflow 2,651 字符、
 #     subagent_fork 1,466 字符——即每轮首轮教学里有 4,117 字符（13.6%）是在教
 #     两个从未被调用过的入口。
+#
+# ## 与 shipped standard 的**当前**差集（0.2.0-rc.2 实测，逐项给判定）
+#
+# | standard 有 / 本模式没有 | standard 侧状态 | 判定 |
+# | --- | --- | --- |
+# | `tool-subagent-fork` | 启用 | **有意删**（命中 0 次） |
+# | `tool-workflow` | 启用 | **有意删**（命中 0 次） |
+# | `workflow-ptc` | 启用 | **随之删**——见下 |
+# | `tool-subagent-codex` | `disabled: true` | **无教学成本**，不复制（disabled 条目不进提示词） |
+# | `tool-subagent-claude-code` | `disabled: true` | 同上 |
+# | `tool-ralph` | `disabled: true` | 同上（本模式与 standard 等价） |
+# | `tool-plugin-manager` | `disabled: true` | 同上 |
+#
+# `workflow-ptc` **不是**一处待定的差集，它随 `tool-workflow` 一起删：实测
+# `dsh-workflow` 定义的是**服务缝** `ctx.workflowEngine`，而 `workflow-ptc` 只是它的
+# 一个**执行提供者**——`ctx.workflowEngine` 的消费者只有三个：`dsh-tool-workflow`、
+# `dsh-tool-ralph`、`dsh-workflow-ptc` 自己。本模式既已按「命中 0 次」删掉
+# `tool-workflow`、且 `tool-ralph` 在 standard 里本就 disabled，**没有消费者**
+# ⇒ 保留 provider 才是多出来的东西。它不注册任何模型可见工具，所以这一删
+# **不改变本模式的能力面**（与 0.19.50 的「能力不变」不变量一致）。
 #
 # 为什么删工具本身就是提示词优化（不只是省字符）：
 #   ① 本项目最贵的失效形状是模型写出**本会话不存在的工具名**（TOOL_UNKNOWN 收尾），
@@ -45,7 +79,7 @@
 # 把同一约束也放到开头的系统指令，等于同时占住 U 形的两端。
 #
 # 边界（刻意不改的东西）：不改任何官方 preset；本模式的行全部从 standard 逐字复制，
-# 只有 delegation 组少了三个从未命中的入口、persona 多一句传输事实。
+# 差异**仅**为上表所列（含三项 disabled 的等价省略）、persona 多一句传输事实。
 - insert:
     - id: preset-webcode
       name: '@deepseek-ai/dsh-agent-preset'
@@ -53,7 +87,7 @@
         id: webcode
         name: wecode模式
         description: 按真实调用裁剪工具面，降低误调不存在工具的概率。
-        order: 4
+        order: 5
         plugins:
           - id: persona
             name: '@deepseek-ai/dsh-persona'

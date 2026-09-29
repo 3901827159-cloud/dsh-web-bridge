@@ -5,6 +5,90 @@ All notable changes to this package. Newest first.
 The canonical, in-progress record of what was changed and why lives in [doc/progress.md](../../doc/progress.md);
 this file is the package-facing release history.
 
+## 0.19.51
+
+**修 DSH 0.2.0-rc.2 上升级后插件「整套消失」——根因是 peer 范围的形状，不是代码。**
+
+### ① 阻断级：插件在 0.2.0-rc.2 上被整包跳过
+
+DSH 升到 0.2.0-rc.2 后插件**根本没有被加载**。`dsh --profile web --dump-config` 的 stderr：
+
+```
+dsh: skipping profile bundle "dsh-webcode-bridge": Error: Plugin dsh-webcode-bridge@0.19.50 is
+incompatible with dsh 0.2.0-rc.2: peerDependencies
+{"@deepseek-ai/dsh-client-ui-sidebar-right":"^0.1.5-alpha.1"}. ...
+```
+
+同一次 dump 里 `id: webcode-bridge` 与 `id: preset-webcode` **各 0 行**（正常有若干行）。
+
+**根因**：`dsh-app-boot` 的 `evaluatePluginCompatibility` 对每个 `@deepseek-ai/dsh*` peer
+做 `semver.satisfies(runtimeVersion, range, { includePrerelease: true })`。对 `0.x`，
+`^0.1.5-alpha.1` ⇒ `>=0.1.5-alpha.1 <0.2.0`——**只覆盖一个 minor 代**。它在上一个宿主
+（0.1.7-alpha.2）上恰好为真，所以当时整套测试与真机验收全绿；跨到 0.2.0-rc.2 就恰好为假。
+而失败形态是**整包从配置里静默消失 + 一行 warn**：插件没有被加载，于是它的**所有单测照常通过**。
+
+**两处新采的读数（都推翻了此前的理解）**：
+
+- **`peerDependenciesMeta.optional: true` 不豁免这道闸门。** `evaluatePluginCompatibility`
+  完全不读该字段（实测：给可选 peer 写窄范围照样被判不兼容）。「可选」是**installer 语义**，
+  不是 **host 兼容语义**。
+- **`engines.dsh` 不参与这道拒绝。** 全量检索 dsh 各包的 `lib/*.js`，`engines.dsh` 零命中；
+  改 `engines.dsh` 修不了这件事，只有 `peerDependencies` 管用。
+
+**修**：`^0.1.5-alpha.1` → **`>=0.1.5-alpha.1 <1.0.0`**。下界不动（仍覆盖 0.1.5/0.1.6/0.1.7），
+上界写 `<1.0.0` 表示「0.x 全代」。依据是客户端**按能力探测**而非按版本号工作：实测 0.2.0-rc.2 里
+我们探测的每个 `*Outline14/16` 图标名都不存在、而每个 `*Regular` 回落**都在**，
+`sidebarRightTabs` / `sidebarRight` 两个服务与八个槽位也都仍在。
+
+### ② `wecode模式` 的 `order` 与官方 `preset-cordis` 撞号
+
+官方四个预设实测 `standard=1 / ptc=2 / minimal=3 / cordis=4`（直接读
+`dsh-web-app/presets/*.patch.yml`），而本模式也写 `order: 4`。`order` 的语义是
+**「Roster order」**，同号两行的排序官方**没有定义** ⇒ 花名册位置不确定。改为 **5**。
+
+### ③ `wecode模式` 与 shipped standard 的漂移：补上机制，而不只是补一句话
+
+0.2.0-rc.2 给 standard 加了 `workflow-ptc` / `tool-subagent-codex` /
+`tool-subagent-claude-code` / `tool-plugin-manager`，而本模式的注释只写「从 standard 逐字复制」、
+**没写版本**，也没有任何断言去读**当前装机的** standard ⇒ 这四处漂移**无人判定**。
+
+**判据**：新增 `②c` / `②e` 两条护栏，读**装机版** `standard.patch.yml` 的 `plugins:` 段，
+要求**官方每一行都被交代**——要么在本模式里，要么在「有意删 / 随之删 / 本就 disabled」
+三份清单的任何一份里。反过来 `②e` 把那三份清单**钉回官方事实**（`DROPPED_ROWS` 必须是官方
+**启用**项、`DISABLED_IN_STANDARD_ROWS` 必须官方**确实 disabled**、名字都必须在官方存在）。
+
+**四条反向验证**（改坏必须变红，实测都变红）：从 disabled 清单移除 `tool-ralph` ⇒ 1 红；
+把 `tool-ralph` 谎称「启用被删」⇒ 1 红；谎报 `tool-fs` 已删 ⇒ 3 红；`order` 改回 4 ⇒ 1 红。
+
+**处置**：逐项给出判定而不是照抄——`tool-workflow` 与 `tool-subagent-fork` 按本机读数
+（23,636 次调用命中 0 次）**有意删**；`workflow-ptc` **随 `tool-workflow` 一起删**（实测
+`dsh-workflow` 定义的是服务缝 `ctx.workflowEngine`，而 `workflow-ptc` 只是它的执行提供者，
+消费者只有 `tool-workflow` / `tool-ralph` / 它自己；前两者本模式都不启用 ⇒ 无消费者，
+**且它不注册模型可见工具**，故这一删不改变能力面）；四项在 standard 里本就 `disabled: true`
+（不进提示词、不注册工具）⇒ 不复制。**能力面不变**。
+
+### ④ 契约闸门：6 条 → 7 条判据（宿主兼容）
+
+新增**判据 7**，两条臂：
+
+- **形状臂（离线，CI 也有效）**：`@deepseek-ai/dsh*` 的 peer 范围**不得**是对 `0.x` 的
+  `^`/`~`。要求写成显式 `>=<下界> <<上界>`，把「我不支持哪一版」从**默认**变成**作者的决定**。
+- **事实臂（本机装了 dsh 时跑）**：用**该 dsh 自带的 semver** 复算
+  `satisfies(运行时版本, 声明范围)`——即**直接跑宿主那道判据**；装了 dsh 却算不过 ⇒ 红。
+  没装 dsh ⇒ 标 SKIP 并**打印原因**（不静默假绿）。
+
+**反向验证**：把 peer 改回 `^0.1.5-alpha.1` ⇒ **两条臂同时变红**、退出码 1。
+
+### ⑤ 顺带修一条一直红着的 CI 断言（`run-m1.js`）
+
+`test/run-m1.js` 断言 `listModels('webcode').length >= 2`，写于 v0.5.1（`git log -S` 取证）。
+0.19.42 起模型选择器**按站点分组**，`webcode` 退化为**兼容空壳**、`listModels` **刻意返回
+空数组** ⇒ 这条断言从那天起就是假的，而 `pnpm test`（CI 跑的正是它）因此**在任何平台恒定失败**。
+同一件事 `test/regression.test.mjs:29` 早已按新口径钉住，只有本文件漏改。
+
+**修**：改为按设计钉住两件真事——空壳必须为空、站点 provider 必须公布模型。
+**M1 首次 PASS**（此前 `M1 RESULT: FAIL (1)`）。
+
 ## 0.19.50
 
 **对齐 DSH 0.1.7/0.2.0 插件规范 + `lib/sites/` 站点解耦起步 + 结构清晰化。能力不变。**

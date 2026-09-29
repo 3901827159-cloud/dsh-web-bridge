@@ -123,11 +123,13 @@ const STEPS = [
   },
   {
     id: 'plugin-contract',
-    title: 'DSH 插件契约（仓库指向 / 许可证三处一致 / 运行依赖无死声明 / 边界声明被索引）',
+    title: 'DSH 插件契约（仓库指向 / 许可证三处一致 / 运行依赖无死声明 / 边界声明被索引 / 客户端清单 / 显示元数据 / 宿主兼容）',
     cmd: process.execPath,
     args: [path.join('scripts', 'check-plugin-contract.mjs')],
     cwd: repoRoot,
-    hint: '改 manifest / LICENSE / 依赖声明让它与事实一致（DSH STORE 的收录契约不会因为「声明写了」而放行）。',
+    hint: '改 manifest / LICENSE / 依赖声明让它与事实一致（DSH STORE 的收录契约不会因为「声明写了」而放行）；'
+      + '宿主兼容那条红时改 package.json 的 peerDependencies 范围（对 0.x 不要用 ^/~，要写明上界），'
+      + '不要改脚本去迁就声明。',
   },
   {
     id: 'commit-msg',

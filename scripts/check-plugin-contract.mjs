@@ -12,8 +12,8 @@
 // 本仓库已经吃过一次同型的亏（见 `scripts/check-ledger.mjs` 文件头：靠自觉的约定
 // 失败三次之后要换机制，「记得改 repository」同理——它不是机制）。
 //
-// ## 判据（六条；前四条与 `doc/permissions-and-boundaries.md` §5 的措辞一一对应，
-// ## 后两条对齐 0.1.7/0.2.0 的插件规范）
+// ## 判据（七条；前四条与 `doc/permissions-and-boundaries.md` §5 的措辞一一对应，
+// ## 后三条对齐 0.1.7/0.2.0 的插件规范与 host 的兼容闸门）
 //
 //   1. **仓库指向**：manifest 的 `repository.url` == 本仓库 `origin` 的 URL，且
 //      `repository.directory` == 该 manifest 相对仓库根的**实际**目录。
@@ -51,6 +51,35 @@
 //
 //      与判据 5 的区别：那条判「声明**错**了」，这条判「声明了却**做不到**」。
 //
+//   7. **`@deepseek-ai/dsh*` 的 peer 范围必须放行它所声明的每一代宿主**（0.19.51 新增）。
+//
+//      **这条是 0.2.0-rc.2 那次整包消失换来的。** 事实：`peerDependencies` 写
+//      `^0.1.5-alpha.1`，在 0.1.7-alpha.2 上**恰好为真**（所以当时全套测试与真机验收
+//      全绿），升到 0.2.0-rc.2 就**恰好为假**。而 `dsh-app-boot` 的
+//      `evaluatePluginCompatibility` 对失败的处理是：**整个 bundle 从配置里静默消失**
+//      （`--dump-config` 里连一行都不剩），只在 stderr 留一句 warn。
+//
+//      这个失效形状最贵的地方不是「写窄了」，而是**没有任何测试会因为能力消失而变红**：
+//      插件根本没被加载，于是它的所有单测照常通过。本仓库记过同型的账
+//      （判据 5 的 `settingsScope`：死声明的代价是它遮住了真问题）。
+//
+//      两条臂，分别对应「能判」与「判得准」：
+//
+//      · **形状臂（离线，任何环境都跑）**：`@deepseek-ai/dsh*` 的 peer 范围**不得**
+//        是对 `0.x` 版本的 caret/tilde 范围。理由是 semver 的规则本身：对 `0.x`，
+//        `^0.1.5` ⇒ `>=0.1.5 <0.2.0`——**它只覆盖一个 minor 代**。宿主每发一个
+//        minor，声明就无声地变成假的。要求写成显式 `>=<下界> <<上界>`，等于把
+//        「我不支持哪一版」从**默认**变成**作者的决定**。
+//        （`peerDependenciesMeta.optional: true` **不豁免**这一点：实测它**不参与**
+//         `evaluatePluginCompatibility` 的判定，optional peer 写窄了照样整包被跳过。）
+//
+//      · **事实臂（本机装了 dsh 时跑）**：用**该 dsh 自带的 `semver`** 复算
+//        `satisfies(运行时版本, 声明范围)`——即**直接跑宿主那道判据**。装了 dsh 却算
+//        不过 ⇒ 红。没装 dsh ⇒ skip 并**打印原因**（不静默假绿）。
+//
+//      刻意**不**给形状臂放宽：它判的是「这份声明有没有给上界」，与当前装了哪个
+//      版本无关，因此在 CI（不装 dsh）里也是有效的。
+//
 // ## 刻意不做的事
 //
 //   · **不用 `spawnSync` 去问 git**：读 `.git/config` 就够了。本机实测 Node 里
@@ -74,8 +103,10 @@
 // 否则这道闸门会退化成「永远是绿的」。
 
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -270,8 +301,107 @@ function specifierUsesPackage(spec, name) {
   return spec === name || spec.startsWith(name + '/');
 }
 
+/**
+ * 读出**运行中**那台 dsh 的版本号（判据 7 的事实臂要用它当被比较的一方）。
+ *
+ * 取法刻意不是 `dsh --version`（那要 spawn，本机 `EPERM`，理由见文件头），
+ * 而是**读已安装 dsh 自己的 `package.json`**——`evaluatePluginCompatibility`
+ * 的默认 `runtimeVersion` 正是 `getDshRuntimeVersion()`，而它读的也是同一处。
+ *
+ * 读不到时返回 `null`：调用方据此把事实臂标为 SKIP 并**打印原因**，
+ * 不拿一个猜出来的版本号去判。
+ */
+function readDshRuntimeVersion() {
+  const candidates = [
+    path.join(os.homedir(), 'AppData', 'Roaming', 'npm', 'node_modules', '@deepseek-ai', 'dsh'),
+    path.join(os.homedir(), '.npm-global', 'lib', 'node_modules', '@deepseek-ai', 'dsh'),
+    '/usr/local/lib/node_modules/@deepseek-ai/dsh',
+    '/usr/lib/node_modules/@deepseek-ai/dsh',
+  ];
+  for (const d of candidates) {
+    const f = path.join(d, 'package.json');
+    if (!fs.existsSync(f)) continue;
+    try {
+      const j = JSON.parse(fs.readFileSync(f, 'utf8'));
+      if (typeof j.version === 'string' && j.version.length) return j.version;
+    } catch { /* 读坏了就当没有，由调用方报 unavailable */ }
+  }
+  return null;
+}
+
 function sha256(file) {
   return crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+}
+
+/**
+ * 判据 7 的形状臂：一个 `@deepseek-ai/dsh*` peer 范围是不是**危险形状**。
+ *
+ * 「危险」的定义刻意窄且有依据——**对 `0.x` 版本的 caret / tilde**：
+ *
+ *   `^0.1.5-alpha.1`  ⇒ `>=0.1.5-alpha.1 <0.2.0`   （只覆盖一个 minor 代）
+ *   `~0.1.5-alpha.1`  ⇒ `>=0.1.5-alpha.1 <0.2.0`   （同上）
+ *
+ * semver 对 `0.x` 的这条规则意味着：宿主每发一个 minor，声明就**无声地**失真。
+ * 本项目实装经历过 0.1.6 → 0.1.7 → 0.2.0-rc.2 三代，正好跨过这道边界。
+ *
+ * 返回 null 表示形状可接受；否则返回一句人读的理由。
+ *
+ * 刻意**不**判「范围太宽」（那会把 `>=0.1.5-alpha.1 <1.0.0` 判红，而它正是
+ * 本判据推荐的写法）——判据只盯「有没有给上界、上界是不是一个 minor」。
+ */
+function narrowZeroRange(range) {
+  const r = String(range).trim();
+  // `^0.x` / `~0.x`：caret/tilde 落在 0 主版本上 ⇒ 只覆盖一个 minor 代。
+  const m = /^[\^~]\s*0\./.exec(r);
+  if (m) return '`' + r + '` 对 `0.x` 只覆盖一个 minor 代（semver：`' + (m[0][0] === '^' ? '^' : '~')
+    + '0.1.5` ⇒ `>=0.1.5 <0.2.0`），宿主每发一个 minor 它就会无声失真';
+  return null;
+}
+
+/**
+ * 判据 7 的事实臂：用**宿主自带的 semver** 复算 `satisfies(运行时, 声明)`。
+ *
+ * 为什么必须用宿主那个 semver 而不是自己实现：这道判据的**唯一目的**就是预演
+ * `dsh-app-boot` 的 `evaluatePluginCompatibility`（它用
+ * `{ includePrerelease: true }`）。自己写一套近似的比较，就会在 prerelease 上
+ * 与宿主分叉——而本项目全部版本号都是 prerelease。
+ *
+ * 返回 `{ status, detail }`：`status` ∈ `'ok' | 'mismatch' | 'unavailable'`。
+ * 找不到 dsh 时是 `unavailable`，调用方据此**打印原因**而不是假装通过。
+ */
+function evaluateAgainstInstalledDsh(runtimeVersion, peerRanges) {
+  const candidates = [
+    path.join(os.homedir(), 'AppData', 'Roaming', 'npm', 'node_modules', '@deepseek-ai', 'dsh'),
+    path.join(os.homedir(), '.npm-global', 'lib', 'node_modules', '@deepseek-ai', 'dsh'),
+    '/usr/local/lib/node_modules/@deepseek-ai/dsh',
+    '/usr/lib/node_modules/@deepseek-ai/dsh',
+  ].filter((d) => fs.existsSync(path.join(d, 'package.json')));
+
+  if (candidates.length === 0) return { status: 'unavailable', detail: '本机找不到已安装的 dsh' };
+
+  const dshDir = candidates[0];
+  let semver;
+  try {
+    // 用 createRequire 指向 dsh 目录，于是解析到的是**宿主自己那份** semver。
+    semver = createRequire(path.join(dshDir, 'noop.js'))('semver');
+  } catch (e) {
+    return { status: 'unavailable', detail: '装到 dsh 但取不到它自带的 semver：' + (e && e.message) };
+  }
+
+  const bad = [];
+  for (const [name, range] of Object.entries(peerRanges)) {
+    if (name !== '@deepseek-ai/dsh' && !name.startsWith('@deepseek-ai/dsh-')) continue;
+    let ok;
+    try {
+      ok = semver.satisfies(runtimeVersion, range, { includePrerelease: true });
+    } catch (e) {
+      bad.push(name + ' 的范围无法解析（' + String(e && e.message) + '）');
+      continue;
+    }
+    if (!ok) bad.push(name + ' 声明 ' + JSON.stringify(range) + ' —— 运行中的 dsh ' + runtimeVersion + ' 不满足它');
+  }
+  if (bad.length) return { status: 'mismatch', detail: bad.join('；'), dshDir, runtimeVersion };
+  return { status: 'ok', detail: '运行中的 dsh ' + runtimeVersion + '（' + dshDir + '）满足全部 @deepseek-ai/dsh* peer', dshDir, runtimeVersion };
 }
 
 /**
@@ -515,12 +645,48 @@ function main() {
   for (const c of metaChecks) if (!c.ok) problems.push('显示元数据：' + c.what + ' —— 不成立。');
   results.push({ item: 'display-meta', ok: metaChecks.every((c) => c.ok) });
 
+  // ---- 判据 7：@deepseek-ai/dsh* 的 peer 范围必须放行下一代宿主 ----
+  const peerChecks = [];
+  const peers = pkg.peerDependencies && typeof pkg.peerDependencies === 'object'
+    ? pkg.peerDependencies : {};
+  const dshPeers = Object.entries(peers).filter(([n]) => n === '@deepseek-ai/dsh' || n.startsWith('@deepseek-ai/dsh-'));
+
+  if (dshPeers.length === 0) {
+    peerChecks.push({ what: '未声明 @deepseek-ai/dsh* peer（合规：不声明就不参与 host 兼容闸门）', ok: true });
+  } else {
+    for (const [name, range] of dshPeers) {
+      const why = narrowZeroRange(range);
+      peerChecks.push({
+        what: 'peer `' + name + '` 的范围 `' + range + '` 形状可放行跨 minor 的宿主'
+          + (why ? '——' + why : ''),
+        ok: why === null,
+      });
+    }
+    // 事实臂：直接跑宿主那道判据。取不到运行时版本时**不猜**，如实报 unavailable。
+    const runtimeVersion = readDshRuntimeVersion();
+    if (runtimeVersion === null) {
+      peerChecks.push({ what: '事实臂：读不到运行中的 dsh 版本 ⇒ 本臂 SKIP（形状臂仍然有效）', ok: true, skipped: true });
+    } else {
+      const verdict = evaluateAgainstInstalledDsh(runtimeVersion, peers);
+      if (verdict.status === 'unavailable') {
+        peerChecks.push({ what: '事实臂：' + verdict.detail + ' ⇒ 本臂 SKIP（形状臂仍然有效）', ok: true, skipped: true });
+      } else {
+        peerChecks.push({
+          what: '事实臂：' + verdict.detail,
+          ok: verdict.status === 'ok',
+        });
+      }
+    }
+  }
+  for (const c of peerChecks) if (!c.ok) problems.push('宿主兼容：' + c.what + ' —— 不成立。');
+  results.push({ item: 'dsh-peers', ok: peerChecks.every((c) => c.ok) });
+
   if (json) {
     process.stdout.write(JSON.stringify({
       ok: problems.length === 0,
       repoRoot,
       origin: originUrl,
-      literalChecks: [...repoChecks, ...licChecks, ...depChecks, ...docChecks, ...injectChecks, ...metaChecks],
+      literalChecks: [...repoChecks, ...licChecks, ...depChecks, ...docChecks, ...injectChecks, ...metaChecks, ...peerChecks],
       results,
       problems,
     }, null, 2) + '\n');
@@ -543,7 +709,7 @@ function main() {
   }
 
   if (!json) {
-    process.stdout.write('[contract] ✔ 六条契约与事实一致（仓库指向 / 许可证 / 运行依赖 / 边界声明 / 客户端清单 / 显示元数据）。\n');
+    process.stdout.write('[contract] ✔ 七条契约与事实一致（仓库指向 / 许可证 / 运行依赖 / 边界声明 / 客户端清单 / 显示元数据 / 宿主兼容）。\n');
     process.stdout.write('[contract] 注意：本闸门只判声明层与事实是否一致，'
       + '**不改变 DSH STORE 的审查结论**（见 doc/permissions-and-boundaries.md §6）。\n');
   }

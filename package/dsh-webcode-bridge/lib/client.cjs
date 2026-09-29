@@ -5618,7 +5618,7 @@ window.__ModuleLoader__.load({
         ".hwb-act-btn{display:inline-flex;align-items:center;justify-content:center;flex:none;width:28px;height:28px;padding:0;color:var(--dsw-alias-label-secondary,inherit);background:0 0;border:0;border-radius:6px;cursor:pointer;transition:background .12s ease,color .12s ease}",
         ".hwb-act-btn:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover,#8882);color:var(--dsw-alias-label-primary,inherit)}",
         ".hwb-act-btn:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#3b82f6);outline-offset:-1px}",
-        ".hwb-act-btn:disabled{color:var(--dsw-alias-label-quaternary,#c2c7cf);cursor:default}",
+        ".hwb-act-btn:disabled{color:var(--dsw-alias-label-dimmed,#aaa);cursor:default}",
         ".hwb-act-btn.on{color:var(--dsw-alias-state-success-primary,#2e7d32)}",
         ".hwb-frame-host{position:relative;flex:1;min-height:0;overflow:hidden;z-index:1}",
         ".hwb-browser-frame{display:block;width:100%;height:100%;min-height:0;border:0;background:#fff}",
@@ -5780,7 +5780,12 @@ window.__ModuleLoader__.load({
         // 片段行表达（见组件处对「为何不改 contenteditable」的说明）。
         ".hwb-review-anchors{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-top:8px}",
         ".hwb-review-anchors-label{font-size:11px;color:var(--dsw-alias-label-tertiary,#888);flex:none}",
-        ".hwb-review-anchor{max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:inherit;font-size:11px;line-height:18px;padding:0 8px;border-radius:9px;cursor:pointer;background:var(--dsw-alias-brand-subtle,#eef2ff);color:var(--dsw-alias-label-secondary,inherit);border:.5px solid var(--dsw-alias-border-l3,#8884)}",
+        // 0.19.51：背景色从 `--dsw-alias-brand-subtle`（该 token 在官方主题里
+        // **从未被定义**，全树 0 处）改为官方同义写法 `color-mix(in srgb,
+        // var(--dsw-alias-brand-primary) 8%, transparent)`——取官方主题里「品牌浅底」
+        // 的标准配方（`dsh-client-ui-*` 多处出现同一形状），随主题自动成立。
+        // 旧写法的回落值 `#eef2ff` 是硬编码浅色，深色主题下不随主题走。
+        ".hwb-review-anchor{max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:inherit;font-size:11px;line-height:18px;padding:0 8px;border-radius:9px;cursor:pointer;background:color-mix(in srgb,var(--dsw-alias-brand-primary) 8%,transparent);color:var(--dsw-alias-label-secondary,inherit);border:.5px solid var(--dsw-alias-border-l3,#8884)}",
         ".hwb-review-anchor:hover{background:var(--dsw-alias-interactive-bg-hover,#8882)}",
         // 页边栏：独立滚动，宽度随内容自适应但不挤掉正文
         ".hwb-review-margin{display:flex;flex-direction:column;gap:10px;min-width:0;padding-left:16px;border-left:.5px solid var(--dsw-alias-border-l3,#8884)}",
@@ -5808,7 +5813,7 @@ window.__ModuleLoader__.load({
         ".hwb-comment-footer{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:11px}",
         ".hwb-comment-time{color:var(--dsw-alias-label-tertiary,#888)}",
         ".hwb-comment-form{display:flex;flex-direction:column;gap:8px;margin-top:8px}",
-        ".hwb-quote-preview{display:flex;align-items:center;gap:6px;font-size:12px;padding:6px 10px;border-radius:4px;background:var(--dsw-alias-brand-subtle,#eff6ff);border:.5px solid var(--dsw-alias-brand-primary,#3b82f6)}",
+        ".hwb-quote-preview{display:flex;align-items:center;gap:6px;font-size:12px;padding:6px 10px;border-radius:4px;background:color-mix(in srgb,var(--dsw-alias-brand-primary) 8%,transparent);border:.5px solid var(--dsw-alias-brand-primary,#3b82f6)}",
         ".hwb-quote-label{color:var(--dsw-alias-brand-primary,#3b82f6);font-weight:500}",
         ".hwb-quote-val{font-style:italic;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}",
         ".hwb-btn-close{background:0 0;border:0;cursor:pointer;font-size:12px;color:var(--dsw-alias-label-tertiary,#888)}",
@@ -5816,7 +5821,7 @@ window.__ModuleLoader__.load({
         ".hwb-task-chat-box{border:.5px solid var(--dsw-alias-border-l3,#8884);border-radius:8px;padding:12px;display:flex;flex-direction:column;gap:12px;background:var(--dsw-alias-bg-layer-1,#fafafa)}",
         ".hwb-task-chat-history{display:flex;flex-direction:column;gap:8px;max-height:220px;overflow-y:auto}",
         ".hwb-chat-msg{font-size:13px;line-height:1.5;padding:6px 10px;border-radius:6px;background:var(--dsw-alias-bg-base,#fff);border:.5px solid var(--dsw-alias-border-l4,#8883)}",
-        ".hwb-chat-msg.user{background:var(--dsw-alias-brand-subtle,#eff6ff)}",
+        ".hwb-chat-msg.user{background:color-mix(in srgb,var(--dsw-alias-brand-primary) 8%,transparent)}",
         ".hwb-task-chat-input-row{display:flex;gap:8px}",
         // Modal 弹窗
         ".hwb-modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.45);display:grid;place-items:center;z-index:9999}",
@@ -6016,7 +6021,7 @@ window.__ModuleLoader__.load({
         ".hwb-compare-col.review:hover,.hwb-compare-col.review:focus-within{box-shadow:inset 0 0 0 .5px var(--dsw-alias-state-business-primary,#4f6ef7)}",
         ".hwb-chip.review{color:var(--dsw-alias-state-business-primary,#4f6ef7);border-color:var(--dsw-alias-state-business-primary,#4f6ef7);font-weight:600}",
         // 引用状态条：跨列可见，所以放在列之外（见渲染处的注释）。
-        ".hwb-quote-bar{display:flex;align-items:center;gap:8px;padding:8px 12px;border-radius:8px;background:var(--dsw-alias-brand-subtle,#eff6ff);border:.5px solid var(--dsw-alias-border-l3,#8884);font-size:12px;flex:none}",
+        ".hwb-quote-bar{display:flex;align-items:center;gap:8px;padding:8px 12px;border-radius:8px;background:color-mix(in srgb,var(--dsw-alias-brand-primary) 8%,transparent);border:.5px solid var(--dsw-alias-border-l3,#8884);font-size:12px;flex:none}",
         ".hwb-quote-label{flex:none;font-weight:600}",
         ".hwb-quote-text{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dsw-alias-label-secondary,inherit)}",
         ".hwb-chat-head{display:flex;align-items:center;gap:6px}",
@@ -6411,6 +6416,21 @@ window.__ModuleLoader__.load({
       // 发生了什么。这类「点错了地方、但界面有反应」的错最贵。
       //
       // 返回 null（而不是空按钮）是官方允许的：菜单渲染时跳过空条目。
+      //
+      // ## 0.19.51：注册选项必须带 `id`——缺了它**整条注册在真实宿主里被拒绝**
+      //
+      // 这个座位在官方是 **list** 型（`dsh-client-ui-sidebar-right` 声明
+      // `sidebar.right.tab.menu.item: { kind:'list' }`），而 `SlotCore.register`
+      // 对 list 座位硬性要求 `options.id`（`dsh-client-ui-slots/lib/index.js` 的
+      // `list slot "…" requires options.id` 分支）。0.19.51 之前这里不带 `id`，
+      // 用真实 SlotCore 复跑：**必然抛错** ⇒ 两项菜单在真机上**从未出现过**，
+      // 而本插件自己的 try/catch 把错误降级成一条 warn——「静默少两块 UI」，
+      // 与 `iconOf` 注释里记的 0.1.7 图标改名是同一族事故。
+      //
+      // 为什么护栏当年没拦住：`client-render.test.mjs` 的桩按 name 收组件、
+      // 不校验 list 座位的必填字段，于是「桩放行了真实校验器会拒的形状」。
+      // 桩已同步升级（按 kind 校验），并有一条反向验证钉住「缺 id 必红」。
+      // id 前缀 `webcode-` 与本插件其它注册 id 同族，双项互不相同。
       const menuItem = (key, label, run) => function TabMenuItem(owner) {
         if (String(owner?.tab?.kind || '') !== TAB_KIND) return null;
         const sid = actions.currentSite();
@@ -6422,7 +6442,7 @@ window.__ModuleLoader__.load({
       own(() => {
         try {
           return ctx.slots.inject('sidebar.right.tab.menu.item', () => ctx.slots.register(
-            { name: 'sidebar.right.tab.menu.item' },
+            { name: 'sidebar.right.tab.menu.item', id: 'webcode-reload' },
             menuItem('reload', '刷新网页', () => actions.reload()),
           ));
         } catch (e) { warn('tab menu item (reload)', e); }
@@ -6430,7 +6450,7 @@ window.__ModuleLoader__.load({
       own(() => {
         try {
           return ctx.slots.inject('sidebar.right.tab.menu.item', () => ctx.slots.register(
-            { name: 'sidebar.right.tab.menu.item' },
+            { name: 'sidebar.right.tab.menu.item', id: 'webcode-window' },
             menuItem('window', '切换独立窗口', () => actions.toggleWindow()),
           ));
         } catch (e) { warn('tab menu item (window)', e); }

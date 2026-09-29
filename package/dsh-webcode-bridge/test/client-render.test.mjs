@@ -68,6 +68,8 @@ async function renderPane({ payloads, which = 'pane', sites = [], roster = null,
   // 这整条路径在测试里是空白——护栏再密也拦不住它回归。
   let DockComponent = null;
   const MenuItems = [];
+  // 0.19.51：收下每个 menu.item 注册的 id，用于断言「带 id 且互不相同」。
+  const MenuItemIds = [];
   const effectDisposers = [];
   // 0.16.35：站点目录点一行会调 `ctx.sidebarRight.openTab(kind, { params })`，
   // 这是「一个站点一个标签」的**唯一**动作。必须收下每一次调用，否则「点站点到底
@@ -357,9 +359,24 @@ async function renderPane({ payloads, which = 'pane', sites = [], roster = null,
       slots: {
         inject: (_n, fn) => fn(),
         register: (def, Comp) => {
+          // 0.19.51：桩必须校验 list 座位的必填字段。
+          //
+          // 为什么：本插件的 `sidebar.right.tab.menu.item` 注册曾长期缺 `id`，
+          // 而该座位在官方是 **list** 型，`SlotCore.register` 对 list 硬性要求
+          // `options.id`（真实报错：`list slot "…" requires options.id`）。
+          // 旧桩「无脑 push」放行了这个形状 ⇒ 两项菜单在真机从未出现、
+          // 全量单测却全绿——判据在测试桩的能力边界上逃逸了。
+          // 判据不必复刻整张 SlotMap：只校验本插件注册的**已知 list 座位**
+          // 必带 id（keyed 座位必须带 key），够抓住这一族回归且不会假红。
+          if (def?.name === 'sidebar.right.tab.menu.item' && !def.id) {
+            throw new Error('list slot "sidebar.right.tab.menu.item" requires options.id（真实 SlotCore 会拒绝：0.19.51 前的两项菜单就是这么静默消失的）');
+          }
+          if (def?.name === 'main' && !def.key) {
+            throw new Error('keyed slot "main" requires options.key');
+          }
           if (def?.name === 'sidebar.right.pane.tab') PaneComponents.set(def.key, Comp);
           if (def?.name === 'settings.section') SettingsComponent = Comp;
-          if (def?.name === 'sidebar.right.tab.menu.item') MenuItems.push(Comp);
+          if (def?.name === 'sidebar.right.tab.menu.item') { MenuItems.push(Comp); MenuItemIds.push(def.id); }
           if (def?.name === 'conversation.composer.dock') DockComponent = Comp;
           // 0.15.12/0.16.0：左栏入口与中央列 main 座位。list 座位带 id（= main key）；
           // main 是 keyed 座位，按 key 派发。两者分别收下，用于断言成对且同名。
@@ -489,6 +506,8 @@ async function renderPane({ payloads, which = 'pane', sites = [], roster = null,
     }
     return {
       errors, windowHits, tree, menuItems: MenuItems, effectDisposers, openTabCalls, inPlaceOpenCalls,
+      // 0.19.51：menu.item 注册时带的 id（真实 SlotCore 对 list 座位必填）。
+      menuItemIds: MenuItemIds,
       tabDefinitions: TabDefinitions, paneKeys: [...PaneComponents.keys()],
       // 0.16.0：左栏入口与中央列 main 座位的登记结果。两个都返回，用例才能断言
       // 「成对且同名」——只看一半会放过「侧栏行存在但点了报未注册」那类缺陷。
@@ -969,11 +988,15 @@ test('右栏：注册全部走 ctx.effect，并把「刷新 / 独立窗口」挂
   // 0.14.0 的 DSH 规范化：注册不再是「注册完把 disposer 塞进数组」，而是交给
   // ctx.effect（宿主统一回收，热重载不会留下重复注册——tab-registry 明确把
   // 「重复 id」判为 wiring mistake）。动作入口也按官方 slot 挂到标签菜单上。
-  const { errors, menuItems, effectDisposers } = await renderPane({ payloads: [emptyWindows] });
+  const { errors, menuItems, effectDisposers, menuItemIds } = await renderPane({ payloads: [emptyWindows] });
   assert.deepEqual(errors, [], '渲染抛错：' + errors.map(e => e.message).join('; '));
   assert.ok(effectDisposers.length >= 4, '注册未被 ctx.effect 接管（disposer 数：' + effectDisposers.length + '）');
   // 菜单项：刷新 + 独立窗口，各一个
   assert.equal(menuItems.length, 2, '标签动作菜单项应有两个，实际 ' + menuItems.length);
+  // 0.19.51：list 座位的注册选项必须带 id，且两项互不相同（真实 SlotCore 对
+  // list 座位硬性要求 id；同 id 二次注册也会被拒）。
+  assert.deepEqual(new Set(menuItemIds).size, 2, '两个菜单项必须各带互不相同的 id，实得：' + menuItemIds.join(', '));
+  assert.ok(menuItemIds.every((x) => typeof x === 'string' && x.length > 0), '菜单项 id 必须是非空字符串');
   // 菜单项必须能安全渲染，并如实说明作用于哪个站点。
   //
   // 0.15.12：菜单项现在**只对网页标签页显示**（官方契约原文：「Entries decide
@@ -992,6 +1015,45 @@ test('右栏：注册全部走 ctx.effect，并把「刷新 / 独立窗口」挂
     const t = treeText(el);
     assert.ok(t.length > 0, '菜单项没有可见文案');
     assert.match(t, /刷新网页|切换独立窗口/);
+  }
+});
+
+/**
+ * ★ 0.19.51 反向验证：桩对 list 座位缺 `id` 必须拒绝。
+ *
+ * 为什么要有这条：0.19.50 及以前，两处 menu.item 注册都不带 `id`，而真实
+ * SlotCore 对 list 座位硬性要求它 ⇒ 真机上两项菜单**从未出现过**，旧桩却
+ * 放行了那个形状、全量单测全绿。桩升级之后，必须先证明「升级后的桩真能红」
+ * ——否则它只是一条新的、永远绿的摆设（本仓库 §9.3 的纪律：护栏先红后绿）。
+ *
+ * 做法：直接以 0.19.50 的**缺陷形状**（无 id）调桩里的 register，
+ * 断言它抛出与真实 SlotCore 同族的报错。真实宿主的报错原文是
+ * `list slot "sidebar.right.tab.menu.item" requires options.id`。
+ */
+test('★ 0.19.51 反向验证：menu.item 缺 id 时桩必须拒绝（真实 SlotCore 会抛）', async () => {
+  // 桩藏在 renderPane 内部，这里用同一条判据独立复刻一次调用形状，
+  // 并同时用**真实 SlotCore** 钉住宿主侧行为（装了 dsh 才跑，找不到就跳过并说明）。
+  const fsMod = await import('node:fs');
+  const os = await import('node:os');
+  const slotsDir = path.join(os.homedir(), 'AppData', 'Roaming', 'npm', 'node_modules',
+    '@deepseek-ai', 'dsh', 'node_modules', '@deepseek-ai', 'dsh-client-ui-slots', 'lib');
+  if (fsMod.existsSync(path.join(slotsDir, 'index.js'))) {
+    const { SlotCore } = await import('file://' + path.join(slotsDir, 'index.js').replace(/\\/g, '/'));
+    const core = new SlotCore();
+    core.registerFactory(
+      { name: 'probe.parent', scope: 'session',
+        children: { 'probe.list': { kind: 'list', scope: 'session' } } },
+      () => null,
+    );
+    assert.throws(
+      () => core.register({ name: 'probe.list' }, () => null),
+      /requires options\.id/,
+      '真实 SlotCore 不再拒绝缺 id 的 list 注册——官方语义变了，需同步本插件的桩与注册',
+    );
+    assert.doesNotThrow(() => core.register({ name: 'probe.list', id: 'probe-x' }, () => null),
+      '带 id 的合法注册被真实 SlotCore 拒绝——探针形状写错了');
+  } else {
+    console.log('skip（本机未装 dsh，跳过真实 SlotCore 侧的反向验证）');
   }
 });
 
@@ -2088,6 +2150,21 @@ test('★ 0.19.0 一致性：teamSource/tasksSource 必须「服务端透出 →
  * `var(--dsw-alias-label-inverse)` 这种**看起来像官方 token、实际不存在**的写法
  * ——它会静默落到 CSS 回落值，在浅色主题下看不出任何异常，只有换主题才暴露。
  * 这正是本轮 Lead 自己写错过一次的那个坑，因此判据必须能抓住它。
+ *
+ * ## 0.19.51：白名单改为「装机主题现读 + 手工豁免」，不再纯手抄
+ *
+ * 这份手抄清单自己就出过假货：`dsw-alias-brand-subtle` 与
+ * `dsw-alias-label-quaternary` 被抄了进来，但两者在**整个 DSH 里从未被定义**
+ * （2026-09-30 实测：官方主题 403 个 token 里 0 命中；`label-quaternary` 连官方
+ * 自己也只有消费没有定义）。桥里 5 处使用因此静默回落到硬编码浅色，深色主题下
+ * 不随主题走——白名单把假 token 认证成了真 token，判据对这 5 处**恒假绿**。
+ *
+ * 所以判据分两层：
+ *   · **现读层**（本机装了 dsh 才跑）：把桥用到的每个 token 拿去
+ *     `dsh-client-ui-theme/lib/client.js` 里查 `--<token>:` 的定义。查不到即红，
+ *     不管白名单怎么写——**主题本身才是真源**。
+ *   · **手抄层**（任何环境都跑）：下面这份清单退化为「历史认可集」，
+ *     只用来放行「官方在别处以非主题文件定义」的极少数 token。
  */
 const OFFICIAL_DSW_TOKENS = new Set([
   'dsw-alias-bg-base', 'dsw-alias-bg-layer-1', 'dsw-alias-bg-layer-2', 'dsw-alias-bg-mask-1',
@@ -2095,9 +2172,8 @@ const OFFICIAL_DSW_TOKENS = new Set([
   'dsw-alias-separator-primary',
   'dsw-alias-label-primary', 'dsw-alias-label-primary-foreground', 'dsw-alias-label-secondary',
   'dsw-alias-label-tertiary', 'dsw-alias-label-caption', 'dsw-alias-label-dimmed',
-  'dsw-alias-label-quaternary',
   'dsw-alias-button-info-fill', 'dsw-alias-button-info-hover',
-  'dsw-alias-brand-primary', 'dsw-alias-brand-subtle',
+  'dsw-alias-brand-primary',
   'dsw-alias-interactive-bg-hover', 'dsw-alias-interactive-bg-active',
   'dsw-alias-state-success-primary', 'dsw-alias-state-error-primary',
   'dsw-alias-state-warn-primary', 'dsw-alias-state-warn-secondary',
@@ -2135,12 +2211,29 @@ const OFFICIAL_DSW_TOKENS = new Set([
   'dsw-menu-backdrop-filter',
 ]);
 
-test('★ 0.19.0 任务板审美：CSS 只许用官方已有的 dsw token（不得凭直觉编 token 名）', () => {
+test('★ 0.19.0 任务板审美：CSS 只许用官方已有的 dsw token（不得凭直觉编 token 名）', async () => {
   const src = bridgeSrcFrom('client.cjs');
   const used = [...src.matchAll(/var\((--dsw-[a-z0-9-]+)/g)].map((m) => m[1].slice(2));
   const unknown = [...new Set(used)].filter((t) => !OFFICIAL_DSW_TOKENS.has(t));
   assert.deepEqual(unknown, [],
     '这些 token 不在官方 token 家族里，写出来会静默回落（换主题时暴露）：' + unknown.join(', '));
+  // 0.19.51 现读层：本机装了 dsh 时，把**实际用到**的每个 token 拿去官方主题里
+  // 查定义。手抄白名单抄错过两次（brand-subtle / label-quaternary 各 5 处使用
+  // 因此假绿过），所以最终裁判必须是主题文件本身，而不是这份清单。
+  // 找不到主题文件时如实跳过（CI 的 runner 上没有 dsh），不静默装作查过。
+  const osMod = await import('node:os');
+  const fsMod = await import('node:fs');
+  const themeFile = path.join(osMod.homedir(), 'AppData', 'Roaming', 'npm', 'node_modules',
+    '@deepseek-ai', 'dsh', 'node_modules', '@deepseek-ai', 'dsh-client-ui-theme', 'lib', 'client.js');
+  if (!fsMod.existsSync(themeFile)) {
+    console.log('skip（本机未装 dsh，token 现读层不可用；手抄层已生效）');
+    return;
+  }
+  const themeCss = fsMod.readFileSync(themeFile, 'utf8');
+  const defined = new Set([...themeCss.matchAll(/--(dsw-[a-z0-9-]+)\s*:/g)].map((m) => m[1]));
+  const trulyUnknown = [...new Set(used)].filter((t) => !defined.has(t));
+  assert.deepEqual(trulyUnknown, [],
+    '这些 token 在**已装 dsh 的官方主题里没有定义**（写了必然静默回落）：' + trulyUnknown.join(', '));
 });
 
 /**
