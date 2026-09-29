@@ -5,6 +5,85 @@ All notable changes to this package. Newest first.
 The canonical, in-progress record of what was changed and why lives in [doc/progress.md](../../doc/progress.md);
 this file is the package-facing release history.
 
+## 0.19.50
+
+**对齐 DSH 0.1.7/0.2.0 插件规范 + `lib/sites/` 站点解耦起步 + 结构清晰化。能力不变。**
+
+三件事：把长期欠账如实登记、按当前规范逐条核对声明层、把散落的站点知识收口。
+贯穿全程的不变量是**能力不变**——十个站点照常收发、工具协议、面板、任务板、镜像全部不动。
+为此**先立护栏再改代码**，每条新护栏都做了**反向验证**（改坏实现必须变红）。
+
+### ① 规范面：比预期窄，且已对齐的部分比台账多
+
+权威出处是 `@deepseek-ai/dsh-package-manifest` 的五个接口。实测：**实装 `0.1.7-alpha.2` 与
+npm `latest` `0.2.0-rc.2` 的 `types.d.ts` 内容逐字相同**——0.1.7 → 0.2.0 **没有新增清单字段**。
+
+已对齐、复核后确认无需改动：`dsh.client.inject` 已删除；`client.cjs` 的 Cordis `inject`
+已无 `settingsScope`；**六个客户端槽位全部 `active: true`**（`cordis_inspect_query` 实读）。
+
+### ② 声明层改动
+
+- **`engines.dsh`：`>=0.1.0-rc.6` → `>=0.1.6-alpha.2`。** 旧值 `git log -S` 取证写于
+  **v0.5.1 的初始快照**，此后从未重看——那时 `slots` / `primitives` / `sidebarRight*` 都还不存在。
+  新值依据：`doc/verify.md` 有真机验收记录在 0.1.6-alpha.2 上完成，且客户端 bundle
+  **刻意横跨 0.1.6 / 0.1.7 两代图标导出名**。
+  **刻意不取 `>=0.1.7-alpha.2`**：代码刻意支持 0.1.6，写成 0.1.7 会是一句代码并不支持的声明。
+- **新增显示元数据**：`package.json` 的 `icon`、`locale/en.json` + `locale/zh.json`，
+  以及 `exports` 的 `./locale/*.json`、`./icon.svg`（规范要求经 ESM resolver 可达）。
+- **`peerDependencies` 核查后不改**：`^0.1.5-alpha.1` 满足实装的 `sidebar-right@0.1.7-alpha.2`，
+  且**这个宽度是必要的**（要同时支持两代）。「看着旧」不等于「错」。
+
+### ③ 契约闸门：4 条 → 6 条判据（其中一条官方不查）
+
+- **判据 5**：`dsh.client.inject` 的每个值**必须是包名**（规范逐字：「Informational
+  package-name dependencies, **not** Cordis service injection」）。
+  **官方闸门只查空值与重复**，所以这个错误会静默存活——本仓库真实发生过一次
+  （0.19.1 把服务名记为「合规」，直到 0.1.7 升级才暴露）。
+- **判据 6**：`icon` / `locale/` **声明了就必须合法**（≤256 KiB、在 manifest 目录内、
+  `locale/en.json` 存在、`exports` 可达、形状是 `{ meta: { title, description } }`）。
+- 两条判据都做了反向验证：填回服务名 ⇒ 红；坏 icon + 删 exports + 坏 locale 形状 ⇒ 红。
+
+### ④ 站点解耦：`lib/sites/<siteId>.js`，本轮只搬 DeepSeek
+
+`lib/sites/index.js` 是注册表（`migratedSiteIds()` 让迁移进度**可断言**），
+`lib/sites/deepseek.js` 承接站点声明；`providers.js` 保留**组装职责**
+（`withEffort` 摊平 + 冻结），那一处因此缩成一行。
+
+**为什么是「一个文件一份声明」而不是「按站点复制代码」**：复制在本仓库**产生过漂移而不是隔离**
+（三份逐字相同的 `ANSWER_SELECTOR`，「修一处、忘两处」），且会让公共缺陷的修复成本乘以站点数
+（0.19.16 一次修了 4 个共用基类的解码器族）。
+
+其余 9 站**刻意保持内联**——迁移是渐进的，工作量以 DeepSeek 为准。
+行为不变由新增的 `test/provider-surface.test.mjs` 钉住（站点表 / provider id / 模型目录 /
+分组名 / 可逆性 / 17 行快照），搬家前后 6/6 绿。
+
+### ⑤ 两处「规则抽成具名纯函数」（这才是真正缺的那一半）
+
+- `browser-driver.js` 的 **`answerSelectorFor(siteId)`**：`声明 || 兜底` 这条规则此前只活在
+  一个**内联表达式**里，而 `createBrowserDriver` 需要真浏览器才跑得起来 ⇒ **规则写反了
+  没有任何单测会红**。现由 `test/answer-selector.test.mjs` 5 条钉住。
+- `index.js` 的 **`isInjectedDefaultSlot`**：两处 `siteId === 'deepseek'` **看着像站点特例**，
+  实际是**测试注入契约**（删掉会让全部既有测试在无头环境里真的去拉一个 Edge）。具名之后不会被误改。
+
+### ⑥ 结构清晰化
+
+- `doc/CODE-STRUCTURE.md` **全量重算**（原写 30 模块 / 15,175 行 / 109 测试；实测 **48 / 34,570 / 118**）；
+- `doc/ROADMAP.md` 补写「站点差异外移」一节——原文件两处被引用为「第 2 节」但**没有对应内容**（死引用）；
+- `gen-index.mjs` 由**扁平扫描**改为**递归**：引入 `lib/sites/` 后，扁平 `readdirSync`
+  不报错、**只是看不见**那些文件 ⇒ 索引凭空少一层。索引随之 48 → **50 个模块**。
+
+### ⑦ 诚实交代（本轮没做的）
+
+- `lib/sites/` 其余 **9 站**未迁移；
+- **未跑真机验收**（需要已登录浏览器），`engines.dsh` 的新下界只由既有 verify.md 记录支撑；
+- **zai / doubao 的思考等级真机回读**仍未取得 ⇒ 新登记为长期问题 **#34**；
+- 全量单测 118 文件 **115 通过 / 3 失败**，三条已逐条归因、**无一是本轮回归**：
+  `prompt-store` 是调用方式产物（需 `NODE_TEST_CONTEXT`，设上后 11/11 通过）；
+  `regression`（53/1）与 `aux-delta-compact`（4/1）是**既有常红**，
+  已用 `git stash push -u` 在**干净树**上复跑确认**逐字同样红**。
+  这两条是**同一条行为**（`WEB_SESSION_LOST` → 整段重放），落在「绝不静默丢上下文」红线区，
+  已登记为新长期问题 **#37**。
+
 ## 0.19.49
 
 **修：思考等级「回读读不到档位」——5 个站点里 4 个各自有独立的回读缺陷；外加一个带槽的兼容别名真 bug。**
