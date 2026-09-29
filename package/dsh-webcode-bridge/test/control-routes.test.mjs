@@ -202,11 +202,26 @@ test('context-windows 分开投影 displayContext 与 sendBudget（B-3 → Task 
     }
   }
   // glm/zai 是声明的改写对象：二者都应给出值，且预算值可核对。
-  for (const id of ['glm:glm-5.3', 'glm:auto', 'zai:glm-5.3', 'zai:auto', 'deepseek:deepseek']) {
+  //
+  // ⚠ 0.19.46 更正：本行原先还断言 `glm:auto` 与 `zai:auto` 必须存在——那两个
+  // 条目已在 **0.19.43 按用户指令真删**（原话：「不需要这个自动吧？……提供网站
+  // 提供的模型列表就行」；判据是「桥有没有该站点的 modelPicker 契约」）。
+  // 因此「列表里没有 auto」才是**现行设计**，旧断言只会常年发红、把真回归淹掉。
+  //
+  // 但删表**不等于**删解析：`glm:auto` / `zai:auto` 必须**仍解析得开**（真机
+  // ~/.dsh/settings.yaml 的 subagent-model-selection.allowedModels 里就写着它们，
+  // 解析不了会当场 session/model-unavailable）。所以这里同时钉住两件事：
+  //   ① 列表里**没有** auto（下拉不再出现由桥自造的档位）；
+  //   ② 解析**仍然成功**（历史设置值不会失效）。
+  for (const id of ['glm:glm-5.3', 'zai:glm-5.3', 'deepseek:deepseek']) {
     const row = body.models.find((m) => m.id === id);
     assert.ok(row, `应有 ${id}`);
     assert.ok(typeof row.sendBudget === 'number' && row.sendBudget > 0, `${id}: sendBudget 应为正数，实际 ${row.sendBudget}`);
     assert.ok(typeof row.displayContext === 'number' && row.displayContext > 0, `${id}: displayContext 应为正数`);
+  }
+  for (const gone of ['glm:auto', 'zai:auto']) {
+    assert.ok(!body.models.some((m) => m.id === gone),
+      `${gone} 已在 0.19.43 真删，不得再出现在模型列表里`);
   }
 });
 

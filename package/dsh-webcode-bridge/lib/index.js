@@ -12,11 +12,13 @@ import fs from 'node:fs';
 import { DEEPSEEK, resolveWebModel, listAllModels, getSite, SITES, qualifyModelId, MODEL_ALIAS_IDS, MODEL_PROVIDER_COMPAT_ID, siteIdForProvider, providerGroupName, modelGroupEntryName, providerIdsForRegistration } from './providers.js';
 import {
   DEFAULT_SLOT, parseAccountKey, formatAccountKey, formatModelId, normalizeAccounts, slotsForSite,
-  slotProfileDir, accountLabel, sendGapForSlot,
+  slotProfileDir, accountLabel, sendGapForSlot, normalizeSlot,
 } from './accounts.js';
+import { readIdentityCache, nameSlugForDisplay } from './account-cache.js';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { createRelay } from './relay.js';
+import { reasoningEffortsFor } from './think-effort.js';
 import { createOpenAiFront } from './openai.js';
 import { createBrowserDriver } from './browser-driver.js';
 import { zeroProgressDecision } from './zero-progress.js';
@@ -1016,9 +1018,32 @@ export function apply(ctx, config = {}) {
       // OpenAI 前端的旧值依赖它，所以只过滤「展示」，不动「解析」。
       //
       // 组内行名用**裸模型名**（GLM-5.3 / GLM-5.3-Flash）：组标题已经写着站点，
-      // 再带 `glm/` 前缀就是重复。多账户槽仍带 `(账户N)` 消歧——那个信息组标题
-      // 给不了。模型 id 不变，仍是 `glm:glm-5.3`。
+      // 再带 `glm/` 前缀就是重复。
+      //
+      // ## 多账户消歧：**真实用户名优先**（0.19.46，用户指令）
+      //
+      // 用户原话：「现在为什么不能做到新增账户后在模型列表就更新为：
+      // deepseek-rsyhn(这是真实用户名)，deepseek-177...这样子？？？」
+      //
+      // 旧实现给多账户槽拼 `(账户2)`——那是个**编号**，用户看不出「这行是哪个号」，
+      // 两个号的模型行除了编号一模一样。现在按槽读落盘的身份缓存（唯一真源
+      // lib/account-cache.js，与驱动、控制面同一份），把真实用户名拼进去：
+      //
+      //     默认槽（deepseek，用户 RSYHN）→ `DeepSeek-RSYHN`
+      //     账户2（deepseek#2，用户 177…）→ `DeepSeek-177…`
+      //
+      // **绝不造假**：读不到昵称时**逐字退回** `(账户N)` 编号（不猜、不拿槽名当昵称）。
+      // 模型 id 一个字都不动（仍是 `deepseek:deepseek` / `deepseek@2:deepseek`），
+      // 因此历史会话、别名表、`subAgentSite` 全部不受影响——变的只是展示名。
       const st = getSite(sid);
+      const listAccounts = configManager.get().accounts;
+      /** 某槽的展示用真实用户名（读不到返回 null）。 */
+      const accountSlugFor = (slot) => {
+        try {
+          const dir = slotProfileDir(cfg.profileDir, sid, slot, { primary: st?.mountAtRelayRoot === true });
+          return nameSlugForDisplay(readIdentityCache(dir)?.name);
+        } catch { return null; }
+      };
       return WEB_MODELS
         .filter((m) => m.siteId === sid && !MODEL_ALIAS_IDS.has(m.id))
         .map((m) => {
@@ -1027,11 +1052,17 @@ export function apply(ctx, config = {}) {
           const modelId = m.id.includes(':') ? m.id.split(':')[1] : m.id;
           const def = st?.models.find((x) => x.id === modelId);
           const bare = def ? modelGroupEntryName(def) : m.name;
+          const isDefaultSlot = !m.slot || m.slot === DEFAULT_SLOT;
+          // 单账户站点：不加任何后缀（0.14.6 逐字不变，既有断言与旧用户零位移）。
+          const multiAccount = !isDefaultSlot
+            || (listAccounts || []).some((a) => a && a.siteId === sid && a.enabled !== false);
+          if (!multiAccount) return { provider, id: m.id, name: bare };
+          const slug = accountSlugFor(m.slot || DEFAULT_SLOT);
+          // 读不到真实用户名 ⇒ 退回编号（**不造假**，也绝不显示成两个同名行）。
           return {
             provider,
             id: m.id,
-            // 多账户槽带 `(账户N)` 消歧——组标题给不了这个信息，只有模型行能给。
-            name: m.slot && m.slot !== DEFAULT_SLOT ? accountLabel(bare, m.slot) : bare,
+            name: slug ? bare + '-' + slug : accountLabel(bare, m.slot),
           };
         });
     },
@@ -1065,7 +1096,20 @@ export function apply(ctx, config = {}) {
       // DeepSeek 那种必须带图的独立识图模式）；未真机校准的一律 text——宁可
       // 明确不支持，也不让图片在半路被悄悄换掉。
       const inputModalities = m.acceptsImages === true ? ['text', 'image'] : ['text'];
-      return { provider, id: model || m.id, name: m.name, context: { contextWindow }, inputModalities };
+      // 思考等级（0.19.48）：声明了等级的站点在这里把清单交给宿主，模型选择器就会多出
+      // 一栏「推理等级」，选中值随 `GenerateOptions.reasoningEffort` 回来（宿主契约见
+      // dsh-llm 的 resolveCallWithInfo：未知值会被它挡成 UNSUPPORTED_REASONING_EFFORT）。
+      //
+      // **刻意不声明 defaultEffort**：声明它等于桥替用户定档，而且宿主会把该值materialize
+      // 进每一轮请求（`adapterDefaults.reasoningEffort`），于是「Default」这一项消失、
+      // 网页被强行改档。不声明时选择器显示「Default」，`reasoningEffort` 恒 undefined，
+      // 桥一个字都不动网页——与本次改动前逐字相同；只有用户主动选了某一档才下发。
+      // 清单本身只有一份（lib/think-effort.js），这里只做形状适配。
+      const reasoning = reasoningEffortsFor(m.siteId);
+      return {
+        provider, id: model || m.id, name: m.name, context: { contextWindow }, inputModalities,
+        ...(reasoning ? { reasoning } : {}),
+      };
     },
     async prepareCall(provider, model, signal) {
       const info = await this.resolveModel(provider, model, signal);
@@ -1173,15 +1217,122 @@ export function apply(ctx, config = {}) {
           };
         } catch { return base; }
       };
+      // 投放前等待（0.19.44）——本轮「还没交给网页」的那段时长，必须在窗口之外。
+      //
+      // ## 为什么必须把它剔出去（真机事故 2026-09-28，GLM）
+      //
+      // `relay.submit()` 在下面调用，看门狗计时器**当场开跑**；但从这一刻到消息
+      // 真正落进网页 composer 之间，桥还要做几件**与网页生成无关**的事：
+      //   · 发送间隔等待（`sendGapMs`，用户设 30s、基准 `end-to-start`）；
+      //   · 限流退避重试；
+      //   · relay 排队（`maxConcurrentLanes` / `minSendIntervalMs`）；
+      //   · 驱动懒创建 + `ensure()` 冷启动（GLM 非 deepseek 默认槽，走 `driverFor` 的
+      //     `!drivers.has(key)` 分支，创建点在 `attempt()` 里，**在间隔等待之后**）。
+      //
+      // 这几段被算进 120s 之后，真机形态是：30s 间隔 + 附件上传（GLM 走
+      // `uploadTextAttachment`，注释里就有 85k 实测 53s）+ 冷启动已耗掉大半，
+      // 「网页还没开口」就撞线报 `WEB_NO_PROGRESS`。
+      // **决定性实测**（注入式脚本驱动，窗口压到毫秒级，首字节延迟固定 800ms
+      // 只改间隔）：`gap=0`→OK(992ms)、`gap=1000`→OK(1819ms)、
+      // `gap=2000`→`WEB_NO_PROGRESS`(2607ms)、`gap≥3000`→同样约 2609ms 开火
+      // **且驱动调用次数只有 1**（这一轮根本没送到驱动）——看门狗是在「等间隔」
+      // 期间把这一轮判死的。
+      //
+      // ## 为什么这是口径不一致，而不是「窗口太小」
+      //
+      // relay 自己的账本就写着「发送前等待发生在网页生成之前，**不计入** durationMs」
+      //（lib/relay.js 的 `sendWaitMs` 注释）。同一个量在一处被排除、在另一处被计入，
+      // 才是真缺陷。修法是让两处同口径，而**不是**放宽窗口：
+      // `idleFirstByteMultiplier` 只作用于「首字节之前 + 驱动忙」那一格，本次恰恰
+      // 落在「驱动不忙」，调它对这个 case 完全无效。
+      //
+      // ## 机制：按「距本轮真正交给网页多久」判，而不是按「距 submit 多久」
+      //
+      // executor 在把消息交给网页之前，把已耗时写进 `meta.preDeliverMs` 并把活标记
+      // `meta.delivering` 置假（唯一真源，见 executor 里的 `markPreDeliver`）。
+      // 这里据此算出**有效 deadline**（见下方 `idleDeadline`）：
+      //
+      //     已投放 → submitAtReal + preDeliverMs + windowMs
+      //     投放前 → Infinity（消息还没发出去，没有「网页不吐字节」的证据）
+      //     从未投放 → submitAtReal + windowMs（既有安全线，逐字保留）
+      //
+      // 安全线为什么不受影响：没走到投放那一步（链路真死了）⇒ `preDeliverMs` 恒为 0
+      // 且 `delivering` 已置假 ⇒ 判据与改动前逐字相同。既有护栏
+      //（test/watchdog-first-byte.test.mjs ②③、test/idle-window.test.mjs）因此保持原判：
+      // mid-stream 不宽限、驱动不忙不宽限。本改动**只后移有效起点**，不放大窗口、
+      // 不改相位判据——消息交给网页之后，宽限规则仍由 idleWindowDecision 原样决定。
+      // 本轮「交给网页」这一刻的基准。取值必须在 `relay.submit()` **之前**一行，
+      // 于是它与 relay 内部派发起跑的时刻最多差一次微任务（见 lib/relay.js 的
+      // `Promise.resolve().then(cfg.executor)`）——排队时间由 executor 的
+      // `markPreDeliver` 一并计入 preDeliverMs。
+      const submitAtReal = Date.now();
+      // 真源取 **turn.meta**（适配器与 executor 共享的同一个对象，见 relay.submit 的
+      // `meta: turn.meta`）：
+      //   · `preDeliverMs` —— executor 在把消息交给网页那一刻定值的**累计**时长
+      //     （间隔等待 + 排队 + 退避），见 executor 的 markPreDeliver；
+      //   · `delivering`   —— 上面那个值定值之前的**活标记**。没有它，长间隔等待
+      //     期间 preDeliverMs 恒为 0，看门狗会误以为「从没投放」而在常规窗口开火，
+      //     修了等于没修（本修复第一版实测 gap≥3000ms 仍失败，正是这个原因）。
+      const preDeliverMs = () => {
+        const v = Number(turn.meta?.preDeliverMs);
+        return Number.isFinite(v) && v > 0 ? v : 0;
+      };
+      const isPreDelivering = () => turn.meta?.delivering === true;
+      /**
+       * 本轮的有效 deadline（epoch ms）。
+       *
+       * 语义：**从「真正交给网页」那一刻起**再给 `windowMs`。
+       *   · 正在投放前 ⇒ 此刻还没有 deadline（返回 Infinity），因为消息还没发出去，
+       *     「网页不吐字节」这件事还没有任何证据；
+       *   · 已投放     ⇒ `submitAtReal + preDeliverMs + windowMs`，且一旦进入投放后
+       *     就不再变动（preDeliverMs 在投放那一刻定值）。
+       *
+       * 投放前的等待不是无限豁免：`delivering` 只在 executor 的同步流程里为真，
+       * 它对应的每一段等待都各有自己的上限（发送间隔由 clampSendGapMs 夹在 600s 内、
+       * 限流退避 ≤ RATE_LIMIT_RETRIES 次、relay 排队有 queueTimeoutMs），
+       * 且 relay 外层还有 2×requestTimeoutMs 的总超时把它兜住。因此不会出现
+       * 「本轮永不失败」——下面还有一条 `PRE_DELIVER_CEILING_MS` 的硬界作为双保险。
+       */
+      const PRE_DELIVER_CEILING_MS = Math.max(1_000, Number(cfg.requestTimeoutMs) || 240_000);
+      const idleDeadline = (windowMs) => {
+        const pre = preDeliverMs();
+        if (pre > 0) return submitAtReal + pre + windowMs;
+        return isPreDelivering() ? Infinity : submitAtReal + windowMs;
+      };
       const nextWithIdle = async () => {
         let timer = null;
+        // 计时器按剩余量挂：deadline 在投放那一刻会**后移**（preDeliverMs 定值），
+        // 因此投放前后各挂一次，而不是一次 setTimeout 到底。
+        //
+        // 为什么必须这样（本修复第一版实测教训）：若在第一次进本函数时就算死
+        // `30000 + windowMs`，那时 preDeliverMs 还是 0，间隔等待照样被算进窗口
+        // ——gap≥3000ms 的用例仍然失败。必须等投放那一刻重算。
+        const arm = (reject, windowMs, phase) => {
+          const deadline = idleDeadline(windowMs);
+          // 投放前：短步长轮询，等 delivering 翻转 / preDeliverMs 定值。
+          // 双保险硬界：投放前累计超过 PRE_DELIVER_CEILING_MS 仍无进展 ⇒ 判死
+          //（防「卡在等待里永不失败」，与 idle-window 的 capped 余量同一条纪律）。
+          const prePhase = deadline === Infinity;
+          const hardLeft = PRE_DELIVER_CEILING_MS - (Date.now() - submitAtReal);
+          const left = prePhase ? hardLeft : deadline - Date.now();
+          if (left <= 0) {
+            return reject(idleTimeoutError(windowMs, idleScene({ windowMs, phase })));
+          }
+          const step = prePhase ? Math.min(250, left) : left;
+          timer = setTimeout(() => {
+            if (prePhase && Date.now() - submitAtReal >= PRE_DELIVER_CEILING_MS) {
+              return reject(idleTimeoutError(windowMs, idleScene({ windowMs, phase })));
+            }
+            arm(reject, windowMs, phase);
+          }, Math.max(1, step));
+          timer.unref?.();
+        };
         try {
           const ev = await Promise.race([
             ch.next(),
             new Promise((_, reject) => {
               const { windowMs, phase } = idleDecision();
-              timer = setTimeout(() => reject(idleTimeoutError(windowMs, idleScene({ windowMs, phase }))), windowMs);
-              timer.unref?.();
+              arm(reject, windowMs, phase);
             }),
           ]);
           // 首个事件到达：置位本轮标记，下一次迭代起窗口立刻回到常规值。
@@ -3076,6 +3227,10 @@ function imageMarkdown(images) {
             model: qualified,
             images: m.images,
             thinkMode,
+            // 思考等级（0.19.48）：由 buildTurn 的 meta 带来（源头是请求的
+            // `GenerateOptions.reasoningEffort`），驱动在选完模型之后落到网页控件上。
+            // null 表示「用户没选」——驱动据此**不动**网页当前档位。
+            reasoningEffort: m?.reasoningEffort ?? null,
           };
           return drive.sendTurn(m.sessionKey, prompt, turnOpts).catch(async (err) => {
             // 网页会话被删/过期：桥这一侧的唯一正确恢复是重放「首轮整段」——
@@ -3183,6 +3338,56 @@ function imageMarkdown(images) {
         }
         return driverFor(accountKey).sendPrompt(prompt, { signal: opts.signal, meta: m, onDelta: opts.onDelta, onThink: opts.onThink, onImage: opts.onImage, model: qualified, thinkMode });
       };
+      // 投放前等待（0.19.44）：本 executor **开始跑**的那一刻。适配器的看门狗
+      // 在 `relay.submit()` 之后立刻开跑，而 submit 只是入队——executor 由
+      // relay 的派发循环异步起跑（lib/relay.js 的 `Promise.resolve().then(cfg.executor)`）。
+      // 因此 `executorStartedAt` 与看门狗起点之间的差（排队时间）也算「还没交给网页」，
+      // 与间隔等待同一条口径。
+      const executorStartedAt = Date.now();
+      /**
+       * 把「还没交给网页」的时长写进 meta，供适配器看门狗把有效起点后移。
+       *
+       * **唯一真源**：这个字段只在本函数里写，消费点只有适配器闭包的 `preDeliverMs()`
+       *（判据不各写一份——本项目对「两处口径漂移」记过多次）。
+       * 在**消息即将交给网页**的那一刻调用（`attempt()` 之前）。
+       *
+       * 为什么在 attempt 之前而不是 executor 开头就写完：`attempt()` 里的
+       * `driverFor(accountKey)` 会**懒创建**驱动并跑 `ensure()`（冷启动可能数十秒），
+       * 那同样不是网页生成时间。把它算在投放前，才是「有效起点≈消息落进 composer」。
+       * 但 `attempt()` 内部兼容 `sendTurn` 的整段重建与重试，没有单一可观测的
+       * 「已提交」信号，因此这里的口径取**attempt 调用之前**这一确定的边界——
+       * 它至少扣掉了间隔等待、排队与限流退避这三段（真机事故里的大头），
+       * 且不会因为多扣一点而让真正的卡死漏报（下面有上限约束）。
+       *
+       * 上限约束：`preDeliverMs` 这个**读数**以 `cfg.requestTimeoutMs` 封顶（投递链自己
+       * 已经异常时把数字夹住即可）。真正的**判死**由适配器侧的 `PRE_DELIVER_CEILING_MS`
+       * 硬界负责——两者不必是同一个数：一个是读数、一个是判据。
+       */
+      const markPreDeliver = () => {
+        if (!m || typeof m !== 'object') return;
+        const pre = Math.max(0, Date.now() - executorStartedAt);
+        // 上限取整轮预算（不乘 0.9）：这是「投放前累计时长」的封顶，不是窗口本身。
+        // 超过它说明投递链自己已经异常，把读数夹住即可——真正的判死由适配器侧的
+        // PRE_DELIVER_CEILING_MS 硬界负责，两处不必是同一个数（一个是读数、一个是判据）。
+        const ceiling = Math.max(0, Number(cfg.requestTimeoutMs) || 240_000);
+        m.preDeliverMs = Math.min(pre, ceiling);
+        m.delivering = false;
+      };
+      // 投放前的**活标记**（适配器看门狗据此在等待期间不判死）。
+      //
+      // 为什么需要「活标记」而不只是 markPreDeliver 的定值：30s 间隔等待进行到
+      // 第 5 秒时，preDeliverMs 还没写（它要等等待结束才定值），看门狗若只看那个
+      // 字段就会以为「从未投放」而在常规窗口开火。本修复第一版正是如此——
+      // 实测 gap≥3000ms 仍失败、驱动调用=1。有了这个标记，等待期间看门狗**不判死**；
+      // 等待结束、markPreDeliver 定值后，deadline 才落到
+      // 「交给网页之后 windowMs」上。
+      //
+      // 取值只在本 executor 的同步流程里为真，且每一段等待都有各自的上限
+      //（见适配器 idleDeadline 的注释），不会造成「永不失败」。
+      const beginPreDeliver = () => { if (m && typeof m === 'object') m.delivering = true; };
+      // 进本 executor 就算「投放前」：从这一刻到 markPreDeliver() 之间的全部时间
+      //（排队余量 + 间隔等待 + 限流退避）都不属于网页生成，看门狗据此不判死。
+      beginPreDeliver();
       // 发送节流（设置页「发送间隔」）：基准由 `sendGapBasis` 决定——
       //   · 'send-to-send'（默认）本轮发送距上一次*发出*不足设置值就补满；
       //   · 'end-to-start'（0.16.31）本轮发送距上一次*生成结束*不足设置值就补满，
@@ -3231,6 +3436,10 @@ function imageMarkdown(images) {
         let retries = 0;
         let compactRetried = false;
         for (;;) {
+          // 每次真正投递之前重算投放前时长：限流退避与压缩重试都发生在
+          // **消息尚未交出去**的时候，同样不属于网页生成耗时，必须继续被扣出窗口。
+          // （只在循环首重算，因此退避结束后 deadline 会相应后移。）
+          markPreDeliver();
           markSent();
           try { result = await attempt(m?.fresh === true); break; }
           catch (err) {
@@ -3238,6 +3447,9 @@ function imageMarkdown(images) {
             // 安全；按退避序列重试同一轮，而不是把失败甩回 DSH 让长任务断链。
             if (err?.code === 'RATE_LIMITED' && !opts.signal?.aborted && retries < RATE_LIMIT_RETRIES) {
               retries += 1;
+              // 重试前重新进入「投放前」态：退避期间消息并没有交给网页，
+              // 看门狗不该拿这段时间判死（与发送间隔同一条口径）。
+              beginPreDeliver();
               // 10s 下限：限流滑窗以十秒计，几十毫秒的短间隔重试只会再次撞墙。
               // （rateLimitBackoffMinMs 仅供离线测试调小；真实运行缺省 10_000。）
               const backoff = Math.max(sendGapMs, cfg.rateLimitBackoffMinMs ?? 10_000) * retries;
@@ -3358,6 +3570,9 @@ function imageMarkdown(images) {
           // 槽目录由 slotProfileDir 决定；默认槽的路径与 0.14.6 逐字相同。
           // deepseek 额外回退根 profile（它的默认槽直接挂在 profileDir 上）。
           const slotDir = slotProfileDir(cfg.profileDir, st.id, acc.slot, { primary: st.mountAtRelayRoot === true });
+          // 身份缓存（昵称/头像）：与登录态缓存同处一个槽目录，同一份真源。
+          // 驱动还没建起来时它是**唯一**的显示来源，见下方 accountName 的注释。
+          const identity = readIdentityCache(slotDir);
           const statePaths = [path.join(slotDir, 'webcode-login-state.json')];
           if (st.id === 'deepseek' && isDefault) statePaths.push(path.join(cfg.profileDir, 'webcode-login-state.json'));
           for (const p of statePaths) {
@@ -3373,9 +3588,16 @@ function imageMarkdown(images) {
           // 前端把 sites 当同一个列表渲染，缺字段的行会让「未初始化」的槽无法显示成
           // 「glm (账户2)」而退化成裸 siteId，两行看起来一模一样。
          return { siteId: st.id, siteName: st.name, origin: st.origin, slot: acc.slot, accountKey: acc.key, displayName: accountLabel(st.name, acc.slot), profileDir: slotDir, initialized: false, running: false, busy: false, loggedIn: has ? cached.loggedIn : null, loggedInCached: has && cached.loggedIn === true, loginBasis: trusted ? cached.basis : (cached ? 'stale' : null), loginCheckedAt: cached ? cached.at : null, needLogin: has && cached.loggedIn === false, selectedModel: null, window: null, loginState: 'idle', lastLogin: null, sessionLostCount: 0, lastSessionLost: null,
-            // 真实昵称/头像（0.19.37）：**未初始化的槽一定读不到**，如实给 null，
-            // 由前端回落站点矢量标记——不拿槽名冒充昵称。
-            accountName: null, avatarUrl: null };
+          // 真实昵称/头像：驱动未懒创建时**从落盘缓存读**（0.19.46）。
+          //
+          // 旧实现这里写死 `accountName: null, avatarUrl: null` 并附一句「未初始化的
+          // 槽一定读不到」——那句话在身份**已落盘**之后就不再成立，而它造成的后果
+          // 正是用户报的症状：重启后驱动还没建起来 ⇒ 面板立刻显示「图像 + 站点名」
+          // 而不是真实用户名，**要等用户手动触发一次连接才会恢复**。
+          // 缓存存在的全部意义就是这个时刻（真机读得到时它是权威，读不到时它才是
+          // 唯一来源），所以这里与 initialized 分支走**同一份** lib/account-cache.js。
+          accountName: identity?.name ?? null,
+          avatarUrl: identity?.avatarUrl ?? null };
         }
         // status() 可能是 null——「取不到现场」在契约里是合法返回值（懒驱动还没建起来、
         // 测试替身、或本进程尚未观测到任何东西）。旧写法紧接着就读 `s.profileDir`，
@@ -3463,12 +3685,42 @@ function imageMarkdown(images) {
       // 真实站点逐字一致，SPA router 基线与根相对资源全部自然正确，cookie 也
       // 按子域天然隔离。*.localhost 由浏览器与系统解析到回环，安全边界不变。
       const hostHeader = String(req.headers.host || '');
+      // 站点子域，**可选带账户槽前缀**（0.19.46）：`<slot>--<siteId>.localhost`。
+      //
+      // ## 为什么必须把槽编进主机名（真机缺陷，用户原话）
+      //
+      //   > 现在右侧选择了账户2打开界面仍是用户1：rsyhn的登录账户，deepseek
+      //
+      // 根因：镜像原先**只按 siteId 挂载**（`mirrorFor(sid)`），而它的 cookie 来源是
+      // `driverFor(sid)` —— 传的是**裸 siteId**，即**永远默认槽**。于是账户2 的标签页
+      // 加载 `deepseek.localhost` 时，服务端用账户1 的 profile cookies 回填，
+      // 页面里当然还是账户1 的登录态。槽在 URL 里没有任何位置，服务端就无从知道
+      // 「这次该用哪个号」。
+      //
+      // 修法沿用本项目既有立场（`lib/index.js` 上面那段：让每个站点拥有独立源，
+      // 因为 SPA router 以 pathname 基线为准）：**再给它一个槽维度的独立源**。
+      //   · 默认槽：`<siteId>.localhost` —— **逐字不变**（既有用户零位移，
+      //     与 accounts.js「默认槽零位移」同一条纪律）；
+      //   · 非默认槽：`<slot>--<siteId>.localhost`（如 `2--deepseek.localhost`）。
+      // 分隔符取 `--` 而不是 `.`：`2.deepseek.localhost` 在解析时与
+      // 「站点名里带点」无法区分，而 `--` 不在 SITE_ID_RE 允许的字符集里 ⇒ 无歧义。
+      // `*.localhost` 由浏览器与系统解析到回环，安全边界不变。
       const hostSite = /^([a-z0-9-]+)\.localhost(:\d+)?$/i.exec(hostHeader);
+      const hostSlotSite = /^([a-z0-9-]+)--([a-z0-9-]+)\.localhost(:\d+)?$/i.exec(hostHeader);
       // 桥自己的控制面路径在子域上照旧可用：镜像 handle 对它们返回 false，
       // 这里据此放行到下面的 webControl 分支（否则子域里的 /__webcode/xxx
       // 会既不被镜像处理、也不被控制面处理，直接挂住）。
       const LOCAL_PREFIXES = ['/v1/', '/bridge/', '/webcode/', '/__webcode/'];
       const isControlPath = LOCAL_PREFIXES.some((p) => pathname === p.slice(0, -1) || pathname.startsWith(p));
+      // 带槽形态先判（它的 hostname 更长，普通形态的正则匹配不到它，两者不冲突）。
+      if (hostSlotSite && !isControlPath) {
+        const slot = hostSlotSite[1].toLowerCase();
+        const sid = hostSlotSite[2].toLowerCase();
+        if (getSite(sid) && normalizeSlot(slot) && normalizeSlot(slot) !== DEFAULT_SLOT) {
+          mirrorFor(sid, { slot }).handle(req, res, pathname, u.search).catch(() => { try { res.end(); } catch {} });
+          return;
+        }
+      }
       if (hostSite && getSite(hostSite[1].toLowerCase()) && !isControlPath) {
         const sid = hostSite[1].toLowerCase();
         mirrorFor(sid).handle(req, res, pathname, u.search).catch(() => { try { res.end(); } catch {} });
@@ -3562,19 +3814,36 @@ function imageMarkdown(images) {
     setCookies: (headers, origin) => driver.writeProfileCookies(headers, origin),
     getUserAgent: () => driver.userAgent(),
   });
-  // 多站点侧栏视图：每个内容服务两个 mirror 实例（同一站点、不同挂载形态）——
-  //   • 主形态：子域根挂载 http://<siteId>.localhost:<port>/（mountPrefix ''）
+  // 多站点侧栏视图：每个站点（× 账户槽）服务两种挂载形态——
+  //   • 主形态（子域根挂载，mountPrefix ''）：
+  //       `http://<siteId>.localhost:<port>/`            ← 默认槽
+  //       `http://<slot>--<siteId>.localhost:<port>/`    ← 非默认槽（0.19.46）
   //   • 兼容形态：路径前缀挂载 /__webcode/site/<siteId>/…（mountPrefix 该前缀）
-  // 两者都是同一站点同一 driver 的只读转发，不额外持有浏览器状态，因此可以并存。
+  //
+  // ## 为什么 key 必须带上槽（真机缺陷：用户点账户2，看到的却是账户1）
+  //
+  // 旧实现的 key 只有 `siteId`，且 cookie 来源写死 `driverFor(sid)`（裸 siteId
+  // ⇒ 永远默认槽）。于是账户2 的标签页请求到的是**默认槽那个 mirror 实例**、
+  // 回填的是账户1 的 cookies ⇒ 页面显示账户1 的登录态。槽在 URL 里没有位置，
+  // 服务端结构上无从区分。现在 key 与 driver 都按 accountKey，因此
+  // `2--deepseek.localhost` 与 `deepseek.localhost` 是**两个互不干扰的实例**。
   const mirrors = new Map();
-  function mirrorFor(siteId, { prefixed = false } = {}) {
+  function mirrorFor(siteId, { prefixed = false, slot = DEFAULT_SLOT } = {}) {
     const sid = getSite(siteId) ? siteId : 'deepseek';
-    const key = sid + (prefixed ? '#path' : '');
+    // 槽名归一化；非法/默认槽一律落到默认槽（与 accounts.normalizeSlot 同一套 rules）。
+    const normalized = normalizeSlot(slot);
+    const s = (!normalized || normalized === DEFAULT_SLOT) ? DEFAULT_SLOT : normalized;
+    const accountKey = formatAccountKey(sid, s);
+    const key = accountKey + (prefixed ? '#path' : '');
     if (!mirrors.has(key)) {
       const st = getSite(sid);
+      // ⚠ 这里是修好的那一行：**按 accountKey 取驱动**（旧实现是 `driverFor(sid)`，
+      // 于是所有槽都拿到默认槽的登录态）。四个取值点必须全部用同一个 accountKey，
+      // 漏一个就会出现「页面用账户2、但接口用账户1」这种更难查的半错状态。
+      const drv = () => driverFor(accountKey);
       mirrors.set(key, createMirror({
         siteOrigin: st.origin,
-        getToken: () => driverFor(sid).getToken(),
+        getToken: () => drv().getToken(),
         logger: console,
         assetOrigins: st.staticOrigins || [],
         // 子域形态下站点就住在根上，不需要任何前缀；路径形态才带前缀。
@@ -3583,9 +3852,9 @@ function imageMarkdown(images) {
         // 原先为 z.ai 打的 rootPathForSpa 补丁在子域形态下不再需要（且有害：
         // 它会把 /auth 强行改回 '/'）。仅路径兼容形态保留该开关。
         rootPathForSpa: prefixed && st.rootPathForSpa === true,
-        getCookies: (origin) => driverFor(sid).profileCookies(origin),
-        setCookies: (headers, origin) => driverFor(sid).writeProfileCookies(headers, origin),
-        getUserAgent: () => driverFor(sid).userAgent(),
+        getCookies: (origin) => drv().profileCookies(origin),
+        setCookies: (headers, origin) => drv().writeProfileCookies(headers, origin),
+        getUserAgent: () => drv().userAgent(),
       }));
     }
     return mirrors.get(key);
@@ -3926,6 +4195,11 @@ function imageMarkdown(images) {
       },
       meta: {
         sessionKey: keyPath, fresh, model: formatModelId(siteId, slot, model), siteId, slot, accountKey, thinkMode,
+        // 思考等级（0.19.48）：宿主在用户选了「推理等级」时把它放进请求（`GenerateOptions`），
+        // 我们原样透到驱动；未选（含旧会话）时是 undefined ⇒ 驱动**一个字都不动网页**。
+        // 这里刻意**不做**站点校验：站点知识只在 lib/think-effort.js 一处，
+        // 未知/不属于本站点的值由驱动抛 THINK_EFFORT_UNKNOWN，而不是在这里静默丢掉。
+        reasoningEffort: options.reasoningEffort ?? null,
         // 发送间隔（设置页）：executor 在发送前按它节流，限流退避也以它为基数。
         // 0.14.7 起按槽取——同一站点两个账户是两份独立的风控窗口。
         sendGapMs: clampSendGapMs(sendGapForSlot(settings, accountKey, siteId)),

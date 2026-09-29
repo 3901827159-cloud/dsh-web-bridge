@@ -24,6 +24,8 @@ import { DEFAULT_SLOT, normalizeSlot } from './accounts.js';
 import { selectWebModel, pickerUsable } from './model-picker.js';
 import { deriveLastRate, shouldSettleWip, shouldSettleStalledThinking, answerDomLength, cleanAnswerDomText, shouldRescueStalledCapture } from './metrics.js';
 import { emptyWebResponseError } from './zero-progress.js';
+import { readIdentityCache, writeIdentityCache } from './account-cache.js';
+import { applyEffort } from './think-effort.js';
 // 0.19.18 用户准则「同一账号不能同时桥接运行」：账号级互斥锁（见 lib/bridge-lock.js）。
 import { acquireBridgeLock, releaseBridgeLock, describeBridgeLockHolder } from './bridge-lock.js';
 // 只用 ATTACH_PICK_SRC：判定主体注入浏览器执行（见 pageAttachEvidence）。
@@ -1077,6 +1079,10 @@ export function createBrowserDriver(options = {}) {
     return p.evaluate(() => typeof window.__webcodeChunk === 'function' && window.__webcodeCaptureInstalled === true).catch(() => false);
   }
   let selectedModel = null;
+  // 最近一次**真正生效**的思考等级（0.19.48）：{ at, siteId, target, readback, basis }。
+  // 只在回读确认成功那一刻写（见 lib/think-effort.js 的 applyEffort 回读步），因此它不是「我们点过
+  // 什么」而是「网页现在是什么」——status 里透出它，排障时能一眼看出档位有没有落下去。
+  let effortApplied = null;
   // ---- 账号真实身份（0.19.4）--------------------------------------------------
   // 用户指令：「右侧要能够获取真实登录状态登录后就会显示下拉选择（像新建终端的下拉
   // 选择）……下拉取后显示已登录头像和昵称」，并明确「抓真实值 + 抓不到回落槽名」。
@@ -1085,6 +1091,16 @@ export function createBrowserDriver(options = {}) {
   // 才渲染，任何一种都能让它读不到。读不到时字段留 null，界面回落成槽名——
   // 绝不拿槽名冒充昵称（本项目的「不造假状态」纪律）。
   let accountIdentity = null;   // { name, avatarUrl, capturedAt, basis }
+  // 落盘缓存：路径与「什么算有效」的判据都收在 lib/account-cache.js（**唯一真源**）。
+  // 三处消费同一口径——驱动（这里）、模型列表显示名（index.js 的 listModels）、
+  // 控制面每个账户行。各写一份必然漂移；本项目对「两处口径漂移」记过多次。
+  //
+  // 为什么必须落盘（用户原话 2026-09-28：「账户名和图像不会缓存？每次新开？」）：
+  // 上面那个 `accountIdentity` 原先只在内存里，桥一重启/懒驱动一回收就归零，
+  // 面板回落到 displayName（用户看到的「图像 + Deepseek网页版」）。而 `loggedIn`
+  // 早就落盘了——身份是**同一类装饰性读数**却漏了同一层。
+  // 教训同源：**任何要在重启后仍显示的状态，都必须落盘。**
+  accountIdentity = readIdentityCache(cfg.profileDir);
   /**
    * 站点的账号身份选择器：站点自己声明优先，否则用一组通用猜测。
    *
@@ -1107,14 +1123,24 @@ export function createBrowserDriver(options = {}) {
    * 从当前页面读「这个账号真实的昵称与头像 URL」。
    *
    * @returns {Promise<{name: string|null, avatarUrl: string|null, basis: string, capturedAt: string|null}>}
-   *   读不到时 `name`/`avatarUrl` 为 null；`basis` 说明来源（site-probe / generic / no-page）。
+   *   读不到时 `name`/`avatarUrl` 为 null；`basis` 说明来源（site-probe / generic / no-page / cache）。
    */
   async function readAccountIdentity() {
     const probe = site.accountProbe || null;
     const nameSels = (probe?.name?.length ? probe.name : GENERIC_NAME_SELECTORS);
     const avatarSels = (probe?.avatar?.length ? probe.avatar : GENERIC_AVATAR_SELECTORS);
     const p = page;   // 本驱动当前持有的页面（一个账号一个驱动）
-    if (!p || p.isClosed?.()) return { name: null, avatarUrl: null, basis: 'no-page', capturedAt: null };
+    // 没有活页时**回落上次落盘的身份**，而不是一律 null（0.19.46）。
+    //
+    // 这一格正是用户报的「每次新开就没了」：重启后浏览器尚未 launch，`page` 为
+    // null，旧实现直接返回全 null ⇒ 面板立刻抹掉头像与昵称。缓存存在的全部意义
+    // 就在于这一刻——真机读得到时它是权威，读不到时它才是**唯一**的显示来源。
+    // 仍不造假：缓存里本来就是真机读到的值（basis 标成 'cache' 以示区别），
+    // 而且**读不到页面**与**读到空**是两件事，只有前者才用缓存。
+    if (!p || p.isClosed?.()) {
+      if (accountIdentity) return { ...accountIdentity, basis: 'cache' };
+      return { name: null, avatarUrl: null, basis: 'no-page', capturedAt: null };
+    }
     const raw = await p.evaluate(({ nameSels: ns, avatarSels: as }) => {
       const textOf = (sels) => {
         for (const s of sels) {
@@ -1149,6 +1175,10 @@ export function createBrowserDriver(options = {}) {
     const avatarUrl = raw?.avatarUrl && /^(https?:|data:image\/)/i.test(raw.avatarUrl) ? String(raw.avatarUrl).slice(0, 2048) : null;
     if (name || avatarUrl) {
       accountIdentity = { name, avatarUrl, basis: probe ? 'site-probe' : 'generic', capturedAt: new Date().toISOString() };
+      // 读到就落盘（0.19.46）：下次重启/驱动回收后，面板与模型列表仍能显示真实
+      // 昵称与头像，不必等用户再点一次「检测」。落盘失败**不影响**本次读数
+      //（装饰性）——与 persistLoginState 同一条纪律；写失败只 warn 一行。
+      if (!writeIdentityCache(cfg.profileDir, accountIdentity)) warn('account identity cache save failed (profileDir=' + cfg.profileDir + ')');
     } else if (!accountIdentity) {
       accountIdentity = { name: null, avatarUrl: null, basis: probe ? 'site-probe' : 'generic', capturedAt: null };
     }
@@ -1316,6 +1346,9 @@ export function createBrowserDriver(options = {}) {
       loginCheckedAt: lastLogin?.at ?? cachedLogin?.at ?? null,
       needLogin: effectiveLoggedIn === false,
       selectedModel,
+      // 最近一次回读确认成功的思考等级（0.19.48）：`null` = 用户没选过（Default），
+      // 不是「选了但没生效」——后者会在那一轮直接抛 THINK_EFFORT_UI_CHANGED。
+      effortApplied,
       siteId,
       // 账户槽（0.14.7）：面板据此把「glm」与「glm#2」分成两行，并知道该读哪个目录。
       slot,
@@ -1526,6 +1559,15 @@ export function createBrowserDriver(options = {}) {
     }
     if (m.phase === 'chunk') {
       if (m.text) active.rawHead = ((active.rawHead || '') + m.text).slice(0, 400);
+      // 流**尾**（0.19.45）。只留首段是看不出真因的——真机 2026-09-28 GLM 那轮报错是
+      // 「empty response from web AI | 流首段: …"parts":[],"status":"init"…」，
+      // 而 `status:"init"` + `parts:[]` 是 **GLM 每一轮的正常开帧**，首段按构造就
+      // 永远是它。真因（限流原话 / 审核 / last_error）都在**后面的帧**里。
+      // 这里保留**最后一帧**原文，与 rawHead 一起进报错现场。
+      if (m.text) {
+        const tail = String(m.text);
+        active.rawTail = (tail.length >= 400 ? tail : (active.rawTail || '') + tail).slice(-400);
+      }
       if (active.decoder) active.decoder.push(m.text);
     }
     if (m.phase === 'end' && active.decoder) {
@@ -2883,7 +2925,7 @@ export function createBrowserDriver(options = {}) {
     return result;
   }
 
-  async function runTurn(message, { navigate, key = null, signal, onDelta, onThink, onImage, model, images, thinkMode } = {}) {
+  async function runTurn(message, { navigate, key = null, signal, onDelta, onThink, onImage, model, images, thinkMode, reasoningEffort = null } = {}) {
     if (busy || transitioning) throw new Error('driver busy');
     busy = true;
     let timer = null;
@@ -3080,6 +3122,19 @@ export function createBrowserDriver(options = {}) {
       // DeepSeek 的「深度思考」pill 是独立开关,auto 时按模型 thinking 属性双向同步。
       const thinkOverride = thinkMode === 'on' ? true : thinkMode === 'off' ? false : null;
       const selection = model ? await selectModel(model, { hasImages: Array.isArray(images) && images.length > 0, thinkOverride }) : null;
+      // 思考等级（0.19.48）：**在模型选择之后**下发——真机读数里 kimi 的档位控件就长在
+      // 模型菜单里、glm 的档位子菜单长在模型弹层里，先选模型再落档位是唯一不会互相
+      // 覆盖的顺序。`reasoningEffort` 为 null（用户没选 / 停在 Default）时它**立即返回**，
+      // 不点、不改网页——因此对既有用户是零位移。
+      // 失败**必须**抛（不吞）：判据与执行都在 lib/think-effort.js 的 applyEffort（唯一执行器，
+      // 真机探针与驱动走同一条路径），这里只负责把成功的读数记进 status。
+      if (reasoningEffort) {
+        const eff = await applyEffort(page, { siteId, target: reasoningEffort });
+        if (eff.applied) {
+          effortApplied = { at: Date.now(), siteId, target: eff.target, readback: eff.readback, basis: eff.reason };
+          log(`think effort applied: site=${siteId} target=${eff.target} readback=${JSON.stringify(eff.readback)} (${eff.reason})`);
+        }
+      }
       // 模型切换未能确认时如实告知，而不是让用户以为选中的模型生效了。
       // 0.12.9 的 selectModelGeneric 在切换失败时静默返回 default-model，
       // 调用方当成功继续 —— 于是「模型选择」在多数站点上是空操作，
@@ -3583,13 +3638,21 @@ export function createBrowserDriver(options = {}) {
         }
         // 带上流首段原文：整流零响应帧时，「网页 200 包错误 JSON（风控/审核）」
         // 和「流形态对不上」在报错文本里一眼可分，不用再开 SSE_DEBUG 抓包。
-        const head = lastFinished?.rawHead ? ' | 流首段: ' + String(lastFinished.rawHead).slice(0, 200) : '';
-        throw new Error('web capture ended incomplete: ' + (result.reason || 'unknown') + head);
+        // 0.19.45 补流尾段：首段对多数站点是恒定的开帧（GLM 的 status:"init"），
+        // 只看它会把「后面为什么断」这条线索整条丢掉。见 emptyWebResponseError 的注释。
+        const headText = lastFinished?.rawHead ? ' | 流首段: ' + String(lastFinished.rawHead).slice(0, 200) : '';
+        const tailRaw = lastFinished?.rawTail ? String(lastFinished.rawTail).slice(-200) : '';
+        const tailText = tailRaw && tailRaw !== String(lastFinished?.rawHead || '').slice(0, 200)
+          ? ' | 流尾段: ' + tailRaw
+          : '';
+        throw new Error('web capture ended incomplete: ' + (result.reason || 'unknown') + headText + tailText);
       }
       // 0.16.11（#26）：只看 text 会把「只有思考」的轮次整轮作废（真机 d5fd2e11
       // turn 8：reasoning 块 + finish、正文/调用为零 → UNKNOWN 硬失败，任务断链）。
       // 思考-only 由适配器的 thinkingOnlyNotice 路径交回提示继续任务；这里只拦全空。
-      const emptyErr = emptyWebResponseError(result, { lastEndReason, rawHead: lastFinished?.rawHead });
+      const emptyErr = emptyWebResponseError(result, {
+        lastEndReason, rawHead: lastFinished?.rawHead, rawTail: lastFinished?.rawTail,
+      });
       if (emptyErr) {
         // 0.16.28 自愈降级：这一轮真的走了附件且全空——与 0.16.7 真机签名（传得上、
         // 零回复）同源。按站点记住，之后该站点回落 inline 直到桥重启；不记的话，
@@ -3628,9 +3691,31 @@ export function createBrowserDriver(options = {}) {
         thinkingMs,
         responseMs: firstResponseMs != null ? Math.max(1, Math.round(endAt - t0) - firstResponseMs) : null,
       };
-      // 本轮收束原因：稳态巡检器收束时已写好 settled_by；否则就是正常 FINISHED
-      // 或 dom 站点抄全文。透出到 /status 与右栏，用户不必再靠「卡了多久」猜。
-      noteEndReason(lastFinished?.settled_by || (site.decoder === 'dom' ? 'dom-capture' : 'finished'));
+      // 本轮收束原因：稳态巡检器收束时已写好 settled_by；否则按**解码器自己的判决**
+      // 说真话（0.19.45）。
+      //
+      // ## 旧写法是一句假陈述（真机事故 2026-09-28，GLM）
+      //
+      // 旧实现是 `lastFinished?.settled_by || (site.decoder === 'dom' ? 'dom-capture'
+      // : 'finished')` —— 兜底那一格**无条件写 'finished'**，完全不看解码器是
+      // `{complete:true}` 还是 `{complete:false, reason:'incomplete'}`。
+      // 于是 GLM 那一轮的报错文本成了「empty response from web AI（收束原因 finished）」，
+      // 而**流根本没有 finished**：GLM 只在 `status === 'finish'` 帧才置 done，
+      // 那一轮只有 `status:"init"` + `parts:[]` 就断了 ⇒ 解码器给的是
+      // `{complete:false, reason:'incomplete'}`。报错把「网页没说完」写成了
+      // 「网页正常收束」，与本项目记过的同类缺陷（旧读数冒充本轮、`mid-stream`
+      // 被印成「已开流后的静默」）逐字同族——排查方向当场被带偏。
+      //
+      // 判据与 `result.complete` 同源（不新开一份口径）：跑完整了才写 finished，
+      // 没收完整就把解码器给的 reason 如实带出去（incomplete / invalid_stream /
+      // rate_limited…）。这样「收束原因」这一格与「本轮到底有没有交付」永远自洽。
+      //
+      // dom 站点仍然优先写 dom-capture：它不走解码器，`result.complete` 由 DOM
+      // 文本是否非空决定，用同一个 reason 表达更准。
+      const decoderSettled = result.complete
+        ? (site.decoder === 'dom' ? 'dom-capture' : 'finished')
+        : ('partial:' + (result.reason || 'unknown'));
+      noteEndReason(lastFinished?.settled_by || decoderSettled);
       metrics.endReason = lastEndReason;
       if (fin) Object.assign(fin, { metrics, chars: (result.text || '').length });
       return {
@@ -3650,7 +3735,7 @@ export function createBrowserDriver(options = {}) {
     }
   }
 
-  async function sendTurn(key, message, { fresh = false, signal, onDelta, onThink, onImage, model, images, thinkMode } = {}) {
+  async function sendTurn(key, message, { fresh = false, signal, onDelta, onThink, onImage, model, images, thinkMode, reasoningEffort = null } = {}) {
     // 这个 key 就是「当前」会话槽（`status().sessionSlot` 报它）。
     lastSessionKey = String(key || 'main');
     let existing = conversationFor(key);
@@ -3718,7 +3803,7 @@ export function createBrowserDriver(options = {}) {
     try {
       // key 一并交给 runTurn：「落地即落盘」的写点在里面（见 runTurn 的
       // noteLanded）——身份必须在导航落地那一刻就记下，而不是等这里成功返回。
-      result = await runTurn(message, { key, navigate, signal, onDelta, onThink, onImage, model, images, thinkMode });
+      result = await runTurn(message, { key, navigate, signal, onDelta, onThink, onImage, model, images, thinkMode, reasoningEffort });
     } catch (err) {
       // 会话槽里存的是一个已经死掉的网页会话：立刻丢掉，别让下一轮再撞一次。
       // 上层收到 WEB_SESSION_LOST 后作废游标并以整段首轮提示词重开。
@@ -3757,6 +3842,9 @@ export function createBrowserDriver(options = {}) {
       navigate: 'fresh', signal, onDelta, onThink, onImage, thinkMode,
       model: model || meta?.model,
       images: meta?.images,
+      // 无会话的一轮（OpenAI 前端）同样接受思考等级：契约与有会话那一轮**同一条**
+      // （都在 meta 上），否则「同一个模型两条路给出两种档位行为」就成了第二份真相。
+      reasoningEffort: meta?.reasoningEffort ?? null,
     });
   }
 

@@ -136,8 +136,34 @@ window.__ModuleLoader__.load({
     // `deepseek.localhost` 会触发 `Unknown hostname` → #root 永远空白
     //（真机 2026-09-13）。它本来就是中继的默认站点，根挂载天然正确。
     // 站点侧声明见 providers.js 的 mountAtRelayRoot。
+    //
+    // ## 槽维度（0.19.46）：非默认槽必须用**带槽的主机名**
+    //
+    // 用户原话：「现在右侧选择了账户2打开界面仍是用户1：rsyhn的登录账户，deepseek」。
+    //
+    // 根因在服务端（镜像原先只按 siteId 挂载、cookie 来源写死默认槽，见
+    // lib/index.js 的 mirrorFor 注释），而**客户端这里也参与**：旧实现只按
+    // `siteId` 拼源、frame 也只按 siteId 缓存 ⇒ 账户2 与账户1 指向同一个地址，
+    // 服务端即使修好了也无从区分。
+    //
+    // 因此两端用同一套形状：默认槽不变（既有用户零位移），非默认槽加 `<slot>--` 前缀。
+    //   · 默认槽      → http://deepseek.localhost:8931/   （`deepseek` 仍走中继根）
+    //   · 账户2       → http://2--deepseek.localhost:8931/
+    //   · glm 默认槽  → http://glm.localhost:8931/
+    //   · glm 账户2   → http://2--glm.localhost:8931/
+    //
+    // ⚠ 两个槽**必须**是两个不同的 frame / 源。共用会让账户2 的标签页拿到账户1
+    // 的 cookies —— 那正是本条用户报障，且属于「同一账号不得同时桥接」那条纪律
+    // 想防的同一族事故（两个登录态在同一页面上互相覆盖）。
     const ROOT_MOUNTED = { deepseek: true };
-    const siteBase = sid => (ROOT_MOUNTED[sid] ? relayBase + '/' : 'http://' + sid + '.localhost:' + RELAY_PORT + '/');
+    const siteBase = (sid, slot) => {
+      const s = String(slot || '').trim();
+      // 默认槽（空/`default`/`1`）逐字保持旧形状。
+      const isDefault = !s || s === 'default' || s === '1';
+      if (isDefault) return ROOT_MOUNTED[sid] ? relayBase + '/' : 'http://' + sid + '.localhost:' + RELAY_PORT + '/';
+      // 非默认槽：`<slot>--<siteId>`（分隔符 `--` 与服务端解析逐字对应）。
+      return 'http://' + s + '--' + sid + '.localhost:' + RELAY_PORT + '/';
+    };
     const icon = size => h(IconCodeOutline16, { size });
 
     // ---- 控制面调用 ----------------------------------------------------------
@@ -4461,12 +4487,62 @@ window.__ModuleLoader__.load({
       // 这与「新建终端」的 `TerminalGuide` 里那句 `const [open, setOpen] = useState(false)`
       // 是同一种写法。
       const [openId, setOpenId] = React.useState('');
+      /**
+       * 每个已登录账户的**缓存身份**由服务端在**读 DOM 的时刻**刷新，而不是靠前端轮询
+       * 去猜（0.19.47）。
+       *
+       * ## 为什么刷新必须挂在轮询上，而不是只挂在下拉展开上
+       *
+       * 用户 2026-09-28 原话：「其余所有已登录网站的用户名和头像一样触发缓存更新字段」。
+       * 只在下拉展开时刷有两个覆盖不到的情形，而它们恰好是最常见的：
+       *   · 用户**从不点开**下拉（单账号站点没有展开的必要），卡片永远停在站点名；
+       *   · **账户 2** 的站点在卡片上根本不会展开到——多账号时卡片按站点名走，
+       *     而账户 2 的真实昵称只能靠它自己那一行读到。
+       * 轮询本来就在每 8s 读一次 `/status`，顺路把身份探针发出去，三条界面落点
+       * （卡片标题、卡片左端头像、下拉每一行）就能各自拿到自己的真实值。
+       *
+       * ## 为什么只发「登录态已知为真」的账户
+       *
+       * `readAccountIdentity` 会**真的去读一次页面 DOM**（未登录时读到的是游客态元素，
+       * 读不出昵称）。对全部 10 站点 × 全部槽每 8s 各发一次，等于在没有额度收益的
+       * 情况下持续给每个站点加负载——而用户要的是「已登录的网站」。因此这里只挑
+       * `loggedIn === true` 的槽；未登录的槽等它登录之后自然进入这份名单。
+       *
+       * 失败一律吞掉（`.catch(()=>{})` 与 `!r.ok` 直接 return）：身份读不到只是一个
+       * 缺失的可选装饰，绝不能让目录面板报错或丢行。
+       */
+      const pollIdentity = (list) => {
+        for (const r of list) {
+          if (!r || r.loggedIn !== true) continue;
+          const acctKey = r.accountKey || r.siteId;
+          // 已经有真实昵称的槽**不重复探**：轮询是 8s 一次的常驻路径，反复读同一份
+          // 已知结果没有收益（用户手动改昵称的场景由下拉展开时那次强制刷新覆盖）。
+          if (r.accountName) continue;
+          apiSoft('account-identity', { ...slotOf(acctKey) }, 20000).then((res) => {
+            if (!res.ok || !res.data) return;
+            const name = res.data.name ? String(res.data.name) : null;
+            const avatarUrl = res.data.avatarUrl ? String(res.data.avatarUrl) : null;
+            if (!name && !avatarUrl) return;
+            setRows((prev) => (Array.isArray(prev) ? prev : []).map((row) => {
+              const key = row.accountKey || row.siteId;
+              if (key !== acctKey) return row;
+              return {
+                ...row,
+                accountName: name || row.accountName || null,
+                avatarUrl: avatarUrl || row.avatarUrl || null,
+              };
+            }));
+          }).catch(() => {});
+        }
+      };
       React.useEffect(() => {
         let alive = true;
         const load = () => api('status').then(s => {
           if (!alive) return;
-          setRows(Array.isArray(s?.driver?.sites) ? s.driver.sites : []);
+          const next = Array.isArray(s?.driver?.sites) ? s.driver.sites : [];
+          setRows(next);
           setError('');
+          pollIdentity(next);
         }).catch(e => { if (alive) setError(e.message); });
         load();
         const timer = setInterval(load, 8000);
@@ -4584,11 +4660,38 @@ window.__ModuleLoader__.load({
        * 为什么要刷新而不是只靠 8s 轮询：轮询读的是驱动**缓存**里的身份，而缓存只在
        * 登录/检测那两刻写过。用户在站点网页里**手动登录**之后，缓存仍是空的——
        * 点开下拉就是他能主动触发的一次刷新，刷不到就照旧回落槽名。
+       *
+       * ## 为什么结果必须写进 `rows`（0.19.47）
+       *
+       * 本函数原先只把 `account-identity` 发出去、`apiSoft(...).catch(()=>{})` 丢掉返回值，
+       * 于是这次刷新对界面**没有任何作用**：面板渲染的是 `/status` 那批 `rows`，而本轮
+       * 读到的昵称/头像两处都没落进去。用户看到的仍是「DeepSeek 网页版」+ 站点矢量图，
+       * 且要等到下一次 8s 轮询把服务端缓存读回来——而服务端那次刷新本身也不写缓存
+       * （`readAccountIdentity` 是只读探针），所以打开下拉永远换不来真实用户名。
+       * 这正是字段挑选表里注释警告的同一形状：读到了、中途丢掉、界面显示默认值。
+       *
+       * 因此：按 accountKey 把 name/avatarUrl **合并进 `rows`**，并保留
+       * `accountName` 的「不为空才算数」语义——服务端读不到时回的是 `null`，
+       * 那种情况下**绝不**覆盖（覆盖等于把已知的真实昵称抹回槽名）。
        */
       function refreshIdentities(accounts) {
         for (const a of accounts) {
           const acctKey = a.accountKey || a.siteId;
-          apiSoft('account-identity', { ...slotOf(acctKey) }, 20000).catch(() => {});
+          apiSoft('account-identity', { ...slotOf(acctKey) }, 20000).then((r) => {
+            if (!r.ok || !r.data) return;
+            const name = r.data.name ? String(r.data.name) : null;
+            const avatarUrl = r.data.avatarUrl ? String(r.data.avatarUrl) : null;
+            if (!name && !avatarUrl) return;
+            setRows((prev) => (Array.isArray(prev) ? prev : []).map((row) => {
+              const key = row.accountKey || row.siteId;
+              if (key !== acctKey) return row;
+              return {
+                ...row,
+                accountName: name || row.accountName || null,
+                avatarUrl: avatarUrl || row.avatarUrl || null,
+              };
+            }));
+          }).catch(() => {});
         }
       }
       return h('div', { className: 'hwb-catalog' },
@@ -4602,6 +4705,25 @@ window.__ModuleLoader__.load({
             // （宁可不显示触发器，也不显示一个内容未知的箭头）。
             const multi = accounts.length > 1;
             const expanded = openId === sid;
+            /**
+             * 身份取值：**只认抓到的真实值**，抓不到一律回落到既有默认。
+             *
+             * 用户 2026-09-28 原话：「右侧tab展开站点的：DeepSeek 网页版改为真实用户名！
+             * ……其余所有已登录网站的用户名和头像一样触发缓存更新字段」——即卡片上那行
+             * 字与左端那颗图都必须是他在站点网页里看到的昵称/头像，而不是站点名 + 矢量图。
+             *
+             * 为什么只对**单账号**站点取真实头像/昵称当卡片主身份：一个站点两个账号时，
+             * 卡片只能写下一个名字、画一颗头像，挑谁都是撒谎（另一个账号的用户从此在
+             * 卡片上消失）。此时卡片仍是站点身份，而**每个账号行各自显示自己的真实
+             * 昵称与头像**（见 items 的 acctName/acctIcon），真实值一个都没丢。
+             *
+             * 为什么回落是与改动前逐字一致的 `siteName(sid)` + 站点矢量图：没抓到身份时
+             * （刚重启、缓存为空、该站点本就未登录）必须长得和旧版一样——宁可显示站点名，
+             * 也不拿槽名（`deepseek (账户2)`）冒充用户名（本文件「不造假」纪律）。
+             */
+            const primary = accounts.length === 1 ? accounts[0] : null;
+            const title = (primary && primary.accountName) || siteName(sid);
+            const primaryAvatar = (primary && primary.avatarUrl) || null;
             // 主区：官方 `Button variant:'ghost'`——与「新建终端」同一个原语。
             // 自己写 <button> 会丢掉 ghost 的配色、按下态与焦点环，而「排版一样」
             // 最容易露馅的正是这些细节。
@@ -4610,9 +4732,17 @@ window.__ModuleLoader__.load({
               onClick: () => open(sid, ''),
             },
               h('span', { className: 'hwb-catalog-ico' + (hasBrandVector(sid) ? ' official' : '') },
+                // 真实头像优先；与下拉里的 acctIcon 同一纪律——跨域 CDN 拒热链时
+                // 藏掉 img 露出后面的矢量标记，**不造假**。
+                primaryAvatar
+                  ? h('img', {
+                    className: 'hwb-catalog-img', src: primaryAvatar, alt: '', loading: 'lazy',
+                    onError: (e) => { try { e.currentTarget.style.display = 'none'; } catch { /* 忽略 */ } },
+                  })
+                  : null,
                 h(SiteGlyph, { sid, size: 26 })),
               h('span', { className: 'hwb-site-text' },
-                h('span', { className: 'hwb-site-title' }, siteName(sid)),
+                h('span', { className: 'hwb-site-title' }, title),
                 // 说明行**只在多账号时出现**：官方 `TerminalGuide` 也是
                 // `description !== undefined && …` 才画第二行。单账号站点给一句
                 // 「1 个账号」是噪音，不如让它长得像左栏那些朴素行。
@@ -4836,10 +4966,15 @@ window.__ModuleLoader__.load({
           if (prev[sid] && !force) return prev;   // 已有存活 frame：直接复用，不重载
           // 子域形态：站点在根路径（pathname 与真实站点一致）。强制重载用一个
           // 站点不认识的查询参数绕开缓存——不动 pathname，SPA 路由不受影响。
-          const src = siteBase(sid) + (force ? '?__wc_reload=' + Date.now() : '');
+          // 槽维度（0.19.46）：非默认槽用带槽的主机名，否则账户2 的 iframe 会
+          // 加载默认槽的登录态（用户报障原文见 siteBase 的注释）。
+          // 取 `accountSlot`（活状态，会随二级菜单切号而变化）而不是 `controlledSlot`
+          // （只是初值/受控入参）——否则在同一个标签里切换到账户2 时，src 仍停在
+          // 账户1 的源上，用户看到的又是「选了账户2、界面还是账户1」。
+          const src = siteBase(sid, accountSlot) + (force ? '?__wc_reload=' + Date.now() : '');
           return { ...prev, [sid]: { src, ready: false, status: null } };
         });
-      }, [browserSrc]);
+      }, [browserSrc, accountSlot]);
       React.useEffect(() => {
         let alive = true;
         setConnectError('');
@@ -5464,6 +5599,10 @@ window.__ModuleLoader__.load({
         // 在**同一列宽**里对齐——两种来源混排时，列宽不齐比图标不精致更显眼。
         ".hwb-acct-img{width:16px;height:16px;border-radius:50%;object-fit:cover;flex:none}",
         ".hwb-acct-glyph{display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;flex:none}",
+        // 卡片左端那颗真实头像（0.19.47）：26px 与 `SiteGlyph` 同尺寸、同圆框，
+        // 于是「真实头像」与「站点矢量标记」在同一个槽位里逐像素重合——抓不到头像
+        // 时回落到矢量图，卡片宽度与标题起始位置不会跳动。
+        ".hwb-catalog-img{width:26px;height:26px;border-radius:50%;object-fit:cover;flex:none}",
         // `.hwb-site-login`（0.19.0 单账号站的「登录」按钮）随本轮统一成下拉而删除：
         // 它的落点已被下拉底部的「新账号」承担，留着就是没有挂点的死规则。
         // ---- 站点下拉菜单样式：**随 SiteMenu 一起删除**（0.16.35）------------

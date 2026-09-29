@@ -8,8 +8,30 @@
 // 网页改版核对入口：`pnpm doctor`（test-mock/real-verify.mjs）。
 
 import { DEFAULT_SLOT, normalizeSlot, parseModelId, formatModelId, accountLabel } from './accounts.js';
+import { thinkEffortFor } from './think-effort.js';
 
 const site = (s) => Object.freeze(s);
+
+/**
+ * 把 think-effort.js 的站点声明摊进站点对象（`efforts` / `effortControl` 两个字段）。
+ *
+ * 为什么要有这个包装、而不是直接在站点里抄一份等级表：等级 id 是**网页菜单里的逐字文本**
+ * （驱动按文本点），抄第二份必然在下次网页改版时漂移——本仓库的「工具协议只有一处定义」
+ * 是同一类约束。因此声明只有 think-effort.js 一份，这里只做摊平。
+ *
+ * 摊平而不是嵌套 `effort: {...}`：驱动与控制面读 `site.effortControl` 时不必知道本模块的
+ * 内部形状（与 `st.captchaSelector` / `st.answerSelector` 这些声明位保持一致）。
+ *
+ * @param {object} s 站点声明（`models` 之后调用）
+ * @returns {object} 冻结后的站点对象（含 efforts / effortControl，未声明等级的站点两者都无）
+ */
+const withEffort = (s) => {
+  const def = thinkEffortFor(s.id);
+  return site({
+    ...s,
+    ...(def ? { efforts: def.efforts, ...(def.effortControl ? { effortControl: def.effortControl } : {}) } : {}),
+  });
+};
 
 /**
  * 网页会话 URL 契约的三态（C-2）。
@@ -138,7 +160,7 @@ export function conversationUrlFor(siteId, origin, sessionId) {
  */
 const GLM_CONTEXT_WINDOW = 1_000_000;
 
-export const DEEPSEEK = site({
+export const DEEPSEEK = withEffort({
   id: 'deepseek', name: 'DeepSeek 网页版', origin: 'https://chat.deepseek.com',
   // **必须挂在中继根上，不能用自己的子域**（真机 2026-09-13）：DeepSeek 前端
   // 会校验宿主名，`http://deepseek.localhost:8931/` 触发
@@ -177,7 +199,7 @@ export const DEEPSEEK = site({
   ],
 });
 
-export const GLM = site({
+export const GLM = withEffort({
   id: 'glm', name: '智谱清言 (GLM)', origin: 'https://chatglm.cn',
   // sdata.chatglm.cn 是埋点上报域：跨域被拒不影响功能，但会在控制台刷
   // 一片 CORS 错误（真机 52 条）。纳入同源转发后干净且仍能上报。
@@ -276,7 +298,7 @@ export const GLM = site({
   ],
 });
 
-export const CHATGPT = site({
+export const CHATGPT = withEffort({
   id: 'chatgpt', name: 'ChatGPT 网页版', origin: 'https://chatgpt.com',
   completionPaths: ['/backend-api/conversation'],
   input: '#prompt-textarea, textarea[data-id], textarea',
@@ -292,7 +314,7 @@ export const CHATGPT = site({
   ],
 });
 
-export const KIMI = site({
+export const KIMI = withEffort({
   // 2026-09-11 实测：kimi.moonshot.cn 已只剩 302 → https://www.kimi.com/，
   // 镜像按旧域名取页会拿到空跳转壳，右侧栏打不开。改用真实站点。
   id: 'kimi', name: 'Kimi (月之暗面)', origin: 'https://www.kimi.com',
@@ -358,7 +380,13 @@ export const KIMI = site({
   },
   models: [
     { id: 'k3', name: 'K3', labels: ['K3'], context: 1_000_000, acceptsImages: true },
-    { id: 'k3-cluster', name: 'K3 集群', labels: ['K3 集群'], context: 1_000_000 },
+    // 2026-09-28 真机：菜单第三行是 **K2.8 Preview**（它的模型行读作「快速」是因为
+    // 当前档位徽章与名字同字，见 think-effort.js 的 kimi 条目注释）。
+    // 同一次读数里 **K3 集群 已从菜单消失**——网页侧把它挪进了「+ 号面板」
+    //（菜单顶部横幅原文：「集群功能已移动至+号面板中」），因此模型表**真删**
+    // `k3-cluster`：留着它就是一行点了会 option-not-in-list 的死条目。
+    // 历史 id `kimi:k3-cluster` / `k3-cluster` 仍由 ALIASES 收敛到 K3（旧会话不断链）。
+    { id: 'k2.8-preview', name: 'K2.8 Preview', labels: ['K2.8 Preview'], context: 1_000_000, acceptsImages: true },
     { id: 'quick', name: '快速', labels: ['快速'], context: 1_000_000 },
     // ⚠ 0.19.43 起**真删** auto（原显示名「Kimi」）。理由与 GLM 逐字同构：
     // `modelPicker` 已声明，网页真实档位是 快速 / K3 / K3 集群 三条，auto 是桥自己
@@ -366,7 +394,7 @@ export const KIMI = site({
   ],
 });
 
-export const QWEN = site({
+export const QWEN = withEffort({
   id: 'qwen', name: '通义千问 (Qwen)', origin: 'https://chat.qwen.ai',
   staticOrigins: ['https://g.alicdn.com', 'https://img.alicdn.com', 'https://assets.alicdn.com'],
   // 浏览器端为 OpenAI 兼容 SSE。2026-09-12 真机：流端点已迁到
@@ -393,7 +421,7 @@ export const QWEN = site({
   ],
 });
 
-export const DOUBAO = site({
+export const DOUBAO = withEffort({
   id: 'doubao', name: '豆包', origin: 'https://www.doubao.com',
   completionPaths: ['/samantha/chat/completion'],
   // 2026-09-13 真机校准：豆包输入框是 tiptap/ProseMirror 的 contenteditable
@@ -409,18 +437,19 @@ export const DOUBAO = site({
     ok: '[class*="avatar"], .user-avatar, img[class*="avatar"]',
   },
   // 模式选择契约 —— 真机 dump（2026-09-13，test-mock/out/doubao-mode-*.json）：
-  //   豆包没有下拉式模型选择器；它的「模型」是**对话 / 工作**两个模式，
-  //   常驻在输入框上方的一个**分段控件**里：
+  //   豆包的「对话 / 工作」是常驻在输入框附近的**分段控件**（不是弹层）：
   //     容器 <div class="relative flex h-54 items-center justify-center rounded-full p-[3px] bg-dbx-fill-trans-20 mt-20">
   //       选项 <button class="… w-160 … text-dbx-text-primary">  <span class="truncate">对话</span>
   //            <button class="… w-160 … text-dbx-text-secondary"><span class="truncate">工作</span>
   //
-  // 与弹层式站点的两点根本不同（model-picker 用 segmented 开关区分）：
-  //   ① **没有触发按钮**：选项本身就常驻页面，点「触发」等于先把模式切走，
-  //      因此 segmented 契约**故意不声明 trigger**。
-  //   ② **没有 aria-selected**：选中态只体现在 class 上——
-  //      选中 = text-dbx-text-primary，未选 = text-dbx-text-secondary，
-  //      所以回读用 selectedStateClass / unselectedStateClass。
+  // ⚠ 2026-09-28 更正一条**曾经写错的事实**：本注释原先写着「豆包没有下拉式模型选择器」。
+  // 真机读数（`test-mock/out/think-control-doubao-2026-09-28T10-36-23.json`）证明它有，
+  // 而且是**两个独立的控件**：
+  //   · 分段控件 「对话 / 工作」                     —— 本 modelPicker 契约管它；
+  //   · 模型下拉 `[data-testid="chat_input_action_model"]` 显示「豆包 快速」/ 点开是
+  //     「豆包 快速」「豆包 2.1 Turbo专家」两条      —— 用户原话里的「左下角有模型和
+  //     思考等级选择」，走 think-effort.js 的 doubao 条目（档位 = 徽章 快速/专家）。
+  // 两者是**两个契约、两条链**，不共用选择器，也不互相覆盖。
   modelPicker: {
     segmented: true,
     option: 'div.bg-dbx-fill-trans-20.rounded-full > button, button.w-160',
@@ -430,6 +459,7 @@ export const DOUBAO = site({
   },
   models: [
     // 本地默认：**对话**（豆包标准对话模式）。放在最前即首选。
+    // 具体用到哪一档模型/档位由 think-effort.js 的 doubao 条目下发（快速 / 专家）。
     { id: 'chat', name: '对话', labels: ['对话'], context: 256_000, acceptsImages: true },
     { id: 'work', name: '工作', labels: ['工作'], context: 256_000, acceptsImages: true },
     // ⚠ 0.19.43 起**真删** auto（原显示名「豆包」）。理由与 GLM/Kimi 同构：
@@ -438,7 +468,7 @@ export const DOUBAO = site({
   ],
 });
 
-export const GROK = site({
+export const GROK = withEffort({
   id: 'grok', name: 'Grok (xAI)', origin: 'https://grok.com',
   completionPaths: ['/rest/app-chat/conversations/new'],
   input: 'textarea[aria-label], textarea',
@@ -454,7 +484,7 @@ export const GROK = site({
   ],
 });
 
-export const CLAUDE = site({
+export const CLAUDE = withEffort({
   id: 'claude', name: 'Claude (Anthropic)', origin: 'https://claude.ai',
   completionPaths: ['/api/append_message'],
   input: 'div[contenteditable="true"], textarea',
@@ -473,7 +503,7 @@ export const CLAUDE = site({
 // z.ai（智谱 GLM 的海外站点）：与 chatglm.cn 同源模型、不同域与不同前端。
 // 浏览器端为 OpenAI 兼容 SSE（/api/chat/completions），故复用 'openai-sse'
 // 解码器；选择器用「特征选择器」而不是站点版本 class（改版频繁，特征更稳）。
-export const ZAI = site({
+export const ZAI = withEffort({
   id: 'zai', name: 'Z.ai', origin: 'https://chat.z.ai',
   // 选择器里显示的站点键。默认等于 id，只有这里不同：站点的真实身份就是
   // 「z.ai」这个域名（用户要的正是「一眼看出是哪个网站」），而 `zai` 只是
@@ -622,7 +652,7 @@ export const ZAI = site({
 });
 
 // Gemini 的 RPC 流不是稳定契约 — 用 DOM 终态抓取兜底（decoder: 'dom'）。
-export const GEMINI = site({
+export const GEMINI = withEffort({
   id: 'gemini', name: 'Gemini (Google)', origin: 'https://gemini.google.com',
   completionPaths: [],
   input: 'div.ql-editor[contenteditable="true"], div.ql-editor, rich-textarea textarea, textarea, div[contenteditable="true"]',
@@ -870,7 +900,12 @@ const ALIASES = Object.freeze({
   'z.ai-glm5.3': 'zai:glm-5.3', 'z.ai-glm5.3-flash': 'zai:glm-5.3-flash',
   'zai-glm-5.3': 'zai:glm-5.3', 'zai-glm-5.3-flash': 'zai:glm-5.3-flash',
   'glm-zai-5.3': 'zai:glm-5.3',
-  kimi: 'kimi:k3', 'kimi:auto': 'kimi:k3', 'kimi-k3': 'kimi:k3', k3: 'kimi:k3', 'k3-cluster': 'kimi:k3-cluster',
+  kimi: 'kimi:k3', 'kimi:auto': 'kimi:k3', 'kimi-k3': 'kimi:k3', k3: 'kimi:k3',
+  // K3 集群（2026-09-28 起从模型表真删，见 KIMI.models 注释）：历史值必须仍解析得开，
+  // 收敛到同一站点的旗舰档 K3——留着它们指向一个不存在的 modelId 会让旧会话直接
+  // 「不支持的网页模型」而断链（与 `glm:auto` 那条同一条纪律）。
+  'k3-cluster': 'kimi:k3', 'kimi:k3-cluster': 'kimi:k3',
+  'kimi-k2.8-preview': 'kimi:k2.8-preview', 'k2.8-preview': 'kimi:k2.8-preview',
   // qwen / doubao / grok / claude / gemini 的 auto **保持不动**：桥没有它们的
   // modelPicker 契约，切不动网页模型，auto 是那里唯一可用的条目（用户 2026-09-28：
   //「如果你不知道的话，就先空着不用改」）。doubao 是例外的一半：它有 segmented
@@ -932,6 +967,28 @@ export function resolveWebModel(value = DEFAULT_MODEL_ID) {
     const st = SITES.find((s) => s.id === withSlot.siteId);
     const m = st?.models.find((m) => m.id === withSlot.modelId);
     if (st && m) return resolved(st, m, withSlot.slot);
+    // ## 带槽的**兼容别名**（0.19.49 修的真 bug）
+    //
+    // `ALIASES` 的键是「站点:模型」形状（`'zai:auto'`、`'kimi:auto'`…），而上面那次查表
+    // 发生在**槽解析之前**、用的是整串原文：原文是 `zai@work:auto` 时表里当然没有这个键，
+    // 于是走到这里、`models.find(id === 'auto')` 也找不到（auto 已从模型表真删）⇒ 抛错。
+    //
+    // 真机症状：单账户用户写 `zai:auto` 正常（原文直接命中 ALIASES），
+    // **一旦启用第二个账户**（id 变成 `zai@work:auto`）就报「不支持的网页模型」——
+    // 而这两者本该等价。历史 settings 与 `subagent-model-selection.allowedModels` 里
+    // 写的都是不带槽的形式，用户在面板上给模型挑一个账户后就撞上它。
+    //
+    // 修法：把「站点:模型」这一段单独再查一次别名表，命中后按**原本的槽**解析
+    //（槽信息绝不能因为别名而丢失，否则「账户2」会静默写回默认槽的登录态）。
+    const viaAlias = ALIASES[withSlot.siteId + ':' + withSlot.modelId];
+    if (viaAlias) {
+      const q2 = parseModelId(viaAlias);
+      if (q2) {
+        const st2 = SITES.find((s) => s.id === q2.siteId);
+        const m2 = st2?.models.find((m) => m.id === q2.modelId);
+        if (st2 && m2) return resolved(st2, m2, withSlot.slot);
+      }
+    }
     throw new Error('不支持的网页模型：' + id);
   }
   if (qualified.includes(':')) {

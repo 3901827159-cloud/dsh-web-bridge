@@ -138,13 +138,23 @@ test('两个槽的 profileDir 必须不同（否则第二个号覆盖第一个�
 });
 
 test('formatModelId 与 resolveWebModel 往返：槽信息不丢也不串', () => {
-  for (const [site, slot, mid] of [['glm', DEFAULT_SLOT, 'glm-5.3'], ['glm', '2', 'glm-5.3'], ['zai', 'work', 'auto']]) {
+  // ⚠ 0.19.43 起 `auto` 已从 glm / kimi / doubao / zai 的**模型表**里真删
+  //（桥自己发明的「不切换」档，不是网页真实档位），因此往返用例必须用**目录里真实存在**
+  // 的模型 id —— 拿 `zai@work:auto` 当期望值会红，而它红的原因是「站点没有 auto 档」，
+  // 不是「槽解析坏了」（两者要分开，否则这条护栏会掩盖真正的槽缺陷）。
+  for (const [site, slot, mid] of [['glm', DEFAULT_SLOT, 'glm-5.3'], ['glm', '2', 'glm-5.3'], ['zai', 'work', 'glm-5.3']]) {
     const id = formatModelId(site, slot, mid);
     const r = resolveWebModel(id);
     assert.equal(r.siteId, site);
     assert.equal(r.slot, slot);
     assert.equal(r.id, mid);
   }
+  // 历史 id 里的 `auto` 仍必须可解析（旧 settings / allowedModels 里可能还写着它），
+  // 且**槽信息同样不能丢** —— 这一条才是「往返」在兼容别名上的延伸。
+  const legacy = resolveWebModel(formatModelId('zai', 'work', 'auto'));
+  assert.equal(legacy.siteId, 'zai');
+  assert.equal(legacy.slot, 'work', '兼容别名不得把槽信息丢掉（否则第二个账户会写到默认槽）');
+  assert.equal(legacy.id, 'glm-5.3', 'zai:auto 收敛到本站点旗舰档');
 });
 
 // ---------------------------------------------------------------- 槽级发送间隔接缝

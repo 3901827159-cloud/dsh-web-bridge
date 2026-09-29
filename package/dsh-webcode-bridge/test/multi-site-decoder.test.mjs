@@ -18,15 +18,33 @@ test('listAllModels：全站点目录含 DeepSeek/GLM/ChatGPT/Kimi/Qwen 与兼�
   const ids = new Set(all.map((m) => m.id));
   // 三合一后 DeepSeek 只有唯一模型（旧 id 仍可解析为别名，但不再出现在目录里）
   assert.ok(ids.has('deepseek:deepseek') && !ids.has('deepseek:flash') && !ids.has('deepseek:vision'));
-  assert.ok(ids.has('glm:auto') && ids.has('chatgpt:auto') && ids.has('kimi:auto'));
-  assert.ok(ids.has('qwen:auto') && ids.has('deepseek-web'));
+  // ⚠ 0.19.46 更正：本行原先断言 `glm:auto` / `kimi:auto` / `zai:auto` 必须在**目录**里，
+  // 但那三个条目已在 **0.19.43 按用户指令真删**（原话：「不需要这个自动吧？……提供
+  // 网站提供的模型列表就行」；划线判据是「桥有没有该站点的 modelPicker 契约」）。
+  // 因此「目录里没有 auto」才是**现行设计**，旧断言只会常年发红、把真回归淹掉。
+  //
+  // 但删表 ≠ 删解析：历史设置值（真机 settings.yaml 的
+  // subagent-model-selection.allowedModels 里写着 `glm:auto` / `kimi:auto` / `doubao:auto`）
+  // 必须仍解析得开，否则旧会话当场 session/model-unavailable。
+  // 所以这里**两个方向都钉**：目录里没有、解析仍然成功。
+  assert.ok(
+    !ids.has('glm:auto') && !ids.has('kimi:auto') && !ids.has('zai:auto') && !ids.has('doubao:auto'),
+    '四个站点的 auto 已在 0.19.43 真删，不得再出现在模型目录里',
+  );
+  // 没有 modelPicker 契约的站点**保持不动**（删了 models.length===0 会让 DSH
+  // 目录构建器整组不生成、下拉凭空少几组）——这是 0.19.43 的另一半判据。
+  assert.ok(ids.has('chatgpt:auto') && ids.has('qwen:auto'),
+    'chatgpt/qwen 没有 modelPicker 契约 ⇒ auto 必须保留（否则整组不生成）');
+  assert.ok(ids.has('deepseek-web'));
   // z.ai（GLM 海外站点）已入目录，且别名可解析
-  assert.ok(ids.has('zai:auto'), '目录应包含 zai:auto');
+  assert.ok(ids.has('zai:glm-5.3'), '目录应包含 zai 的真实档位');
   assert.equal(resolveWebModel('zai').siteId, 'zai');
   assert.equal(resolveWebModel('z-ai').siteId, 'zai');
+  // 历史别名 `glm:auto` 必须仍解析得开，且**落到本站点的旗舰档**
+  //（不是 'auto'——桥自造的 auto 档已经不存在了，别名收敛到真实档位）。
   const m = resolveWebModel('glm:auto');
   assert.equal(m.siteId, 'glm');
-  assert.equal(m.id, 'auto');
+  assert.equal(m.id, 'glm-5.3', 'glm:auto 别名应收敛到 glm-5.3（0.19.43 起）');
 });
 
 test('z.ai：站点契约（origin / SSE 端点 / 解码器 / 静态域）', () => {

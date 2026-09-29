@@ -75,10 +75,16 @@ export function zeroProgressDecision(v) {
  * `zeroProgressDecision → thinkingOnlyNotice` 交回提示正文让任务继续；
  * 后者是识图轮的正常样子。只有正文/思考/图片**全空**才是真的空回复。
  *
- * 报错必须自带现场（收束原因 / 流首段）——「报错不带取证」会让下一次归因从头再来。
+ * 报错必须自带现场（收束原因 / 流首段 / 流尾段）——「报错不带取证」会让下一次归因从头再来。
+ *
+ * **0.19.45 补「流尾段」**：只带首段是一句**按构造必错**的取证——真机 2026-09-28 GLM
+ * 那轮报错为「流首段: …"parts":[],"status":"init"…」，而 `status:"init"` + `parts:[]`
+ * 是 GLM **每一轮**的正常开帧，与这一轮为什么空毫无关系；真因（限流原话 / 审核提示 /
+ * `last_error` 字段）都在**后面的帧**里。首段留着（它仍能证明「流确实开过」），
+ * 但必须再给尾段，否则读者会像那次事故一样从一句恒真的读数里推断出错误结论。
  *
  * @param {{text?: string, thinking?: string, images?: Array}} result 驱动单轮结果
- * @param {{lastEndReason?: string, rawHead?: string}} [scene] 收束现场
+ * @param {{lastEndReason?: string, rawHead?: string, rawTail?: string}} [scene] 收束现场
  * @returns {Error|null} 全空时返回带现场的 Error；否则 null（思考-only 交回上层处理）
  */
 export function emptyWebResponseError(result, scene = {}) {
@@ -89,5 +95,10 @@ export function emptyWebResponseError(result, scene = {}) {
   const bits = [];
   if (scene?.lastEndReason) bits.push(`收束原因 ${scene.lastEndReason}`);
   const head = scene?.rawHead ? ' | 流首段: ' + String(scene.rawHead).slice(0, 200) : '';
-  return new Error('empty response from web AI' + (bits.length ? `（${bits.join('，')}）` : '') + head);
+  // 尾段与首段相同就省略（短流两者会重合），不印两遍同样的东西。
+  const tailRaw = scene?.rawTail ? String(scene.rawTail).slice(-200) : '';
+  const tail = tailRaw && tailRaw !== String(scene?.rawHead || '').slice(0, 200)
+    ? ' | 流尾段: ' + tailRaw
+    : '';
+  return new Error('empty response from web AI' + (bits.length ? `（${bits.join('，')}）` : '') + head + tail);
 }

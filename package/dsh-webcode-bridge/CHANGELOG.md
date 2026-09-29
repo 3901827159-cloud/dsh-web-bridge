@@ -5,6 +5,447 @@ All notable changes to this package. Newest first.
 The canonical, in-progress record of what was changed and why lives in [doc/progress.md](../../doc/progress.md);
 this file is the package-facing release history.
 
+## 0.19.49
+
+**修：思考等级「回读读不到档位」——5 个站点里 4 个各自有独立的回读缺陷；外加一个带槽的兼容别名真 bug。**
+
+用户原话（2026-09-28）：
+> 本轮运行失败THINK_EFFORT_UI_CHANGED: 思考等级「标准」没有生效（站点 kimi）— 回读：读不到档位
+> （判定 no-readback）。本轮已中止，避免把「用户选了高档、网页仍是低档」当成成功。
+> 其余都是类似原因
+
+**「其余都是类似原因」这句话是对的。** 取证方法与逐站点真因见
+[`doc/research/2026-09-28-think-effort-readback.md`](../../doc/research/2026-09-28-think-effort-readback.md)。
+
+### ① kimi：把**模型名**当成了锚点（用户报障的那一条）
+
+真机读数（只读 CDP，线上已登录页）：触发控件 `div.current-model[data-testid="model-select-trigger"]`
+的文本是 **`K3 标准`** —— `K3` 是**当前模型名**、`标准` 才是思考档；模型菜单里可选的模型是
+`K3` / `K2.8 Preview` / **`快速`** 三条。
+
+0.19.48 声明的 `triggerText: '快速'` 因此是**把模型名当锚点**：只有当用户恰好选「快速」这个模型时
+触发文本才是 `快速 进阶`（锚点命中），换成 `K3` 后是 `K3 标准` ⇒ 锚点不在文本里 ⇒
+`FIND_EFFORT_CONTROL` 的 token 匹配池为空 ⇒ 回读 `null` ⇒ **每一轮都抛 `THINK_EFFORT_UI_CHANGED`**。
+
+修法：删掉 `triggerText`（不再靠文本定位），改用 `triggerSelectors` 的 testid；新增
+**`readbackSelector: '.current-effort'`** —— 真机实测该节点的文本**恰好是档位**（`标准`），
+不含模型名。同时去掉 `openVia`（它与触发控件是同一个节点，旧计划会点两次、第二次把刚打开的菜单关掉）。
+
+### ② glm：模型名与档位**无缝拼接**，词级判据切不出来
+
+真机读数：`.think-mode-trigger` 的文本是 **`GLM-Flash极致`**（对比另一模型下是 `GLM-5.3 极致`，**有**空格）。
+`'GLM-Flash极致'.split(' ')` 切不出 `极致` ⇒ 词级兜底失效 ⇒ 恒 `unknown`。
+修法：`confirmEffort` 新增**后缀判据**（文本恰好等于 / 以某档位结尾，长者优先），并补 `triggerSelectors` + `readbackSelector`。
+
+### ③ qwen：触发文本**就是**档位 id，锚点语义自相矛盾
+
+真机读数：`.qwen-thinking-selector` 文本是 `自动`（切档后 `思考`）。0.19.48 声明
+`triggerText: '自动'`，而 `自动` **同时是一个档位 id** ⇒ 剥离函数返回 null、词级兜底又被
+「声明了锚点」关掉 ⇒ 恒 `unknown`。修法：删 `triggerText`，改选择器定位 + `readbackSelector`。
+
+### ④ zai / doubao：本轮**未发现**缺陷
+
+zai 的 `triggerText: '深度思考'` 是**真的**固定前缀（pill 文本 `深度思考 最高`），锚点在文本里；
+用真机形状在当前代码上跑 `applyEffort`，低/高/最高三档全部 `applied=true` 且回读正确。
+doubao 走 `readback: 'aria-checked'`（弹层里被 checked 的那条），本就不依赖触发文本。
+
+### ⑤ 顺带修掉一个真 bug：带槽的**兼容别名**解析不了
+
+`resolveWebModel` 的别名查表发生在**槽解析之前**、用的是整串原文。于是单账户写 `zai:auto` 正常，
+**一旦启用第二个账户**（id 变成 `zai@work:auto`）就报「不支持的网页模型」—— 而这两者本该等价。
+历史 settings 与 `subagent-model-selection.allowedModels` 里写的都是不带槽的形式，
+用户在面板上给模型挑一个账户后就撞上它。修法：把「站点:模型」这一段单独再查一次别名表，
+命中后**按原本的槽**解析（槽信息绝不因别名而丢失，否则「账户2」会静默写回默认槽的登录态）。
+
+### ⑥ 判据变更（有意的行为放宽，代价写清）
+
+`confirmEffort` 取「当前档位」新增两种真机形态：**整段即档位**（qwen `自动`）与
+**无分隔符拼接**（glm `GLM-Flash极致`）。放宽的只是「怎么取出档位」，**没有**放宽
+「取出后算不算命中」——「有没有读到别的档位」仍只按词判（`低 ⊂ 最高` 不会被误判），
+且**绝不**按「文本里含目标片段」判定（`进阶的快速响应` 仍诚实报 `unknown`）。
+理由：旧行为在这两种形态下返回 `unknown`，而调用方**无法补救**（整轮中止）；
+`mismatch` 至少会触发一次真实改档。
+
+### 护栏
+
+- `test/think-effort.test.mjs` 27 项（含新增的形态②③与「词中不算命中」）
+- `test/think-effort-realtext.test.mjs` **新增 5 项**：以**真机触发文本**为数据（逐条标出处与日期），
+  钉住「锚点必须在文本里」「回读节点必须读得出档位」「真机文本喂判据不许 unknown」
+  「kimi 锚点不许再写成模型名」「readbackSelector 接线」
+- `test/model-picker.test.mjs` / `test/accounts-integration.test.mjs`：跟上 0.19.43 的
+  `auto` 真删（补「历史 id 仍可解析且**槽信息不丢**」的断言）
+
+### 验收现况（2026-09-29 收口复跑，如实记）
+
+**绿的**：`ci-local --fast` **10/10 PASS**；受影响测试集逐个跑全绿
+（`think-effort` 27/27、`think-effort-realtext` 5/5、`model-picker` 7/7、
+`accounts-integration` 16/16、`multi-site-decoder` 28/28、`model-labels` 12/12，
+另 6 个文件 4–17 项不等）。
+
+**未取的**：**线上完整真实轮次仍未跑**。交付时没有任何浏览器在跑 ——
+五个站点的 `DevToolsActivePort` 都在而端口全部连接被拒，只读 CDP 这条路当时也走不通。
+**在拿到真实轮次读数之前，请不要把「kimi 不再抛 `THINK_EFFORT_UI_CHANGED`」当成已验证**；
+手测清单见 `doc/research/2026-09-28-think-effort-readback.md` §9。
+「验证需要人的环节没有提醒人手动过」这条已登记为长期问题 **#33**。
+
+## 0.19.48
+
+**加：思考等级（推理等级）真正下发到网页 —— DSH 模型选择器里多出「推理等级」一栏；豆包模型档位取证。**
+
+用户原话（2026-09-28）：
+> 1.现在的模型网页端，除了 deepseek 是只有深度思考开关没有思考等级开关，其他网站都有思考等级的分级你没有选择，写好 dsh 这里能主动选择，然后是 2.豆包不是只有对话和工作两个模式，左下角有模型和思考等级选择！请你都解决了！
+
+### ① 真因：DSH 的推理等级通道**桥根本没接**
+
+DSH 宿主本来就支持「每模型一套思考等级」：provider 适配器的 `resolveModel()` 返回
+`reasoning: { efforts, defaultEffort? }`，模型选择器就会多出「推理等级」一栏，选中值随
+`GenerateOptions.reasoningEffort` 回到适配器。桥此前**一个字都没声明** —— 于是所有站点在选择器里
+都是「没有等级可选」。**这不是网页端没有，是桥没接。**
+
+现在（`lib/think-effort.js` 是唯一真源）：
+
+| 站点 | 选择器里出现的档位 | 网页上是什么 |
+| --- | --- | --- |
+| Kimi | 标准 / 进阶 | 模型菜单里的「思考强度」子菜单 |
+| 智谱清言 | 快速 / 深度 / 极致 | 模型弹层里的「思考强度」子菜单 |
+| Z.ai | 低 / 高 / 最高 | 输入框旁「深度思考 最高」那枚 pill 的档位菜单 |
+| 通义千问 | 快速 / 思考 / 自动 | `qwen-thinking-selector` 的下拉 |
+| 豆包 | 快速 / 专家 | 模型下拉里的档位徽章（用户说的「左下角模型和思考等级」） |
+
+**刻意不声明 `defaultEffort`**：声明它等于桥替用户定档，而且宿主会把它 materialize 进每一轮请求。
+不声明时选择器显示「Default」，桥**一个字都不动网页**（与升级前逐字相同）；只有用户显式选了某一档，
+`reasoningEffort` 才出现并下发。
+
+**未取证的站点一律不声明**（chatgpt / gemini / grok / claude 本机网络不可达；deepseek 只有「深度思考」
+开关没有分级 —— 用户原话即此）。宁可下拉里少一栏，也不声明一个点不到的控件：那会让该站点每轮都报错。
+
+### ② 绝不静默降级
+
+`applyEffort()` 只有两种收场：设好并**回读确认**，或抛错（`THINK_EFFORT_UI_CHANGED` /
+`THINK_EFFORT_UNAVAILABLE` / `THINK_EFFORT_UNKNOWN`，各带可选项与当前读数）。
+没有「点了但没生效就照常发送」——用户选了「深度」而网页停在「快速」，那是一次静默降级，界面上看不出来。
+
+### ③ 豆包：模型 + 档位两个控件都取证了
+
+原先代码注释写着「豆包没有下拉式模型选择器」——**这是错的**。真机读数
+（`test-mock/out/think-control-doubao-*.json`）证明它有两个独立控件：常驻的「对话 / 工作」分段控件，
+以及 `[data-testid="chat_input_action_model"]` 模型下拉（两条：「豆包 快速」/「豆包 2.1 Turbo专家」）。
+用户说的「左下角有模型和思考等级选择」正是后者，现在它的档位（快速 / 专家）进了「推理等级」栏，
+模型模式仍由 `modelPicker.segmented` 契约承担。
+
+### ④ 真机取证（`test-mock/probe-think-effort-live.mjs`）
+
+不发任何消息，把真 Playwright 页面适配成 `applyEffort` 认的形状直接跑：
+
+* **z.ai**：低 / 高 / 最高 三档全部下发成功（连跑两轮 3/3 PASS），回读值为「深度思考 低 / 高 / 最高」；
+* **Kimi**：`进阶` 命中（幂等快路）；`标准` 那一档因该 profile 已掉登录（页面明写「登录以同步历史会话」）
+  无法取证 —— **如实记，不假装验过**。
+
+### ⑤ 取证路上修掉四个只看真机才现形的缺陷
+
+1. **页面函数不得引用模块作用域**：`FIND_EFFORT_CONTROL` 通过 `page.evaluate` 序列化后在浏览器里
+   单独执行，调模块级辅助函数 ⇒ 真机 `ReferenceError`（而 Node 单测全绿）。现在页面函数自包含。
+2. **`page.evaluate(fn, cfg)` 的参数转发**：cfg 写成第三个参数会被 Playwright 静默丢掉 ⇒ 每站都报
+   「找不到控件」。测试里为此单独立了一条护栏。
+3. **菜单里有一条与触发控件同名的常驻行**（z.ai 的「深度思考」总开关）：菜单一开，同 token 候选从 1 个
+   变 2 个，回读读到菜单行 ⇒ 三次下发全失败，而 pill 明明显示着档位。现在按「不在浮层里 + 有开合状态属性 +
+   词的构成」三层判据定位触发控件。
+4. **`menuOpen` 误判**：原先「页面上存在 `data-state=checked` 的元素」就算「菜单已开着」，于是 kimi 的
+   模型下拉触发钮让驱动跳过「点开触发」，档位菜单永远不开。现在要求那个 checked 元素**有浮层祖先**。
+
+### ⑥ 顺带修正的模型表（同一次真机读数）
+
+* **Kimi**：菜单里 **K3 集群已消失**（站点提示「集群功能已移动至+号面板中」）⇒ 模型表真删 `k3-cluster`，
+  新增 `k2.8-preview`；历史 id `kimi:k3-cluster` / `k3-cluster` 仍解析（收敛到 K3，旧会话不断链）。
+
+### ⑦ 护栏与闸门
+
+* 新增 `test/think-effort.test.mjs` **25 项**：声明层（哪些站点有读数、id 逐字、控件契约完整）、
+  计划层、判定层三态、执行层（用**假 DOM 跑真页面函数**，含「点可点元素而不是内层 span」「常驻 checked
+  不算菜单已开」两条真机教训的回放）、接线层（`resolveModel` 的 reasoning、驱动的 `applyEffort` 调用、
+  两条发送路径都带等级）。
+* `node scripts/lint-comments.mjs` 0 error 0 warn；`check-ledger` PASS（0.19.48 / 115 个测试文件）；
+  `check-repo-hygiene` PASS；`gen-index --check` PASS（48 个模块）。
+
+**如实交代**：本轮**只跑了受影响集**（新增 25/25、`model-labels` 12/12、`multi-site-decoder` 28/28），
+未跑全量；Kimi 的 `标准` 档、以及 chatgpt / gemini / grok / claude 四站的思考等级**没有真机读数**，
+缺口登记在 `doc/long-term-issues.md`。
+
+## 0.19.47
+
+**修：选了账户2 打开界面仍是账户1；模型行显示真实用户名；剥掉走错通道的 `</think>`。**
+
+用户原话（2026-09-28）：
+> 现在右侧选择了账户2打开界面仍是用户1：rsyhn的登录账户，deepseek
+> 现在为什么不能做到新增账户后在模型列表就更新为：deepseek-rsyhn(这是真实用户名)，deepseek-177...这样子？？？
+> 右侧tab展开站点的：DeepSeek 网页版改为真实用户名！然后是设置界面也需要同步有改为：图像+用户名
+> 其余所有已登录网站的用户名和头像一样触发缓存更新字段！
+
+### ① 账户2 打开界面仍是账户1 —— 镜像只按站点挂载
+
+`mirrorFor(siteId)` 的 Map key 只有 `siteId`，cookie 来源写死 `driverFor(sid)` ——
+传的是**裸 siteId**，按 `accounts.formatAccountKey` 的语义**恒等于默认槽**。账户2 的标签页
+因此命中默认槽那个 mirror 实例、回填账户1 的 cookies；**槽在 URL 里没有任何位置 ⇒
+服务端结构上无从区分**。客户端 `siteBase(sid)` 也只按 siteId 拼源，两端一起把两个号混成一条。
+
+修法是给**槽一个独立源**（沿用本项目「每个站点独立源」的既有立场）：
+
+| | 源 |
+| --- | --- |
+| 默认槽 | `http://<siteId>.localhost:8931/`（deepseek 仍走中继根）—— **逐字不变** |
+| 非默认槽 | `http://<slot>--<siteId>.localhost:8931/` |
+
+服务端按 **accountKey** 取驱动、mirror 实例 key 带槽；客户端用**活状态** `accountSlot`
+（只传初值会让标签内切号不生效）。护栏 `test/mirror-slot-isolation.test.mjs` **6 项**，
+已反向变异确认红灯基线。
+
+### ② 模型行显示真实用户名（`deepseek-rsyhn` 而不是 `(账户2)`）
+
+按槽读落盘的身份缓存，把真实用户名拼进显示名；**读不到就逐字退回 `(账户N)`**（不造假）；
+单账户站点不加后缀（0.14.6 逐字不变）。**模型 id 一个字都没动** ⇒ 历史会话、别名表、
+`subAgentSite` 全部不受影响。
+
+### ③ 右侧 tab / 设置页显示真实用户名+头像，且覆盖所有已登录站点
+
+两处真缺陷（均为本仓库记过的「后端算好了、中间层丢掉」同型）：`refreshIdentities` 的
+返回值被**直接丢弃**（面板渲染的 `rows` 从没拿到 name/avatarUrl，且服务端那次刷新不写缓存）；
+刷新**只挂在下拉展开上**（用户从不点开下拉的单账号站、以及账户2 都覆盖不到）。
+现按 accountKey 合并进 `rows`（服务端回 null 时**不覆盖**）、并挂到既有 8s 轮询上
+（只挑已登录且尚无昵称的槽）。
+
+### ④ 剥掉走错通道的 `</think>`（真机长跑探针顺带发现）
+
+GLM 把思考的**闭合标签**写进了 text 通道，正文出现 `` ``` … ```</think>两条输出分别是… ``。
+`GlmDecoder.emitText` 现在剥掉 `</think>` / `</thinking>` 闭合标签本身；刻意**不碰**开标签与
+其它标签。护栏 `test/glm-think-tag-leak.test.mjs` **4 项**，已反向变异确认红灯基线。
+
+### ⑤ 顺带修好两条常年假红
+
+`control-routes` 与 `multi-site-decoder` 长期各 1 条红——它们断言 `glm:auto` / `kimi:auto` /
+`zai:auto` 必须在目录里，而这三个条目已在 **0.19.43 按用户指令真删**。已改成**双向断言**：
+目录里没有 auto（chatgpt/qwen 因无 modelPicker 契约保留），历史别名仍解析得开。
+修后 **17/17** 与 **28/28**。两条红的既有性已用 `git stash` 对照证实。
+
+---
+
+## 0.19.46
+
+**修：右侧 tab 的账号昵称/头像「每次新开就没了」—— 身份读数落盘。**
+
+用户原话（2026-09-28）：
+> 1.请你查看现在右侧tab获取的deepseek账户名和图像不会缓存？每次新开？
+> 然后是展开后需要显示的是图像+账号名；而不是图像+Deepseek网页版，然后设置界面DeepSeek
+> 的账户与登录里面一样，其余网站你也搞好
+
+### 根因（两处，缺一不可）
+
+1. **`accountIdentity` 原先只是内存里的一个 `let`**（`lib/browser-driver.js`）。桥重启 /
+   懒驱动被回收 / profile 重建 ⇒ 名字与头像归零，面板回到 `displayName` ——
+   用户看到的就是「图像 + Deepseek网页版」。
+2. **`readAccountIdentity()` 在没有活页时直接返回全 null**。而重启后浏览器尚未 launch
+   ⇒ `page` 恰为 null ⇒ **缓存即使存在也被这一格抹掉**。这正是「每次新开就没了」。
+
+对照：`loggedIn` **早就落盘了**（`webcode-login-state.json`，其注释逐字写着
+「进程内存里的 loggedIn 重启即归零，没有这份缓存，面板每次重启都把所有站点打回『待检查』」）。
+账号身份是同一类装饰性读数，却漏了同一层。
+
+### 修法
+
+新增 `webcode-account-identity.json`（与登录态缓存同目录、同 `0o600` 纪律）：
+
+- 驱动构造时读回缓存（坏 JSON / 缺 `name` 与 `avatarUrl` 两者 ⇒ 当没有，绝不半信）；
+- `readAccountIdentity()` 读到就落盘（落盘失败不影响本次读数）；
+- **没有活页时回落缓存**，`basis` 如实标成 `'cache'`，**不冒充** `'site-probe'`；
+- 仍**不造假**：没有缓存又没有活页 ⇒ 依然是全 null，绝不拿槽名冒充昵称。
+
+### 护栏
+
+新增 `test/account-identity-cache.test.mjs` **7 项**，**已反向变异确认红灯基线**
+（退回「无活页即全 null」⇒ ②④ 变红）。
+
+### 附：「profile 被占用，直接复制新开不行吗？」
+
+**行，而且项目本来就这么设计 —— 用账户槽。** 已查实 GLM 的锁持有者 pid **确实活着**
+（`process.kill(pid,0)` 回 EPERM ⇒ 按设计一律按「活着」处理），是**合法持锁，不该删**。
+
+`POST account-add` 给 `glm` 的下一个空槽是 **`glm#2`**，其 profileDir 是
+**`sites/glm/2`** —— 另一个目录 ⇒ 另一把锁 ⇒ **与在跑的桥不冲突，可真并发**。
+效果等同「复制一份新开」，但由代码保证「一个槽一个目录一把锁」，不会出现两实例共用
+同一目录而互相杀浏览器 / 交错网页消息。
+
+⚠ 同一登录态在两处并发仍会撞同一网页会话；要真并发请在新槽里**登录另一个 GLM 账号**。
+风控纪律照 `CONTRIBUTING.md` §1.3（串行、每变体 ≤3 次、间隔 ≥20s）。
+
+---
+
+## 0.19.45
+
+**修：「空回复」报错的两处取证缺陷 —— 收束原因假陈述 + 只截流首段。**
+
+用户原话（2026-09-28）：
+> 本轮运行失败 empty response from web AI（收束原因 finished） | 流首段: data: {"id":"6ab9fff5a0610b1da4035fd6","conversation_id":"6ab9fe16a0610b1da4035b49","assistant_id":"65940acff94777010aa6b796","parts":[],"created_at":"2026-09-28 13:49:41","status":"init","last_error…
+
+> 你看下：现在是桥的问题吗？1.正文回复明显不对？2.调用一半我不返回了却提醒这样！
+
+### 先回答「是不是桥的问题」：这一轮不是桥把回复弄丢了，是网页侧返回了空流
+
+**主证据**（DSH 会话存档 `session-ee3a8650` 的 `session.v4.jsonl.zstd`，逐条解帧）：turn 1 正常
+`completed`；**turn 2 的前 9 个 assistant 步骤全部正常带 tool-call**（05:44:09 → 05:49:11），
+**第 10 步**才返回空流。同时 `/__webcode/status` 的 `relay.lastError` 显示 `durationMs: 8620`、
+`firstTokenMs: 7674`、`responseMs: 946` —— 网页侧开了流（`status:"init"`）但 `parts:[]` 随后结束。
+
+⇒ GLM 在失败前**连续正常工作了约 6 分钟 / 9 个工具步骤**。不是桥丢内容。
+
+**但这不代表桥没问题**：报错文本本身有两处真缺陷，它们正是让「这到底是不是桥的问题」
+**无法回答**的原因。
+
+### 缺陷 A：收束原因是一句假陈述
+
+旧实现兜底那格**无条件写 `'finished'`**：
+
+```js
+noteEndReason(lastFinished?.settled_by || (site.decoder === 'dom' ? 'dom-capture' : 'finished'));
+```
+
+它完全不看解码器给的是 `{complete:true}` 还是 `{complete:false, reason:'incomplete'}`。
+而 GLM 的解码器只在 `status === 'finish'` 帧才置 `done` —— 那一轮只有 `status:"init"`
+就断了，解码器给的是 `incomplete`。**报错于是把「网页没说完」写成了「网页正常收束」**，
+与本项目记过的同族缺陷（旧读数冒充本轮、`mid-stream` 被印成「已开流后的静默」）逐字同构。
+
+**修法**：判据与 `result.complete` **同源**——跑完整才写 `finished`，没收完整就如实带出
+解码器的 reason（`partial:incomplete` / `invalid_stream` / `rate_limited`…）。
+
+### 缺陷 B：流首段按构造必然误导
+
+`rawHead` 取的是流**最前面** 400 字符。而 `status:"init"` + `parts:[]` 是 GLM **每一轮**的
+正常开帧 —— 首段按构造永远是它，与「这一轮为什么空」毫无关系。真因（限流原话 / 审核提示 /
+`last_error`）都在**后面的帧**里，而报错只截首段前 200 字符。
+
+**修法**：新增 `rawTail`（保留**最后一帧**原文），随 `rawHead` 一起进现场；首尾重合时只印
+一段。两处使用点都改：`emptyWebResponseError` 与 `web capture ended incomplete`。
+
+**修前 / 修后对照**：
+
+```
+修前: empty response from web AI（收束原因 finished） | 流首段: …"parts":[],"status":"init"…
+修后: empty response from web AI（收束原因 partial:incomplete） | 流首段: … | 流尾段: …"message":"当前访问人数过多，请稍后重试"…
+```
+
+### 护栏
+
+新增 `test/zero-progress-scene.test.mjs` **5 项**（原因自洽 / 首尾段齐备 / 不编造尾段 /
+不重复印 / 有内容时不报错），**已反向变异确认红灯基线**（去掉尾段 ⇒ ② 变红）。
+
+### 关于「GLM 以前能跑几个小时」——现有数据不支持，如实交代
+
+查了全部工作区的 DSH 会话存档：GLM 驱动过的步骤共 **80** 个（占全部 30,464 步的 **0.26%**），
+出现于 47 个会话，**最长连续运行 0.79 小时（47 分钟）/ 8 步**。会话存档里**找不到任何
+「GLM 连续跑数小时」的运行**。
+
+`doc/progress.md` 里唯一的长跑记录是 **DeepSeek** 的 70 分钟真机长跑，而那份表的第 1 轮 GLM
+被明确标注为「GLM 误路由」——是事故，不是成功案例。
+
+**为什么无法验证「0.19.40 之前」**：回复取证日志的 `site=` 与 `v=` 字段是 **0.19.30** 才加的；
+更早的日志（`webcode-bridge-replies.log.1`，4276 条）没有站点字段，**无法归因到 GLM**；
+且 0.19.30–0.19.39 十版在 git 里是一次性合并提交，版本级不可分辨。⇒ 这是**未取证**，
+不是被推翻：现有材料既不能证实也不能否定这个记忆。
+
+---
+
+## 0.19.44
+
+**修：发送间隔等待被算进了无进展看门狗窗口 —— GLM「等近两分钟才开始思考」并撞
+`WEB_NO_PROGRESS` 的根因。**
+
+用户原话（2026-09-28）：「请你查看下现在的 chatglm 怎么回事：1.超长时间刚开始加载--40 前面版本
+我记得都是马上就接着思考而不是现在等近两分钟！才开始有 2. 本轮运行失败 WEB_NO_PROGRESS:
+网页侧超过 120s 没有任何新内容（页面在，上一轮收束原因（120s 前） finished，判定相位=网页还没
+开口且驱动不在忙（按常规窗口未宽限）） — 本轮已中止，可重试」+「这个是不是叠加1的问题引起的？」
+
+**答：是，第 2 条就是第 1 条引起的。**
+
+### 根因
+
+`relay.submit()` 一调用，适配器的看门狗计时器**当场开跑**；而 `relay.submit` 只是**入队**。
+从那一刻到消息真正落进网页 composer 之间，桥还要做几件**与网页生成无关**的事：
+
+| 段 | 真机读数 / 上限 | 依据 |
+| --- | --- | --- |
+| 发送间隔等待 | **30,000ms**（用户设 `sendGapMs: 30000` + `end-to-start`；旧版本是 10000 + `send-to-send`） | `~/.dsh/.../webcode-settings.json` 与其 `.bak-0140` |
+| 驱动懒创建 + `ensure()` 冷启动 | 数十秒量级 | GLM 非 deepseek 默认槽，创建点在 `attempt()` 里，**在间隔等待之后** |
+| 附件上传 | **真机 85k 实测 53s** | `uploadTextAttachment` 注释里的既有读数（GLM 走附件） |
+| 限流退避 / relay 排队 | 退避 ≤ 3 次、排队 ≤ `queueTimeoutMs` | 各自的上限 |
+
+真机一轮 GLM 实测 **97,993ms**（`webcode-send-state.json` 的 `send`/`end` 差），
+而看门狗只给 120s——30s 间隔 + 附件上传已吃掉大半，「网页还没开口」就撞线。
+
+**决定性实测**（注入式脚本驱动，窗口压到毫秒级，首字节延迟固定 800ms，只改间隔）：
+
+```
+修前: gap=0→OK(992ms)  gap=1000→OK(1819ms)  gap=2000→FAIL(2607ms)  gap≥3000→FAIL(2609ms)
+      且 gap≥3000 时**驱动调用次数只有 1**（这一轮根本没送到驱动）——看门狗是在「等间隔」期间判死的
+修后: gap=0/1000/2000/3000/5000/8000/20000 → **全部 OK**，驱动调用 2 次
+```
+
+### 为什么这是口径不一致，而不是「窗口太小」
+
+relay 自己的账本就写着「发送前等待发生在网页生成之前，**不计入** `durationMs`」
+（`lib/relay.js` 的 `sendWaitMs` 注释）。同一个量在一处被排除、在另一处被计入，才是真缺陷。
+**修法是让两处同口径，不是放宽窗口**——顺带一提：`idleFirstByteMultiplier` 只作用于
+「首字节之前 + 驱动忙」那一格，本次恰恰落在「驱动不忙」，调它对这个 case **完全无效**。
+
+### 改法
+
+executor 与适配器共享同一个 `meta` 对象，新增两个字段（**唯一真源**，只在 executor 写）：
+
+- `meta.delivering`（活标记）——进 executor 即为真，`markPreDeliver()` 时置假。
+  **必须有它**：30s 间隔等待进行到第 5 秒时 `preDeliverMs` 还没法定值，看门狗若只看那个
+  字段就会以为「从未投放」而在常规窗口开火（本修复第一版正是如此，实测 gap≥3000ms 仍失败）。
+- `meta.preDeliverMs`（累计时长）——投放前累计耗时，每次 `attempt()` 之前重算，
+  于是限流退避与压缩重试后 deadline 会相应后移。
+
+看门狗据此算**有效 deadline**：
+
+```
+投放中   → submitAtReal + preDeliverMs + windowMs     （窗口本身逐字不变）
+投放前   → Infinity（消息还没发出去，「网页不吐字节」尚无证据）
+从未投放 → submitAtReal + windowMs                    （既有安全线，逐字保留）
+```
+
+**投放前不是无限豁免**：`delivering` 只在 executor 的同步流程里为真，对应的每段等待各有上限，
+且新增 `PRE_DELIVER_CEILING_MS`（= `requestTimeoutMs`）硬界作双保险 ⇒ 不会「永不失败」。
+
+### 护栏与反向验证
+
+新增 `test/pre-deliver-window.test.mjs`（6 项）：
+
+- ① 间隔 0→20000ms（窗口的 8 倍）、首字节在窗口内 ⇒ **每档都必须成功**，且驱动调用 2 次；
+- ①b 间隔确实生效（墙钟差异 > 3s）——防「间隔根本没生效」的假绿；
+- ② 首字节超窗口 ⇒ 仍判死（**窗口不得被放大**）；
+- ②b 扣等待 ≠ 免判死（间隔 3000 + 首字节 4000 ⇒ 仍判死）；
+- ③ 驱动不忙 ⇒ 仍按常规窗口快报（**既有安全线不得削弱**）；
+- ④ 从未投放（驱动挂住）⇒ 必须按窗口判死，不得永不失败。
+
+**反向变异确认红灯基线**：把 `isPreDelivering` 变异成恒 `false`、`preDeliverMs` 变异成恒 `0`
+（= 退回修复前行为）后复跑，① 与 ①b **变红**、②③④ 保持绿 ⇒ 该护栏确实钉住本缺陷，
+不是空转。
+
+受影响集全绿（新增 6/6、`watchdog-first-byte` 9/9、`idle-window` 18/18、`timeout-order` 5/5、
+`capture-stall-rescue` 18/18、`stall-settle` 15/15、`session-continuity` 14/14、`tool-loop` 14/14、
+`wait-stats` 40/40、`settings-transport` 8/8、`prompt-transport` 12/12、`glm-attach-limit` 5/5、
+`captcha-gate` 5/5、`model-labels` 12/12）。`regression` 53/1 与 `control-routes` 16/1 各有 1 条红，
+**已用 `git show HEAD:` 换回旧版 `lib/index.js` 复跑确认两条在 HEAD 上逐字同样红 ⇒ 与本轮改动无关**。
+
+### 仍未修 / 未取证（如实登记，见 `doc/long-term-issues.md` §24-bis）
+
+- **GLM 走附件本身的几十秒还在**（`SITE_ATTACH_INLINE_LIMIT.glm = 8_000`）。本轮只把这段
+  从「看门狗判死」里摘出去，**没有**改变它的耗时。用户若仍觉得慢，下一步该做的是
+  §24 第 3 条那条一直挂着的**配对实验**：同一 prompt，`promptTransportBySite.glm` 的
+  `attach` / `inline` 各跑一次比首字节。
+- **GLM 首字节的直接读数至今无人量过**（与 §24 第 1 条同一个空白）。
+
+---
+
 ## 0.19.43
 
 **模型选择器：组名加 `webcode-` 前缀；四个有模型选择器契约的站点删掉自造的 `auto` 档。**

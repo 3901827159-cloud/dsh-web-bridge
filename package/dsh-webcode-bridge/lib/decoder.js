@@ -611,6 +611,37 @@
   class GlmDecoder extends JsonLinesDecoder {
     constructor(options) { super(options); this.seen = new Map(); this.glmSegBuf = ''; }
     /**
+     * 外发正文前剥掉**走错通道的思考闭合标签**（0.19.46）。
+     *
+     * ## 真机取证（2026-09-28，GLM 长跑探针 step 1，`%TEMP%\glm-longrun-EVIDENCE.txt`）
+     *
+     * 模型把思考的**闭合标签**写进了 text 通道，正文变成：
+     *
+     *     ```json
+     *     {"name": "pwsh", …}
+     *     ```</think>两条输出分别是"LQ524"和"STEP2-LQ524"。
+     *
+     * 即 `</think>` 夹在代码围栏与后续散文之间。用户报的「正文回复明显不对」
+     * 有一份就是它——**一个纯属传输残留的标签混进了交给用户的正文**。
+     *
+     * ## 为什么剥、以及为什么只剥这一族
+     *
+     * 思考内容本身走 `type === 'think'` 的独立通道（本解码器已正确处理），
+     * 因此 text 通道里的 `</think>` / `</thinking>` **不可能是正文的一部分**：
+     * 它是模型把两个通道的边界写串了。剥掉它不改变任何语义，只去掉噪声。
+     *
+     * 判据刻意收窄到**这几个闭合标签本身**，不做任何通用 HTML 清洗：
+     *   · 不碰 `<thinking>` 的**开**标签——那可能真的是散文里的引用（宁可留着也不误删）；
+     *   · 不碰其它任何标签（本项目对「放宽判据」有多次教训：宽判据会吃掉真内容）。
+     * 与 `agent-preset.js` 的关系：那边是**工具协议**的唯一真源，管的是调用围栏；
+     * 这里剥的是站点流自己的残留标签，不属于协议层，因此不构成第二套协议口径。
+     */
+    emitText(t) {
+      if (!t) return;
+      const cleaned = String(t).replace(/<\/think(?:ing)?>\s*/gi, '');
+      if (cleaned) super.emitText(cleaned);
+    }
+    /**
      * 一帧原始 SSE 文本 → 待解析的数据行。
      *
      * **必须由 push() 与 finish() 共用**：finish() 要把缓冲区里那半帧（缺 \n\n

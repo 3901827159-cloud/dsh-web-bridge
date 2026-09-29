@@ -42,6 +42,9 @@
 | 28 | **思维链退化重复（同段内容原地打转）**（2026-09-26 新登记，**已修 0.19.26**）——#22 的一个可判定子形态 | 中 | 否 | `lib/repeat-detect.js`、`lib/index.js`（`thinkingOnlyNotice`）、`test/repeat-detect.test.mjs` |
 | 29 | **Z.ai 自带风控闸门（验证通过前不发请求）**（2026-09-27 新登记）——**代码无法解决**，已改为提前如实报错 | 高 | 否 | `lib/providers.js`（`captchaSelector`）、`lib/browser-driver.js`（`WEB_CAPTCHA_REQUIRED`）、`test/captcha-gate.test.mjs` |
 | 30 | **Z.ai 真实流帧格式未录制**（2026-09-27 新登记）——9 个既有 decoder 都读不了它 | 高 | 否 | `lib/decoder.js`、`lib/providers.js`（ZAI 的 `decoder` 刻意未改） |
+| 31 | **四站的「思考等级」没有真机读数 ⇒ 刻意不声明**（2026-09-28 新登记）——kimi 的 `标准` 档亦未取证 | 中 | 否 | `lib/think-effort.js`、`lib/providers.js`、`test-mock/probe-think-control.mjs` |
+| 32 | **kimi 的登录态在 localStorage 而非 cookie ⇒ 「拷 profile 副本」式探针拿到的是游客页**（2026-09-28 新登记，**已给出替代取证法**）——会让真机读数与线上现场错位 | 中 | 否 | `lib/providers.js`（kimi 的 `storageState` 相关注释）、`test-mock/probe-think-effort-live.mjs`、`test-mock/probe-think-control.mjs` |
+| 33 | **需要人才能过的验收环节没有「提醒人手动过」的回路**（2026-09-29 新登记）——桥不会自己起浏览器、也不会在取不到读数时明确提示「请手动过一下 z.ai」 | 中 | 否 | `test-mock/probe-think-effort-live.mjs`、`test-mock/probe-think-control.mjs`、`doc/verify.md` |
 
 > **一览表完整性（2026-09-16 修正；2026-09-26 补上闸门）**：本表此前**漏登记 #19 与 #20**（正文有、表里没有）。
 > 这两条都是可机检的登记错误，而当时没有任何闸门覆盖「正文条目 ↔ 表格条目」的一致性。
@@ -1423,6 +1426,142 @@ if (!isCall) return;      // ← JSON 合法、只是没写 name ⇒ 静默丢�
 
 ---
 
+## 24-ter. **GLM 第 N 步返回空流（`empty response from web AI`）**（2026-09-28 定性；**未修主体，只修了报错取证**）
+
+用户原话（2026-09-28）：「本轮运行失败 empty response from web AI（收束原因 finished）| 流首段:
+data: {"id":"6ab9fff5a0610b1da4035fd6","conversation_id":"6ab9fe16a0610b1da4035b49",…"parts":[],
+"created_at":"2026-09-28 13:49:41","status":"init","last_error…」+「你看下：现在是桥的问题吗？
+1.正文回复明显不对？2.调用一半我不返回了却提醒这样！」+「请你查看已有会话中 ghatglm 完整跑了
+几个小时的，我记得是 40 之前的版本都能够正常使用！glm！」
+
+### 定性：**这一轮不是桥丢了内容**（会话存档逐条解帧）
+
+`session-ee3a8650` 的 `session.v4.jsonl.zstd`（74 行）：turn 1 正常 `completed`；
+**turn 2 的前 9 个 assistant 步骤全部正常带 tool-call**（05:44:09 → 05:49:11），
+**第 10 步**才返回空流。`/__webcode/status` 的 `relay.lastError` 同时给出
+`durationMs: 8620` / `firstTokenMs: 7674` / `responseMs: 946` —— 网页侧开了流
+（`status:"init"`）但 `parts:[]`，随后流结束。
+
+⇒ GLM 在失败前**连续正常工作约 6 分钟 / 9 个工具步骤**。
+
+### 0.19.45 已修的是**报错的取证缺陷**（两处，都不是空流本身）
+
+1. **收束原因是假陈述**：`noteEndReason(… || 'finished')` 兜底无条件写 `finished`，
+   不看解码器给的是 `complete` 还是 `incomplete`。GLM 解码器只在 `status === 'finish'`
+   帧置 done ⇒ 那一轮报「收束原因 finished」而**流根本没 finish**。已改为与
+   `result.complete` 同源（`partial:incomplete` 等）。
+2. **只截流首段**：`status:"init"` + `parts:[]` 是 GLM **每一轮**的正常开帧，首段按构造
+   永远看不出真因；真因（限流原话 / 审核 / `last_error`）在后面的帧里。已新增
+   `rawTail`（最后一帧）随首段一起进现场。
+
+### 仍未修 / 未取证（不猜）
+
+1. **空流本身为什么会发生**：未取证。`status:"init"` + `parts:[]` 后流即结束，可能是
+   站点限流、内容审核、或该轮请求未被受理。**0.19.45 之后**再遇到这个问题，报错会带上
+   **流尾段**（含 `last_error` 真值），届时可直接判定——这是本轮修复的全部目的。
+2. **不是风控**：GLM 未声明 `captchaSelector`（该字段只声明在 z.ai，`lib/providers.js`），
+   且前 9 步都成功，可排除「消息根本没发出去」这一支。
+3. **`last_error` 字段的语义**：全仓库此前**零命中**（`grep last_error` 无任何结果）——
+   0.19.45 之后它才会第一次出现在报错里，因此**至今没有它的真值读数**。
+   下一次事故的尾段就是它的第一手取证。
+4. **「0.19.40 之前 GLM 能跑几小时」**：**未取证，且现有数据不支持**。全部工作区会话存档里
+   GLM 驱动步骤共 80 个（占 30,464 步的 0.26%）、47 个会话、**最长连续 0.79 小时 / 8 步**；
+   找不到任何「数小时」的 GLM 运行。回复日志的 `site=` 字段是 0.19.30 才加的，更早的
+   `webcode-bridge-replies.log.1`（4276 条）**无法归因到 GLM**；0.19.30–0.19.39 十版在 git 里
+   是一次性合并提交、版本级不可分辨 ⇒ 现有材料**既不能证实也不能否定**这个记忆。
+5. **观察到的相关事实（不是结论）**：桥设置 `"subAgentSite":"glm"` —— GLM 主要承担
+   **子代理短调用**，而非主会话长跑；这与「80 步 / 47 会话 / 最长 47 分钟」的读数自洽。
+
+### 若要继续，从哪下手
+
+1. **等下一次复现**：0.19.45 的报错会带流尾段。若尾段里 `last_error` 是限流原话
+   （如「当前访问人数过多」），则应把 GLM 也接进 `RATE_HINT_TEXT` 的限流判定，让它走
+   `RATE_LIMITED` 退避重试，而不是报一个无从下手的空回复错。
+2. **对照 GLM 网页端**：在 chatglm.cn 直接看那条对话（`cid=6ab9fe16a0610b1da4035b49`）
+   第 10 步的位置——若网页上显示「当前访问人数过多 / 内容不合规」，则站点侧原因即可证实。
+   这是**唯一**能直接回答「空流是什么」的取证路径（本机无法复现：桥持有 GLM 账号锁，
+   同一账号不能同时桥接，见 `lib/bridge-lock.js`）。
+3. **不要**因为空回复就把 `WEB_NO_PROGRESS` 或空回复判据放宽——本轮已证明前 9 步是好的，
+   空流是**真实的空**，放宽只会把故障藏起来。
+
+---
+
+## 24-bis. **GLM「近两分钟才开始思考」+ `WEB_NO_PROGRESS…驱动不在忙`**（2026-09-28 定性；**0.19.44 已修主体**）
+
+用户原话（2026-09-28）：「请你查看下现在的 chatglm 怎么回事：1.超长时间刚开始加载--40 前面版本
+我记得都是马上就接着思考而不是现在等近两分钟！才开始有 2. 本轮运行失败 WEB_NO_PROGRESS: 网页侧
+超过 120s 没有任何新内容（页面在，上一轮收束原因（120s 前） finished，判定相位=网页还没开口且
+驱动不在忙（按常规窗口未宽限）） — 本轮已中止，可重试」+「这个是不是叠加1的问题引起的？」
+
+### 结论（答用户第 2 问）
+
+**是，第 2 条是第 1 条的直接后果**，但其中还夹着一格**独立的判据缺陷**。三条机制各自有据：
+
+1. **`end-to-start` 的发送间隔等待落在看门狗窗口之内（决定性，已实测）。**
+   `relay.submit()` 在 `lib/index.js:1192` 调用，`nextWithIdle()` 紧随其后在 `1261` 进入循环，
+   看门狗计时器**当场开跑**；而 `computeSendGap` 的 `sleepSignal` 在
+   `lib/index.js:3194-3225`——**executor 内部**，即 120s 之内。真机 `webcode-settings.json`
+   写着 `sendGapMs: 30000` + `sendGapBasis: "end-to-start"`（旧版本是 `10000` + 默认
+   `send-to-send`，见 `webcode-settings.json.bak-0140`）⇒ **每轮开场先白扣 30s**。
+   实测（注入式脚本驱动，`idleTimeoutMs=1000`/`mult=2` 压到毫秒尺度，首字节延迟固定 800ms，
+   只改 gap）：`gap=0`→OK(992ms)、`gap=1000`→OK(1819ms)、**`gap=2000`→`WEB_NO_PROGRESS`(2607ms)**、
+   `gap=3000/5000/8000`→同样约 2609ms 开火且**驱动调用次数只有 1（第二轮根本没送到驱动）**。
+   ⇒ 看门狗在**间隔等待期间**就把这一轮判死了。
+2. **GLM 长提示词走附件，附件路径另有几十秒。** `SITE_ATTACH_INLINE_LIMIT.glm = 8_000`
+   （`lib/browser-driver.js:619`，0.19.41 新增）+ 用户设置 `promptTransportBySite.glm = "attach"`
+   ⇒ 任何 >8k 的一轮都走 `uploadTextAttachment`；该函数自己的注释写着真机 **85k 附件实测 53s**
+   （`lib/browser-driver.js:2593-2596`）。且附件投递后**正文被换成「请先读取该附件全文」的指针文本**
+   （`lib/browser-driver.js:3296-3298`）⇒ 模型先读附件再开始想，首字节必然更晚。
+3. **`busy:false` 这一格不给宽限**，而 GLM 驱动是**懒创建**的（`lib/index.js:2606-2652`，
+   非 deepseek 默认槽走 `!drivers.has(key)` 分支；创建点在 `attempt()` 内的 `3069`，在 gap 之后）
+   ⇒ gap 期间 `driverFor('glm')?.status?.()?.busy` 读到 `false` ⇒
+   `lib/idle-window.js:98` 返回 `{windowMs: base, phase:'mid-stream', firstEventSeen:false}`
+   ⇒ **宽限（×2）不可达**，窗口停在 120s。报错文本 `lib/index.js:573` 于是印出
+   「判定相位=网页还没开口且驱动不在忙（按常规窗口未宽限）」——与用户报错逐字吻合。
+
+### 数值预算（默认值实算）
+
+```
+IDLE_TIMEOUT_MS = max(WIP_IDLE_MS+1000, 120000) = max(3500, 120000) = 120000
+驱动忙时的倍数窗口 = 120000×2 = 240000，但被整轮预算压到 216000（capped，见 idle-window.js:104-110）
+本次实际窗口 = 120000（驱动不忙 ⇒ 未宽限）
+真机一轮 = 1790570415877 − 1790570317884 = 97,993ms ≈ 98s
+生成前已消耗 ≈ 30s(gap) + 附件上传(几十秒) ⇒ 留给「网页开口」的余量不足 40s
+```
+即：**用户等的「近两分钟」= 30s 强制间隔 + 附件上传 + 网页 prefill**，而看门狗只给 120s、
+且其中约 2/3 被生成前开销吃掉。
+
+### 仍未取证（不猜）
+
+- 那次 GLM 失败**当刻**的 `driverCreated` / 判据时刻的 `busy`：当前代码不落这两个读数，
+  `/__webcode/status` 的 `lastError` 已被后续轮次覆盖（读到时为空、`sessionCursorInvalidations:0`）。
+- GLM **首字节的直接读数**（第几秒到达）：与 §24 第 1 条同一个空白，至今没有任何记录。
+- 当轮是否真的走了附件（无 `attachTransport` 快照可读）。
+- GLM 是否命中风控：`captchaSelector` **只声明在 z.ai**（`lib/providers.js:574`），GLM 没有
+  ⇒ 这一支可排除。
+
+### 若要继续，从哪下手
+
+0. **0.19.44 已修第 (1)(3) 两条机制**：executor 与适配器共享的 `meta` 上新增
+   `delivering`（活标记）与 `preDeliverMs`（累计时长），看门狗的**有效 deadline** 改为
+   「真正交给网页之后 windowMs」——间隔等待 / 排队 / 退避被扣出窗口，窗口本身逐字不变。
+   护栏 `test/pre-deliver-window.test.mjs` 6 项，已反向变异确认红灯基线。
+   **仍未修的是第 (2) 条**（GLM 附件路径本身那几十秒），它需要下面的实测数据才能决定怎么动。
+1. **先做零改动的决定性实验**：把 `sendGapMs` 设 **0** 重跑同一 prompt，首字节应前移约 30s。
+   `preDeliverMs` 修好之后这一格的意义变小了（等待已不计入窗口），但仍能回答「用户感知的慢
+   有多少来自间隔」。
+2. **配对实验（§24 第 2 条一直挂着的那条）**：同一 prompt，`promptTransportBySite.glm`
+   `attach` / `inline` 各一次，比首字节耗时——这是唯一能证实/推翻「附件路径更慢」的读数，
+   也是 0.19.44 之后**唯一还剩的提速方向**。
+3. **补读数**：在 `idleScene()` 里加只读字段 `driverCreated`（`drivers.has(key)`）与判据时刻的
+   `busy`。0.19.44 已让「投放前」可被扣出，但**报错文本仍无法区分**「驱动还没建」与
+   「驱动建了但没在忙」——两者产生逐字相同的文案。
+4. **不要**把 `idleFirstByteMultiplier` 调大当修法：它只作用于「首字节之前 + 驱动忙」，
+   而本次恰恰是「驱动不忙」那一格，调它对这个 case **完全无效**（`test/idle-window.test.mjs`
+   ②③ 是为此设的反向安全线）。
+
+---
+
 本文件是维护台账，不是发布阻塞清单。
 ## 25. **TOOL_CALL_UNPARSED 两类残根：缺 `name` 的流式块 / 断流截断的参数**（0.16.10 定性；0.16.11–0.16.15 **大幅收口**）
 
@@ -1748,3 +1887,129 @@ headed×1）**全部 0 帧**；把 UA 从 `HeadlessChrome` 换成正常 Chrome �
 `completionPaths`（`/api/chat/completions`）是**对的**；会话地址形状 `/c/<uuid>`
 虽然**观察到**了但 `goto` 被打回根地址、标记 0 次命中 ⇒ 与 kimi 的 `/chat/<uuid>`
 （goto 后地址逐字不变、读回上轮标记）形成对照，z.ai **继续维持 `unsupported`**。
+
+## 31. **四站的「思考等级」没有真机读数 ⇒ 刻意不声明**（2026-09-28 新登记）
+
+### 现状（这是有意的，不是漏做）
+
+0.19.48 把 DSH 的推理等级通道接上了（`lib/think-effort.js`），但**只对拿得到真机读数的站点声明**：
+
+| 站点 | 状态 | 为什么 |
+| --- | --- | --- |
+| kimi / glm / zai / qwen / doubao | 已声明 | 逐个在落盘 profile 副本上采到了控件与档位文本（证据 `test-mock/out/think-control-*.json`） |
+| chatgpt / gemini / grok / claude | **未声明** | 本机网络 `ERR_CONNECTION_CLOSED`（三站）/ 停在验证页（claude），拿不到任何 composer 读数 |
+| deepseek | **未声明** | 用户原话即「除了 deepseek 是只有深度思考开关没有思考等级开关」；它的开/关由既有的 `syncThinkPill` 链承担 |
+
+### 为什么宁可不声明
+
+`applyEffort` 对「用户选了档、而站点没有可点控件」是**抛错**（绝不静默降级）。声明一个没读数的站点
+⇒ 该站点**每一轮**都抛 `THINK_EFFORT_UI_CHANGED`，等于把站点弄成不可用；而少一栏的代价只是少一栏。
+两种代价不对称，所以缺口只能等读数。
+
+### 补齐需要什么
+
+1. 一条能到达该站点的网络（chatgpt / gemini / grok 本机全被拒；claude 停在人工验证页）；
+2. 一次 `node test-mock/probe-think-control.mjs <site> --dump` 采到 composer 附近的控件与档位文本；
+3. 把读到的**逐字文本**写进 `lib/think-effort.js`（等级 id 就是菜单文本，不许翻译）；
+4. 跑 `node test-mock/probe-think-effort-live.mjs <site>` 确认下发 + 回读成立。
+
+### 另有两条与「档位」相邻、本轮**没有**动的缺口
+
+* **kimi 的 `标准` 档未取证**（**0.19.49 已解决**）：当时本机那份 kimi profile 掉了登录
+  （页面明写「登录以同步历史会话」），只验到 `进阶`。0.19.49 改用**只读 CDP** 在线上已登录页面上
+  补到了读数：触发文本 `K3 标准`、`span.current-effort` 的文本是 `标准`，
+  且用生产判据复算，目标「标准」判 `match`、目标「进阶」判 `mismatch`（脚本 `.tmp-probe/cdp-verify-fix.mjs`）。
+  取证方法本身见 #32。
+* **z.ai 的总开关与档位是两条链**：菜单里除三档外还有一个 `role="switch"`（要不要思考）。
+  本轮只动档位、不动总开关（它属于 `thinkMode` / `model.thinking` 那条既有链）。已知后果：
+  网页端把总开关关掉时，选档位不会把它打开——桥不替用户猜「关掉是不是误操作」。
+
+## 32. **kimi 的登录态在 localStorage 而非 cookie ⇒ 「拷 profile 副本」式探针拿到的是游客页**（2026-09-28 新登记）
+
+### 现象（这一条差点让整轮取证得出错误结论）
+
+`test-mock/probe-think-effort-live.mjs` 与 `probe-think-control.mjs` 的取证方式是
+「把落盘 profile **拷一份副本**、在副本上开浏览器」（这个设计本身是对的：杀进程不会污染登录态）。
+它在 glm / zai / qwen / doubao 上都工作，**唯独 kimi 拿到的是游客页**：
+
+```
+test-mock/out/think-effort-live-kimi-2026-09-28T11-19-23.json：
+  "title": "Kimi AI 官网 - K3 上线，专为智能体编程与知识工作打造"
+  "url":   "https://www.kimi.com/"
+  scene.clickables 里有 "登录"、"登录以同步历史会话"
+  overlayCount: 0        ← 模型菜单从未打开
+  → THINK_EFFORT_UNAVAILABLE: 档位菜单里没有「标准」（当前读数：快速 进阶）
+```
+
+### 根因
+
+kimi（Kimi Agent，`www.kimi.com/agent`）的登录凭据**不在 cookie 里** —— 实测 9 枚 cookie
+全是统计/偏好类，真正的 `access_token` 在 **localStorage**。而 profile 副本这条路的登录态
+承载在 cookie 库（`Network/Cookies`）上，localStorage（`Local Storage/leveldb`）虽然也拷了，
+但 kimi 的 `access_token` 是**短时效**的（15 分钟级），副本里那份往往已经过期 ——
+于是站点按未登录渲染。
+
+**为什么这条很危险**：游客页上「模型菜单点不开、档位条目找不到」会稳定产生
+`THINK_EFFORT_UNAVAILABLE` / `THINK_EFFORT_UI_CHANGED`，与**真缺陷的症状逐字相同**。
+拿这份读数去解释线上报错，就是本仓库记过多次的「拿另一种现场的证据下结论」——
+差一点就把 kimi 的真实缺陷（模型名当锚点）记成「站点改版」或「本来就是游客页」。
+
+### 替代取证法（本次采用，可复用）
+
+顺 profile 里的 `DevToolsActivePort`（桥用 `--remote-debugging-port=0` 启动，端口号写在这个文件里）
+连上**线上那个浏览器**做**只读** `Runtime.evaluate`：不点击、不填框、不发消息、不改状态。
+本机实测端口：kimi 1170 / glm 6353 / zai 11632 / qwen 11419 / doubao 7155。
+
+脚本：`.tmp-probe/cdp-effort-inspect.mjs`（读控件现状）、`.tmp-probe/cdp-effort-models.mjs`
+（读模型菜单，仅点一次开菜单后立刻 Esc）、`.tmp-probe/cdp-effort-all.mjs`（逐站点）、
+`.tmp-probe/cdp-verify-fix.mjs`（把真机读数喂给生产判据复算）。
+
+⚠ 两条使用边界：
+
+1. 端口文件只在该站点浏览器**正在运行时**有效（浏览器关掉后端口连不上）——
+   `cdp-effort-all.mjs` 运行时 glm/kimi 可达而 zai/qwen/doubao 报 「CDP 不可达」，就是这个原因；
+2. 它读的是**用户正在用的那个浏览器**，因此脚本必须坚持只读。
+   唯一一次点击（`cdp-effort-models.mjs` 点开模型菜单读模型名）之后立即按 Esc 关闭并复读原状，
+   已核对菜单开启前后触发文本逐字不变。
+
+### 补齐需要什么
+
+若要让「拷 profile 副本」这条路对 kimi 也成立，需要把 localStorage 里的 `access_token`
+一并带过去（或改走 CDP）。**未做**：access_token 是 15 分钟级的短时效凭据，
+把它复制进另一个 profile 目录会多出一份可用的凭据副本，收益（少一次 CDP 连接）
+不抵代价。因此记在这里，等真的需要「不依赖线上浏览器」的 kimi 探针时再决定。
+
+## 33. **需要人才能过的验收环节没有「提醒人手动过」的回路**（2026-09-29 新登记）
+
+### 现象（用户 2026-09-29 的原话就是这一条）
+
+> 顺带解决 z.ai 验证问题——如果需要验证能够提醒人手动过吗？
+
+起因是 0.19.49 收口时的实况：z.ai **本轮未发现缺陷**，但取证停在
+「真机形状 + 当前代码」的复算（`.tmp-probe/zai-sim.mjs`），因为 2026-09-28 那次
+z.ai 浏览器「端口文件在、连不上」；2026-09-29 复跑时**五个站点全部连不上**
+（`DevToolsActivePort` 端口文件都在，`127.0.0.1:<port>` 全部 `积极拒绝`，
+`Get-Process msedge,chrome` 无输出）。
+
+也就是说：**有些验收环节必须有人**（登录态、风控验证页、真实轮次），
+而当前工具链对这条的处置是**静默**的——探针会在「CDP 不可达」处停下，
+但**没有任何一处提示「这一步需要你去点一下」**。人不主动找，就只会看到缺口一直挂着。
+
+### 这不是「没做」，是「做成了另一副样子」
+
+本仓库对「取不到读数」的既有姿态是**正确的**：不假装验过，把缺口如实记进 `doc/`（#31 / #32 即此）。
+缺的是**最后一段**：缺口记下来了，却**没有转成一条给人看的、可执行的提醒**——
+它躺在 2000 行的台账里，而不是出现在「这一轮该你了」的位置上。
+
+### 补齐需要什么（未做，列在此处备查）
+
+1. **探针侧的显式人因出口**：`probe-think-effort-live.mjs` / `probe-think-control.mjs`
+   在 CDP 不可达时，不只打印技术错误，而是给出一句**面向人的动作**
+   （「请先在桥里打开 <站点> 并保持登录，然后重跑本命令」），并**退出码可区分**
+   （「取不到读数」≠ 「跑出来是坏的」——现在这两种在某些路径上不易分辨）；
+2. **`doc/verify.md` 的待人工项**：把「需要人过」的条目单列一节，而不是散在长期问题里；
+3. **可选的自动化**（本轮**明确不做**）：桥自己起浏览器 + 检测到需人工时提示。
+   它要动驱动生命周期（`launchPersistentContext` / 锁 / 孤儿回收），
+   代价明显大于收益——**先做前两条**。
+
+

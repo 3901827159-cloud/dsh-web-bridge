@@ -93,12 +93,26 @@ test('目录与别名：真实条目可解析，旧设置值仍可用', () => {
   const all = listAllModels();
   const ids = new Set(all.map((m) => m.id));
   for (const id of ['zai:glm-5.3', 'zai:glm-5.3-flash', 'zai:glm-5.2',
-    'glm:glm-5.3', 'glm:glm-5.3-flash', 'kimi:k3', 'kimi:k3-cluster', 'kimi:quick']) {
+    'glm:glm-5.3', 'glm:glm-5.3-flash', 'kimi:k3', 'kimi:k2.8-preview', 'kimi:quick']) {
     assert.ok(ids.has(id), '目录必须包含 ' + id);
   }
-  // 0.12.9 的旧值
-  assert.equal(resolveWebModel('zai:auto').id, 'auto');
-  assert.equal(resolveWebModel('glm:auto').id, 'auto');
+  // 0.19.43：glm / kimi / doubao / zai 四站点的 `auto` 已从**模型表**里真删
+  //（桥自己发明的「不切换」档，不是网页档位），但历史设置值必须仍可解析 ——
+  // 用户的 settings / `subagent-model-selection.allowedModels` 里可能还写着 `*:auto`，
+  // 直接抛错会让那些配置当场变成不可解析值。
+  // 落点各自收敛到**本站点**的档位（glm/zai → glm-5.3，kimi → k3，doubao → chat）。
+  assert.equal(resolveWebModel('zai:auto').id, 'glm-5.3', 'zai:auto 收敛到本站点旗舰档');
+  assert.equal(resolveWebModel('glm:auto').id, 'glm-5.3', 'glm:auto 收敛到本站点旗舰档');
+  assert.equal(resolveWebModel('kimi:auto').id, 'k3', 'kimi:auto 收敛到本站点旗舰档');
+  assert.equal(resolveWebModel('doubao:auto').id, 'chat', 'doubao:auto 收敛到「对话」');
+  // `auto` 不再是**目录条目**（选择器里不该出现桥自造的档），但仍是可解析的别名
+  assert.ok(!ids.has('zai:auto'), 'zai:auto 不该再出现在模型目录里（0.19.43 真删）');
+  assert.ok(!ids.has('glm:auto'), 'glm:auto 不该再出现在模型目录里（0.19.43 真删）');
+  // kimi 的 `k3-cluster` 同理：真机模型菜单里**已经没有**这一条
+  //（think-effort.js 的注释记着「K3 集群已从菜单消失」），故不在目录里；
+  // 但历史 id 仍走别名解析，落到本站点旗舰档 —— 旧设置值不会变成不可解析。
+  assert.ok(!ids.has('kimi:k3-cluster'), 'kimi:k3-cluster 不该再出现在目录里（真机菜单已无此档）');
+  assert.equal(resolveWebModel('kimi:k3-cluster').id, 'k3', 'kimi:k3-cluster 作为历史别名仍要能解析');
   assert.equal(resolveWebModel('glm-4.6').id, 'glm-5.3', '旧的 glm-4.6 设置值要收敛到当前版本');
   // 用户的写法
   assert.equal(resolveWebModel('z.ai-glm5.3').id, 'glm-5.3');
