@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Web Bridge",
+    "description": "Use your logged-in web AI as model providers. Web models emit tool calls, DSH runs them under its native permission system, and results return to the same web session. No API keys."
+  }
+}

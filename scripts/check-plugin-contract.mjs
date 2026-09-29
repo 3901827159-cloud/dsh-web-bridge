@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// check-plugin-contract.mjs — 把 DSH STORE 收录契约里「机器可判」的四条变成红灯。
+// check-plugin-contract.mjs — 把 DSH STORE 收录契约与插件规范里「机器可判」的六条变成红灯。
 //
 // ## 为什么需要这个文件
 //
@@ -12,7 +12,8 @@
 // 本仓库已经吃过一次同型的亏（见 `scripts/check-ledger.mjs` 文件头：靠自觉的约定
 // 失败三次之后要换机制，「记得改 repository」同理——它不是机制）。
 //
-// ## 判据（四条，与 `doc/permissions-and-boundaries.md` §5 的措辞一一对应）
+// ## 判据（六条；前四条与 `doc/permissions-and-boundaries.md` §5 的措辞一一对应，
+// ## 后两条对齐 0.1.7/0.2.0 的插件规范）
 //
 //   1. **仓库指向**：manifest 的 `repository.url` == 本仓库 `origin` 的 URL，且
 //      `repository.directory` == 该 manifest 相对仓库根的**实际**目录。
@@ -24,6 +25,31 @@
 //      （`lib/`、`bin/`）导入；反过来 `devDependencies` 里的名字不得被它导入。
 //   4. **边界声明存在且被索引**：`doc/permissions-and-boundaries.md` 存在、含四节
 //      标题（运行依赖 / 权限 / 外部服务 / 失败边界）、且已登记进 `doc/README.md`。
+//
+//   5. **`dsh.client.inject` 的值是包名，不是 Cordis 服务名**（0.19.50 新增）。
+//      规范逐字：`DshClientManifest.inject` 是
+//      「**Informational package-name dependencies, not Cordis service injection**」，
+//      同一句话在 `WebBootEntry.inject` 上再次出现。**官方把「不是服务注入」写进了字段注释**
+//      ——这正是最容易混的一处。
+//
+//      为什么这条只有本仓库有：官方闸门 `scripts/verify-client-packages.ts` 对 `inject`
+//      **只查空值与重复**，不查「是不是真包」。于是这个错误会**静默存活**：
+//      三条消费路径（`arriveGraphRow` 的 `graphRows.get()`、`orderByModuleGraph` 的
+//      `external` 遍历、官方闸门）**全部容忍**它——`graphRows.get('slots')` 返回 `undefined`
+//      就被静默跳过，既不报错也不产生任何到达顺序保证。
+//
+//      本仓库真实发生过一次：0.19.1 合规审计把 `inject: ['slots','settingsScope',…]`
+//      记为「合规」，直到 0.1.7 升级才暴露 `settingsScope` 已改名。**那条死声明的真正代价
+//      不是它自己错，而是它遮住了真问题**（0.19.2 的阻断级故障靠它才被误诊为「插件不见了」）。
+//
+//   6. **显示元数据（`icon` / `locale/`）声明了就必须合法**（0.19.50 新增）。
+//      两条通道都在 0.1.7-alpha.2 起可用，且都是**可选**的（官方采用率 `icon` 2/85、
+//      `locale/` 7/85，且读取失败是**容忍**的）。因此本判据的形状是「**声明了才判**」——
+//      没声明不红；声明了就必须满足它自己的契约：`icon` 必须在 manifest 目录内、
+//      ≤256 KiB、是 SVG/PNG/JPEG/WebP；`locale/en.json` 必须存在（规范：英文是必需回落）
+//      且 `exports` 必须暴露 `./locale/*.json`（否则 Node ESM resolver 读不到）。
+//
+//      与判据 5 的区别：那条判「声明**错**了」，这条判「声明了却**做不到**」。
 //
 // ## 刻意不做的事
 //
@@ -37,8 +63,9 @@
 //
 //   node scripts/check-plugin-contract.mjs            # 人读输出
 //   node scripts/check-plugin-contract.mjs --json     # 机读输出（CI 归档）
+//   node scripts/check-plugin-contract.mjs --self-test # 判据 5 的自检（正反例都对才退 0）
 //
-// 退出码：0 = 四条全绿；1 = 有不一致项；2 = 脚本自身出错（读不到文件等）。
+// 退出码：0 = 六条全绿；1 = 有不一致项；2 = 脚本自身出错（读不到文件等）。
 //
 // ## 已知边界（宁可漏报也不制造假红）
 //
@@ -72,6 +99,34 @@ const SHIPPED_DIRS = ['lib', 'bin'];
  * 在这里写 `名字: '理由'`，让豁免本身也留下痕迹。
  */
 const DEAD_DEP_ALLOWLIST = {};
+
+/**
+ * 裸包名豁免名单（判据 5 用）。
+ *
+ * 判据 5 默认**只接受 scoped 包名**（`@scope/name`）——官方 85 个包与两个参考实现里
+ * `dsh.client.inject` 的值**没有一条不是 scoped**（机检输出为空）。
+ * 但 npm 上确实存在合法的**裸包名**（`react`、`react-dom` 这类）。将来真要用到，
+ * 在这里登记名字并写清理由，**不要放宽判据**：本闸门的全部价值就在于它不迁就。
+ */
+const BARE_PACKAGE_ALLOWLIST = {};
+
+/**
+ * 一个值是不是「包名」而不是「Cordis 服务名」。
+ *
+ * 规范逐字：`dsh.client.inject` 是「Informational package-name dependencies,
+ * **not** Cordis service injection」。两者最容易混，因为**字段同名**——
+ * `lib/client.cjs` 里那个 Cordis 插件的 `inject` 用的就是同一批短名。
+ *
+ * 判据取「形状」而不是「查 npm」：本仓库的闸门一律**离线、不引第三方、不 spawn**
+ * （理由见文件头），查包是否存在做不到。形状判据在本项目上是够用的——
+ * 四个错值（`slots` / `settingsScope` / `sidebarRightTabs` / `sidebarRight`）
+ * 全部是无斜杠的裸标识符，一条都过不了。
+ */
+function isPackageName(v) {
+  if (typeof v !== 'string' || v.length === 0) return false;
+  if (BARE_PACKAGE_ALLOWLIST[v]) return true;
+  return /^@[^/\s]+\/[^/\s]+/.test(v);
+}
 
 /** 判据 4 要求的四节标题。顺序与 `doc/permissions-and-boundaries.md` 一致。 */
 const REQUIRED_DOC_SECTIONS = [
@@ -219,8 +274,51 @@ function sha256(file) {
   return crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 }
 
+/**
+ * 判据 5 的自检：正例必须过、反例必须红。
+ *
+ * ## 为什么只给判据 5 加自检，不给前四条加
+ *
+ * 前四条判的是**文件、字节、字节相同**（两份 LICENSE 的 sha256、import 说明符、文件是否存在）
+ * ——它们的失效形态是「报错」，看得见。判据 5 判的是**形状**（一个字符串像不像包名），
+ * 而形状判据最典型的失效形态与 `check-long-term-issues.mjs` 文件头写的是同一件事：
+ * **悄悄不再匹配任何东西**。那时它会一路 PASS，看起来比谁都干净。
+ *
+ * 反例里刻意包含**必须不报**的形态（`undefined` = 未声明），否则闸门会在**正确的清单**上恒红。
+ */
+function selfTest() {
+  const CASES = [
+    { name: '正例：scoped 包名', v: '@deepseek-ai/dsh-client-locale', expect: true },
+    { name: '正例：带子路径的 scoped 名', v: '@deepseek-ai/dsh-tool-subagent-control/list-agents', expect: true },
+    { name: '反例：Cordis 服务名 slots（本仓库真实错过的那个字段）', v: 'slots', expect: false },
+    { name: '反例：Cordis 服务名 settingsScope（0.1.7 改名后暴露的那个）', v: 'settingsScope', expect: false },
+    { name: '反例：服务名 sidebarRightTabs', v: 'sidebarRightTabs', expect: false },
+    { name: '反例：空字符串', v: '', expect: false },
+    { name: '反例：非字符串', v: 42, expect: false },
+  ];
+
+  const failures = [];
+  for (const c of CASES) {
+    const got = isPackageName(c.v);
+    if (got !== c.expect) {
+      failures.push(c.name + '\n      期望: ' + c.expect + '\n      实得: ' + got);
+    }
+  }
+
+  if (failures.length) {
+    process.stderr.write('[contract] 判据 5 自检失败（' + failures.length + '/' + CASES.length + ' 个用例）：\n');
+    for (const f of failures) process.stderr.write('  · ' + f + '\n');
+    process.stderr.write('[contract] 判据已经漂移。修本脚本的 isPackageName，不要改用例去迁就实现。\n');
+    return 1;
+  }
+  process.stdout.write('[contract] ✔ 判据 5 自检通过（' + CASES.length + ' 个用例：正例 2、反例 5）。\n');
+  return 0;
+}
+
 function main() {
   const json = process.argv.includes('--json');
+
+  if (process.argv.includes('--self-test')) return selfTest();
   const problems = [];
   const results = [];
 
@@ -328,12 +426,101 @@ function main() {
   for (const c of docChecks) if (!c.ok) problems.push('边界声明：' + c.what + ' —— 不成立。');
   results.push({ item: 'boundaries-doc', ok: docChecks.every((c) => c.ok) });
 
+  // ---- 判据 5：dsh.client.inject 的值是包名 ----
+  const injectChecks = [];
+  const clientInject = pkg.dsh && pkg.dsh.client ? pkg.dsh.client.inject : undefined;
+  if (clientInject === undefined) {
+    // 不声明是**合规**的（平台种子由 PLATFORM_MODULES 保证，无需声明），
+    // 本插件的现状正是如此。这里记一条读数而不是问题，让输出说清楚「是没声明，不是没检查」。
+    injectChecks.push({ what: 'dsh.client.inject 未声明（合规：平台种子无需声明）', ok: true });
+  } else if (!Array.isArray(clientInject)) {
+    injectChecks.push({ what: 'dsh.client.inject 必须是数组', ok: false });
+  } else {
+    const bad = clientInject.filter((v) => !isPackageName(v));
+    injectChecks.push({
+      what: 'dsh.client.inject 的每个值都是包名（规范：package-name dependencies, NOT Cordis service injection）'
+        + (bad.length ? '——不是包名的值：' + bad.map((v) => JSON.stringify(v)).join(', ') : ''),
+      ok: bad.length === 0,
+    });
+  }
+  for (const c of injectChecks) {
+    if (!c.ok) {
+      problems.push('客户端清单：' + c.what + ' —— 不成立。'
+        + '（正确值形如 `@scope/name`；服务名如 `slots` 不合法，它是 Cordis 插件的 inject 用的）');
+    }
+  }
+  results.push({ item: 'client-inject', ok: injectChecks.every((c) => c.ok) });
+
+  // ---- 判据 6：显示元数据（icon / locale） ----
+  //
+  // 规范（`DshPackageManifest.icon` / `PluginLocalizedMeta`）：`icon` 是
+  // 「SVG, PNG, JPEG, or WebP file relative to this manifest's directory, at most 256 KiB
+  // and contained there after realpath resolution」；`locale/<lang>.json` 里的
+  // `{ meta: { title, description } }` 经 Node ESM resolver 读，**必须在 `exports` 里可达**。
+  //
+  // 这两条都是**可选**通道（官方采用率 icon 2/85、locale 7/85），所以判据的形状是
+  // 「**声明了才判**」——没声明不红，声明了就必须满足它自己的契约。
+  // 这与判据 5 不同：那条判的是「声明错了」，这条判的是「声明了却做不到」。
+  const META_ICON_LIMIT = 262144; // 256 KiB，规范逐字给的数
+  const metaChecks = [];
+  const iconRel = pkg.icon;
+  if (iconRel === undefined) {
+    metaChecks.push({ what: 'icon 未声明（可选通道，合规）', ok: true });
+  } else {
+    const iconAbs = path.resolve(pkgDir, iconRel);
+    const inside = iconAbs === pkgDir || iconAbs.startsWith(pkgDir + path.sep);
+    metaChecks.push({ what: 'icon 路径在 manifest 目录内（' + iconRel + '）', ok: inside });
+    const exists = inside && fs.existsSync(iconAbs);
+    metaChecks.push({ what: 'icon 文件存在', ok: exists });
+    if (exists) {
+      const size = fs.statSync(iconAbs).size;
+      metaChecks.push({
+        what: 'icon ≤ 256 KiB（实测 ' + size + ' 字节）',
+        ok: size <= META_ICON_LIMIT,
+      });
+      metaChecks.push({
+        what: 'icon 是 SVG/PNG/JPEG/WebP',
+        ok: /\.(svg|png|jpe?g|webp)$/i.test(iconRel),
+      });
+    }
+  }
+  // locale 只在目录真的存在时才判：没提供是合规的。
+  const localeDir = path.join(pkgDir, 'locale');
+  if (fs.existsSync(localeDir)) {
+    metaChecks.push({
+      what: 'locale/en.json 存在（规范：英文是必需回落）',
+      ok: fs.existsSync(path.join(localeDir, 'en.json')),
+    });
+    const exportsKeys = pkg.exports && typeof pkg.exports === 'object'
+      ? Object.keys(pkg.exports) : [];
+    metaChecks.push({
+      what: 'exports 暴露 `./locale/*.json`（否则 ESM resolver 读不到）',
+      ok: exportsKeys.includes('./locale/*.json'),
+    });
+    const localFiles = fs.readdirSync(localeDir).filter((f) => f.endsWith('.json'));
+    let shapeOk = localFiles.length > 0;
+    for (const f of localFiles) {
+      try {
+        const j = JSON.parse(fs.readFileSync(path.join(localeDir, f), 'utf8'));
+        if (!j.meta || typeof j.meta.title !== 'string' || typeof j.meta.description !== 'string') shapeOk = false;
+      } catch { shapeOk = false; }
+    }
+    metaChecks.push({
+      what: '每个 locale/*.json 都是 `{ meta: { title, description } }`（' + localFiles.length + ' 个文件）',
+      ok: shapeOk,
+    });
+  } else {
+    metaChecks.push({ what: 'locale/ 未提供（可选通道，合规）', ok: true });
+  }
+  for (const c of metaChecks) if (!c.ok) problems.push('显示元数据：' + c.what + ' —— 不成立。');
+  results.push({ item: 'display-meta', ok: metaChecks.every((c) => c.ok) });
+
   if (json) {
     process.stdout.write(JSON.stringify({
       ok: problems.length === 0,
       repoRoot,
       origin: originUrl,
-      literalChecks: [...repoChecks, ...licChecks, ...depChecks, ...docChecks],
+      literalChecks: [...repoChecks, ...licChecks, ...depChecks, ...docChecks, ...injectChecks, ...metaChecks],
       results,
       problems,
     }, null, 2) + '\n');
@@ -356,7 +543,7 @@ function main() {
   }
 
   if (!json) {
-    process.stdout.write('[contract] ✔ 四条契约与事实一致（仓库指向 / 许可证 / 运行依赖 / 边界声明）。\n');
+    process.stdout.write('[contract] ✔ 六条契约与事实一致（仓库指向 / 许可证 / 运行依赖 / 边界声明 / 客户端清单 / 显示元数据）。\n');
     process.stdout.write('[contract] 注意：本闸门只判声明层与事实是否一致，'
       + '**不改变 DSH STORE 的审查结论**（见 doc/permissions-and-boundaries.md §6）。\n');
   }

@@ -1,0 +1,24 @@
+<svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <title>Web Bridge</title>
+  <!--
+    自绘：一座「桥」把左侧的本地进程与右侧的网页端点连起来。
+    刻意不使用任何官方站点的品牌图形——插件图标表达的是「桥」这件事本身，
+    站点品牌图标的来源与合规问题记在 doc/long-term-issues.md #27。
+  -->
+  <rect x="3" y="21" width="9" height="9" rx="2" fill="url(#left)" />
+  <rect x="24" y="21" width="9" height="9" rx="2" fill="url(#right)" />
+  <path d="M7.5 18.5C7.5 11 28.5 11 28.5 18.5" stroke="#7CB7FF" stroke-width="2.4" stroke-linecap="round" />
+  <circle cx="7.5" cy="21" r="1.6" fill="#7CB7FF" />
+  <circle cx="28.5" cy="21" r="1.6" fill="#7CB7FF" />
+  <path d="M13 25.5H23" stroke="#45D9E7" stroke-width="2.4" stroke-linecap="round" stroke-dasharray="3 3" />
+  <defs>
+    <linearGradient id="left" x1="7.5" y1="21" x2="7.5" y2="30" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#7CB7FF" />
+      <stop offset="1" stop-color="#145AF3" />
+    </linearGradient>
+    <linearGradient id="right" x1="28.5" y1="21" x2="28.5" y2="30" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#45D9E7" />
+      <stop offset="1" stop-color="#0E9AA8" />
+    </linearGradient>
+  </defs>
+</svg>
