@@ -267,6 +267,38 @@ function captureInit(paths, opts = {}) {
  */
 const ANSWER_SELECTOR = '.markdown, [data-message-author-role="assistant"], .ds-markdown';
 
+/**
+ * 助手节点选择器的**解析规则**（纯函数）：站点声明优先，缺省回落到上面那份兜底串。
+ *
+ * ## 为什么把它抽成具名导出（0.19.50）
+ *
+ * 规则本身只有一行（`声明 || 兜底`），但它是**契约层与驱动层之间唯一的那条缝**，
+ * 而这条缝在 0.19.16 出过事故：同一串字面量在三个地方各写一份，「修一处、忘两处」，
+ * 于是「判据用的节点」与「兜底交出去的节点」不是同一个，读数自相矛盾且看不出来。
+ *
+ * 抽出来的直接收益：**这条规则可以被护栏钉住**（`test/answer-selector.test.mjs`），
+ * 而在此之前它只活在一个内联表达式里——`createBrowserDriver` 需要浏览器才能跑，
+ * 因此那行 `||` 谁都可以悄悄写反，没有任何单测会发现。
+ *
+ * ## 契约（三条，都被护栏钉住）
+ *
+ * 1. 站点在 `providers.js` 声明了 `answerSelector` ⇒ 用它（声明优先）；
+ * 2. 站点没声明 ⇒ 逐字返回兜底串（**未声明站点零位移**，这是 0.19.19 的承诺）；
+ * 3. 兜底串**只服务 DeepSeek 形状**，因此新增站点若形状不同，正确做法是去
+ *    `providers.js` 声明，**不是**改这里——改这里等于让一个站点的修复影响另外九个。
+ *
+ * ⚠ 未声明站点上的形状错配是**已知缺口**，不是本函数的 bug：按本仓库纪律，
+ * **没有真机读数就不声明选择器**（同 `think-effort.js`），因此其余站点的
+ * `answerSelector` 只能等读数，不能靠猜。见 `doc/long-term-issues.md`。
+ *
+ * @param {string} siteId 站点 id（如 `'deepseek'` / `'glm'`）
+ * @returns {string} 该站点实际使用的助手节点选择器
+ */
+export function answerSelectorFor(siteId) {
+  const contract = getContract(siteId);
+  return (contract && contract.answerSelector) || ANSWER_SELECTOR;
+}
+
 /** DOM 兜底抓取（decoder:'dom' 站点）：等回答区稳定后抄全文。 */
 const DOM_CAPTURE = `
 (async () => {
@@ -744,10 +776,12 @@ export function createBrowserDriver(options = {}) {
   const contract = getContract(siteId);
   if (!site || !contract) throw new Error('webcode driver: unknown siteId ' + siteId);
   // 助手节点选择器（0.19.19）：站点在 providers.js 声明了 answerSelector 就用它，
-  // 否则回落到那份 DeepSeek 兜底串。**求值一次、三处消费点共用**——这正是
+  // 否则回落到那份 DeepSeek 兜底串。**求值一次、两处消费点共用**——这正是
   // 0.19.16 用「唯一一份」换来的东西，别在这里又抄第二份。
   // 缺省分支逐字等于 0.19.18 的行为，所以未声明站点零位移。
-  const answerSelector = contract.answerSelector || ANSWER_SELECTOR;
+  // 0.19.50：规则抽成 `answerSelectorFor`（具名导出），本行只是它的调用点——
+  // 抽出去是为了让这条规则**能被护栏钉住**，见该函数的注释。
+  const answerSelector = answerSelectorFor(siteId);
   // 账户槽（0.14.7）：同一站点的第 2 个账户是**另一个驱动实例**，用另一个 profileDir。
   // 槽在驱动里只做两件事：① 透出给 /status 与面板（用户要知道这行是哪个账户）；
   // ② 进日志前缀（两个槽的日志混在一起时能分开）。

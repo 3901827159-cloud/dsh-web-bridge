@@ -9,6 +9,10 @@
 
 import { DEFAULT_SLOT, normalizeSlot, parseModelId, formatModelId, accountLabel } from './accounts.js';
 import { thinkEffortFor } from './think-effort.js';
+// 已迁移站点的声明表（0.19.50 起）：`lib/sites/<siteId>.js` 是站点知识的落点，
+// 本模块保留**组装职责**（withEffort 摊平 + 冻结）。迁移是渐进的——
+// 未迁移的站点仍内联在本文件里，见 lib/sites/index.js 的文件头。
+import { siteModuleFor } from './sites/index.js';
 
 const site = (s) => Object.freeze(s);
 
@@ -160,44 +164,24 @@ export function conversationUrlFor(siteId, origin, sessionId) {
  */
 const GLM_CONTEXT_WINDOW = 1_000_000;
 
-export const DEEPSEEK = withEffort({
-  id: 'deepseek', name: 'DeepSeek 网页版', origin: 'https://chat.deepseek.com',
-  // **必须挂在中继根上，不能用自己的子域**（真机 2026-09-13）：DeepSeek 前端
-  // 会校验宿主名，`http://deepseek.localhost:8931/` 触发
-  // `Unknown hostname: deepseek.localhost`，`#root` 永远 0 个子节点——右栏整页
-  // 空白，而它正是唯一端到端可用的基线，回归代价最大。中继根本来就是它
-  //（relay 默认站点），根相对资源/SPA 路由天然正确，不需要子域那层隔离。
-  mountAtRelayRoot: true,
-  // 静态资源域：站点 HTML 用绝对 URL + crossorigin 引用，而该域返回的
-  // Access-Control-Allow-Origin 是字面量通配（https://*.deepseek.com，非法值），
-  // 浏览器据此硬性拒绝执行脚本，整页退化成「页面资源加载异常」。
-  // 这些域改由 lib/mirror.js 同源转发（/__static/<host>/…）。
-  staticOrigins: ['https://fe-static.deepseek.com'],
-  completionPaths: ['/api/v0/chat/completion'],
-  input: 'textarea.ds-scroll-area',
-  // 这里**故意不声明 loginProbe**，理由是真机事实（2026-09-13）：
-  // DeepSeek 的游客落地页就是登录页本身（镜像里实测停在 `/sign_in`，正文
-  // 「+86 发送验证码 / 登录 / 密码登录 …」，`document.querySelectorAll('textarea')`
-  // 为 0），而已登录的会话页有 `textarea.ds-scroll-area`。因此「回退输入框判定」
-  // 在它身上恰好是准的；再叠一条含「登录」字样的 bad 特征反而容易误伤。
-  sendButton: "div[role='button']:has(path[d^='M8.3125'])",
-  stopButton: "div[role='button']:has(path[d^='M2 4.88'])",
-  attachSelector: "input[type='file']",
-  // 附件上传后的可见证据（2026-09-18 补充）。DeepSeek 用构建期哈希类名，
-  // 通用类名列表必然零命中。改为宽松选择器：含 webcode/context/markdown 的节点。
-  // 主证据仍是文件名本身（filenameEvidence），这只是提速副证据。
-  attachPreview: "[class*='file'], [class*='attachment'], [data-file], [data-attachment]",
-  decoder: 'deepseek', stream: true,
-  // 单一模型入口：桥只暴露一个 DeepSeek（0.19.43 起显示名去掉「（深度思考）」
-  // 后缀——组标题已写着站点，能力注记由模型元数据 thinking 表达，不该占名字）。
-  // 旧版三 pill（快速/专家/识图）已随 2026-09-10 新版 UI 取消——真机实测
-  // model_type 恒为 default，模式差异只剩「深度思考」开关；带图发送同样是
-  // default + ref_file_ids，由网页自行路由。因此不再拆成三个模型 id，
-  // 带图能力对本模型自动生效（有图就传，无图不受限）。
-  models: [
-    { id: 'deepseek', name: 'DeepSeek', labels: ['专家模式', 'DeepSeek'], thinking: true, context: 1_000_000, budget: 1_000_000, acceptsImages: true },
-  ],
-});
+/**
+ * DeepSeek 的站点常量（0.19.50 起声明已外移到 `lib/sites/deepseek.js`）。
+ *
+ * ## 为什么这里只剩一行
+ *
+ * `lib/sites/<siteId>.js` 迁移的第一站：**站点声明**搬去独立文件，
+ * `providers.js` 保留**组装职责**（`withEffort` 摊平思考等级 + 冻结）。
+ *
+ * 这条分工不是形式主义，它是本目录要修的那个问题本身：原先「站点长什么样」
+ * 与「站点怎么被组装进注册表」混在一个 1035 行的文件里、还与 `contract.js` /
+ * `decoder.js` / `browser-driver.js` 三处分摊，于是「改一个站点要动 4 个文件」。
+ *
+ * **行为必须逐字不变**：`test/provider-surface.test.mjs` 钉住对外面
+ * （站点表 / provider id / 模型目录 / 分组名），本行搬家前后它都必须是绿的。
+ *
+ * 未迁移的 9 个站点**刻意保持内联**——迁移是渐进的，见 `lib/sites/index.js`。
+ */
+export const DEEPSEEK = withEffort(siteModuleFor('deepseek'));
 
 export const GLM = withEffort({
   id: 'glm', name: '智谱清言 (GLM)', origin: 'https://chatglm.cn',

@@ -684,6 +684,34 @@ function frontClaims(pathname) {
 }
 
 /**
+ * 这个 (站点, 槽) 组合是不是**被注入的那个默认驱动槽**。
+ *
+ * ## 为什么把它抽成具名纯函数（0.19.50）
+ *
+ * `driverFor` 与 `webConversationTitle` 里各写过一次 `siteId === 'deepseek'`。
+ * 两处**看着像站点特例**，实际语义是**测试注入契约**：
+ *
+ *   · 测试通过 `config.driver` 注入桩驱动，而注入的那个**就是**默认槽的驱动；
+ *   · 若把它当成「deepseek 专属分支」顺手删掉或改成 `createBrowserDriver`，
+ *     全部既有测试会在无头环境里**真的去拉一个 Edge**（`index.js` 的 `driverFor`
+ *     注释已记这条：「全部既有测试会在无头环境里真的去拉 Edge」）。
+ *
+ * 这正是 `research/2026-09-26-dwb-site-modularity-audit.md` §C3 的建议：
+ * **保持共用，但把判据抽成具名谓词**——具名之后，下一个读代码的人不会把它误当成
+ * 「可以随手改掉的站点特例」。
+ *
+ * 注意它与「默认站点」是**两件事**：默认站点（`DEFAULT_MODEL_ID` 指向谁）会随配置变，
+ * 而这里判的是「这个槽是不是注入的那个」。因此**不要**把它简化成 `siteId === 某常量`。
+ *
+ * @param {string} siteId 站点 id
+ * @param {string} slot 账户槽（`DEFAULT_SLOT` 表示默认槽）
+ * @returns {boolean} 是否应返回注入的驱动实例
+ */
+function isInjectedDefaultSlot(siteId, slot) {
+  return siteId === 'deepseek' && slot === DEFAULT_SLOT;
+}
+
+/**
  * 插件入口：DSH 加载本包时调用一次，之后整轮生命周期都挂在它注册的东西上。
  *
  * 这里按顺序搭起四层，**顺序有依赖**，不要重排：
@@ -2759,7 +2787,8 @@ function imageMarkdown(images) {
     const { siteId, slot } = parsed;
     const key = formatAccountKey(siteId, slot);
     // 默认槽 + deepseek：沿用注入的 driver（测试桩与既有 profile 都在它身上）。
-    if (siteId === 'deepseek' && slot === DEFAULT_SLOT) return driver;
+    // 判据抽在 `isInjectedDefaultSlot` 里——它是**测试注入契约**，不是站点特例。
+    if (isInjectedDefaultSlot(siteId, slot)) return driver;
     if (!drivers.has(key)) {
       const st = getSite(siteId);
       if (!st) throw new Error('[webcode-bridge] 未知站点: ' + siteId);
@@ -2818,7 +2847,7 @@ function imageMarkdown(images) {
     try { siteId = resolveWebModel(options?.model || configManager.get().defaultModel || cfg.modelId).siteId; } catch { /* 用默认站点 */ }
     // 命名调用没有 agentId：对应的是本会话的主网页对话槽（key = sessionId）。
     // 只读**已经存在**的驱动实例，绝不懒创建（见上）。默认槽的键就是 siteId。
-    const d = siteId === 'deepseek' ? driver : drivers.get(formatAccountKey(siteId, DEFAULT_SLOT));
+    const d = isInjectedDefaultSlot(siteId, DEFAULT_SLOT) ? driver : drivers.get(formatAccountKey(siteId, DEFAULT_SLOT));
     if (!d || typeof d.listSessions !== 'function' || typeof d.conversationFor !== 'function') return null;
     const key = String(sessionId);
         // 0.21.1：键形修复。写入形状是 sessionId::accountKey（0.19.4 起带账号段），
