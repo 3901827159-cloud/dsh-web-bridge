@@ -38,6 +38,7 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import fs from 'node:fs';
 import os from 'node:os';
+import { listen } from './fixtures/listen.js';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -111,8 +112,7 @@ async function withBridge(driver, fn) {
     if (new URL(req.url, 'http://loopback').pathname === '/__webcode/attach-probe') return def.handler(req, res);
     res.writeHead(404).end();
   });
-  await new Promise((r) => server.listen(0, '127.0.0.1', r));
-  const port = server.address().port;
+  const port = await listen(server); // 共享守卫：坏端口/null 重试（见 fixtures/listen.js 头注的两类 flake）
   try {
     return await fn({
       post: async (body) => {

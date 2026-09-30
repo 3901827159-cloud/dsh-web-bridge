@@ -35,20 +35,14 @@ const logger = { log() {}, warn() {} };
 // `server.listen(0, host, cb)` 的回调在某些平台上可能早于地址可用（并发负载下实测
 // 读到 null）。夹具的职责是「给出一个能连的端口」，不是「把 null 传下去让 fetch 报
 // bad port」——后者会把夹具缺陷伪装成产品路由缺陷。
-const listen = (server, attempts = 20) => new Promise((resolve, reject) => {
-  const tryOnce = (n) => {
-    server.listen(0, '127.0.0.1', () => {
-      const port = server.address()?.port;
-      if (Number.isInteger(port) && port > 0 && port <= 65535) return resolve(port);
-      server.close(() => {
-        if (n <= 0) return reject(new Error('listen：反复拿不到可用端口（最后一次=' + JSON.stringify(port) + '）'));
-        tryOnce(n - 1);
-      });
-    });
-    server.once('error', reject);
-  };
-  tryOnce(attempts);
-});
+//
+// 2026-09-30（第二次 flake 归因）：`listen(0)` 还可能拿到 undici 的**保留坏端口**
+// （fetch 规范 79 个——本机 Node 22 逐个探测，79/79 与规范一致）。撞上时 `fetch`
+// 一律 `bad port`，与服务器状态无关。真机现场：全量批跑里 prompt-file 用例间歇红
+// （单独复跑 4 次全绿、干净树绿），日志逐字 `[TypeError: fetch failed] { cause: bad port }`。
+// 守卫已抽成共享 helper `test/fixtures/listen.js`（本轮 mirror / site-mount 等 9 个
+// 同款夹具一并接入），此处保留薄包装以维持既有导入面。
+const listen = (server, attempts) => import('./fixtures/listen.js').then((m) => m.listen(server, attempts));
 
 /** 最小可用的 deps：每个 action 要么直接成功，要么走到一个明确的桩。 */
 function stubControl() {

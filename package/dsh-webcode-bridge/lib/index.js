@@ -746,10 +746,24 @@ export function apply(ctx, config = {}) {
   // Map → no-cursor → fresh → 整段重发；网页会话身份早已落盘，丢的只是「发到第
   // 几条」。commit/invalidate 原子落盘到 profile 目录，启动回灌（上限 512 不变）。
   // **陈旧条目安全**：契约指纹 + 内容锚点自愈（contract-changed / anchor-lost），
-  // 持久化不会把旧游标错当新游标。只在显式传入 profileDir 时启用（生产必传；
-  // 不传的裸测试形态回落 DEFAULTS 真实 profile，绝不能被测试污染）。
+  // 持久化不会把旧游标错当新游标。
   const cursorStatePath = () => path.join(cfg.profileDir, 'webcode-cursor-state.json');
-  const cursorPersistenceUsable = () => Boolean(config && config.profileDir);
+  // profile 落盘可用性：settings 文件回落 / send-state / wait-stats / cursor-state
+  // 四处共用同一判据——显式传入 profileDir（standalone 入口与测试替身）**或非测试进程**。
+  // node --test 会设 NODE_TEST_CONTEXT；裸测试形态回落 DEFAULTS 真实 profile，
+  // 绝不能读写用户现场。旧判据「只认显式 profileDir」且只用在 cursor-state 上，
+  // 真机 2026-09-30 取证出两处对称后果：
+  //   ① DSH bundle 形态（cordis.patch.yml 的 config）不传 profileDir ⇒ cursor-state
+  //      在生产从未落盘（真实 profile 里没有 webcode-cursor-state.json，实测）——
+  //      0.21.1 的「重启不再整段重发」在生产一直是死功能；
+  //   ② 反向：settings / send-state / wait-stats **没有任何守卫** ⇒ 裸测试读到真实
+  //      webcode-settings.json（sendGapMs=30000）与真实 send-state（24h 内基准），
+  //      重放测试一轮真实等待 2×30s（long-term-issues #37 两条「60s 常红」的根因，
+  //      红绿随本机状态漂移、与代码无关），且 rememberSend 把测试的假发送时间戳
+  //      写回生产限流状态（实测：跑一遍 regression 后真实 send-state 的 deepseek
+  //      条目时间戳 = 测试运行时刻）。
+  const profilePersistenceUsable = () => Boolean(config && config.profileDir) || !process.env.NODE_TEST_CONTEXT;
+  const cursorPersistenceUsable = profilePersistenceUsable;
   if (cursorPersistenceUsable()) {
     try {
       const raw = JSON.parse(fs.readFileSync(cursorStatePath(), 'utf8'));
@@ -878,6 +892,10 @@ export function apply(ctx, config = {}) {
         } catch { /* fall through to file store */ }
       }
       try {
+        // 测试进程在无显式 profileDir 时禁读真实 settings 文件（守卫见
+        // profilePersistenceUsable 声明处；真机取证 2026-09-30：读取会拿到用户
+        // 的 sendGapMs=30000，让重放测试凭空真实等待 2×30s 撞 60s 超时）。
+        if (!profilePersistenceUsable()) return { ...defaultConfig };
         const data = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
         return { ...defaultConfig, ...data };
       } catch { return { ...defaultConfig }; }
@@ -898,6 +916,7 @@ export function apply(ctx, config = {}) {
       if (settingsService) {
         try { settingsService.set('webcode', merged); return merged; } catch (err) { warn('host settings set failed:', err?.message); }
       }
+      if (!settingsSaveUsable()) return merged;
       try {
         fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
         const tmp = settingsPath + '.tmp-' + process.pid;
@@ -907,6 +926,10 @@ export function apply(ctx, config = {}) {
       return merged;
     }
   };
+  // 注意（守卫的顺序）：settingsService 缺席时 configManager.set() 会落盘到
+  // profileDir——裸测试形态（无宿主 settings + 无显式 profileDir）必须同样被
+  // profilePersistenceUsable 拦住，否则设置页测试会把默认配置写进真实 profile。
+  const settingsSaveUsable = () => settingsService !== null || profilePersistenceUsable();
   const llm = resolveLlm(ctx);
   if (!llm) {
     throw new Error('[webcode-bridge] llm service not available on ctx — is this a dsh profile bundle loaded after dsh-base?');
@@ -2989,6 +3012,9 @@ function imageMarkdown(images) {
     return Number.isFinite(t) && t > 0 && t <= now && now - t <= SEND_STATE_MAX_AGE_MS;
   }
   (function loadSendState() {
+    // 裸测试形态不读真实 send-state（守卫判据见 profilePersistenceUsable）：
+    // 读到 24h 内的真实基准会让重放测试真实等待 2×30s（#37 的 60s 假红根因）。
+    if (!profilePersistenceUsable()) return;
     try {
       const raw = JSON.parse(fs.readFileSync(sendStatePath, 'utf8'));
       const now = Date.now();
@@ -3011,8 +3037,12 @@ function imageMarkdown(images) {
       }
     } catch { /* 首次运行或文件损坏：按「没有基准」处理即可 */ }
   })();
-  /** 落盘整张表。写失败仅 warn，绝不阻断发送（与 0.14.0 同一条纪律）。 */
+  /** 落盘整张表。写失败仅 warn，绝不阻断发送（与 0.14.0 同一条纪律）。
+   *  裸测试形态直接跳过（守卫判据见 profilePersistenceUsable）：旧实现把测试的
+   *  假发送时间戳写进真实 webcode-send-state.json，用户下一轮真实请求被测试凭空
+   *  压上发送间隔（真机取证 2026-09-30，时间戳逐字吻合）。 */
   function saveSendState() {
+    if (!profilePersistenceUsable()) return;
     try {
       fs.mkdirSync(path.dirname(sendStatePath), { recursive: true });
       const tmp = sendStatePath + '.tmp-' + process.pid;
@@ -3051,6 +3081,7 @@ function imageMarkdown(images) {
   // 但「累计」是全量的——淘汰只影响按会话查询，不影响总数。
   const WAIT_SESSION_CAP = 64;
   let waitStats = (function loadWaitStats() {
+    if (!profilePersistenceUsable()) return { total: emptyWaitStats(), sessions: new Map() };
     try {
       const raw = JSON.parse(fs.readFileSync(waitStatsPath, 'utf8'));
       return {
@@ -3062,6 +3093,7 @@ function imageMarkdown(images) {
     } catch { return { total: emptyWaitStats(), sessions: new Map() }; }
   })();
   function saveWaitStats() {
+    if (!profilePersistenceUsable()) return;
     try {
       fs.mkdirSync(path.dirname(waitStatsPath), { recursive: true });
       const payload = { total: waitStats.total, sessions: Object.fromEntries(waitStats.sessions) };

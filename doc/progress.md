@@ -16,6 +16,193 @@
 
 ---
 
+## profile 落盘测试隔离 + 生产游标持久化死链（2026-09-30，long-term-issues #37 根因修复）
+
+**一句话**：#37 两条「常红」（`regression` 53/1、`aux-delta-compact` 4/1）的真正根因**不是**
+`lib/index.js` 的重放分支，而是**测试隔离缺陷**——裸测试（`apply()` 不传 `profileDir`）回落
+DEFAULTS 的**真实** `~/.dsh/webcode-edge-profile`，settings/send-state/wait-stats 三个落盘路径
+没有任何守卫；同一判据反向误杀了 bundle 生产形态的 cursor-state 落盘。
+
+### 一、根因链（每一步都有实测证据）
+
+1. 裸 apply 不传 `profileDir` ⇒ `cfg.profileDir` = 真实 profile（`lib/index.js` DEFAULTS）。
+2. `configManager.get()` 回落读真实 `webcode-settings.json` ⇒ 测试拿到用户的 `sendGapMs: 30000`
+   （真实文件实测值）。
+3. `loadSendState()` 读真实 `webcode-send-state.json` ⇒ 测试拿到 24h 内的真实发送基准。
+4. `WEB_SESSION_LOST` 重放用例 = 同一账号 3 次发送 ⇒ 2 段 30s 真实等待 = **60.02s**，压线撞
+   node:test 的 60s 用例超时。**红绿随本机状态漂移**（基准 24h 内才有 ⇒ 「干净树同样红」且
+   「过一天可能自己变绿」），与重放代码无关——#37 当时归因为「等一个永不到来的事件」，
+   实际是**在等真实限流窗口**。
+5. 反向污染：`rememberSend` 把测试的假发送时间戳**写回**真实 send-state（跑一遍 regression 后
+   deepseek 条目时间戳 = 测试运行时刻 1790715108997 = 2026-09-30 04:51:49，逐字吻合）；
+   `wait-stats` 同理写回。
+
+### 二、修法（一处判据，六个落盘点）
+
+`lib/index.js` 新增**统一判据**（与 reply-log / prompt-store / continue-budget 既有守卫严格同族）：
+
+```js
+const profilePersistenceUsable = () => Boolean(config && config.profileDir) || !process.env.NODE_TEST_CONTEXT;
+```
+
+- **裸测试形态**（无显式 profileDir + 测试进程）：settings 读/写、send-state 读/写、
+  wait-stats 读/写全部跳过真实 profile；cursor-state 沿用既有守卫（判据从
+  `Boolean(config.profileDir)` 换成统一判据）。
+- **对称修复（生产死链）**：旧 cursor-state 判据「只认显式 profileDir」的前提「生产必传」
+  是错的——**DSH bundle 形态（cordis.patch.yml 的 config）不传 profileDir** ⇒ 0.21.1 的
+  游标持久化在生产从未生效（真实 profile 里没有 `webcode-cursor-state.json`，实测）。
+  新判据的「非测试进程」分支让它照常落盘。standalone 入口（显式传）不受影响。
+
+### 三、护栏（`test/profile-isolation.test.mjs`，4 项，反向验证已做）
+
+| # | 判据 | 反向验证 |
+| --- | --- | --- |
+| ① | 裸 apply 跑完整轮 ⇒ 真实 profile 四文件（settings/send-state/wait-stats/cursor-state）不被创建或改写 | 判据改坏（删「非测试进程」分支）⇒ ③ 红 |
+| ② | 裸 apply 一轮毫秒级（<10s 上限；修前同形态实测 30s+） | 判据改坏 ⇒ ③ 红 |
+| ③ | 源码结构：判据形状 + 六落盘点各有守卫 + cursor-state 读写都走守卫 | 判据改坏 ⇒ 红；删 send-state 读守卫 ⇒ 红 |
+| ④ | 显式 profileDir 落盘不回归（send-state 照常写出 deepseek 基准） | 未做变异（它钉的是「守卫不误伤」，破坏面是 ①③ 的反误伤方向） |
+
+跑法前提：**必须 `NODE_TEST_CONTEXT=1`**（node --test 设它；逐文件跑按仓库纪律显式设）。
+不设时该文件的唯一用例会显式失败并说明跑法，不默默测一个不存在的守卫。
+
+### 四、读数（修前 vs 修后，同一台机同一命令）
+
+| 文件 | 修前 | 修后 |
+| --- | --- | --- |
+| `aux-delta-compact` 重放用例 | 60.02s 压线（红/绿随本机状态） | **1.02s**（5/5 绿） |
+| `regression.test.mjs` 全文件 | 571.4s（54/54，其中重放用例 90s） | **9.9s**（54/54） |
+| `cursor-persistence` | 5/5 | 5/5（不回归） |
+| `session-anchor` / `settings-transport` | 7/7 / 8/8 | 7/7 / 8/8（不回归） |
+| `profile-isolation`（新增） | — | 4/4 |
+
+### 五、同轮收口的第二类测试 flake：undici 保留坏端口（9 个文件）
+
+全量批跑暴露了**另一类**与产品无关的间歇红：`control-routes` 的 prompt-file 用例
+在全量里红、单独跑恒绿。归因：`server.listen(0)` 可能拿到 undici 的**保留坏端口**
+（fetch 规范 79 个：1/7/…/2049/5060/6000/6566/6665-6669/6697…；本机 Node 22 逐个
+探测 79/79 与规范一致），撞上时 `fetch` 一律 `bad port`，与服务器状态无关——
+0.16.9 已修过它的孪生形态（`address().port` 读到 null），这次是第二类。
+
+- **修法**：端口守卫抽成共享 helper `test/fixtures/listen.js`（数字合法 + 不在保留
+  清单，否则 close 重试；`test/` 子目录不进 `test/*.test.mjs` 收集范围，不占台账数）。
+  接入 9 个 `listen(0)`+`fetch` 测试文件：control-routes / attach-probe-contract /
+  session-continuity / settings-transport / site-prompt-transport / wiring-roster /
+  mirror / site-mount / ssrf-redirect-guard。
+- **反向验证**（确定性，不靠撞概率）：对保留端口 6669 直接 `listen(6669)`——旧判据
+  放行、`fetch` 实报 `bad port`、新判据拒绝，三者逐字实测。
+- **过程教训（如实记）**：批量替换时 6 个文件的 import 语句没插成功（正则只匹配了
+  `import { createWebControl…}` / `import http…` 两种头部形状，漏了其它形状），测试
+  进程在 `await listen(server)`（ReferenceError）上**挂死**而不是报错——两轮被
+  后台作业 10–40 分钟级的假悬挂浪费后才归因。教训与 #37 同族：**「改了」必须以
+  「读数变了」为准，不是以「替换脚本说成功」为准**；批量编辑后必须先跑一次目标
+  文件再进全量。
+
+### 六、台账
+
+- 新增测试文件 1 个（`test/profile-isolation.test.mjs`）⇒ `test/*.test.mjs` **118 → 119**
+  （本格与「当前状态」表已同步）。`test/fixtures/listen.js` 是共享 helper 不是测试文件，
+  不进收集范围。
+- `doc/long-term-issues.md` **#37 已按根因收口**（正文补「2026-09-30 二次复核」段）。
+- `CHANGELOG.md` 随下个版本号一并记（本轮只改代码 + 文档，按仓库惯例不动版本号）。
+
+---
+
+
+
+**一句话**：把同类 DSH 插件 `dsh-codearts-auth` 拉进 `reference/` 并**按仓库规范登记**，
+再产出「本项目架构 vs 官方适配插件体系」的对照审计。**本轮没有改任何 `lib/` 代码**，
+只动了 `reference/`（不入库）与 `doc/`（入库）。
+
+### 一、新增参考仓库（第 48 个条目）
+
+| 项 | 值 |
+| --- | --- |
+| remote | `https://gitee.com/iJetLi/deepseek-harness-codearts`（**直连 gitee，无 `ghfast.top` 镜像前缀**） |
+| HEAD | `af2039800ac2875a5ef8edc7d1842cfc1ef71ae9`（2026-09-30 00:30 +0800，`master`） |
+| 规模 | 158 提交 / 9.6 MB / `src/*.ts` 99 个文件 + 1 `.wasm` / 49,897 行 |
+| 测试 | `tests/unit` 144 文件 + `tests/e2e` 42 文件 |
+| 它是什么 | `dsh-codearts-auth`：**11 个 LLM provider 路由**（codearts / buddy / workbuddy / lobsterai / qoder / qodercn / trae / cline / loomy / raccoon / zcode）的登录·凭据·适配聚合插件 |
+
+**为什么它值得留档**：与本项目**目标同构**（都是给 DSH 加 LLM provider 路由的插件），
+差别只在模型来源（它走官方/半官方 HTTP API，本项目驱动网页）。
+⇒ 它是「插件声明面该长什么样」的**活体范例**，比官方文档更具体。
+
+### 二、登记动作（按 `reference/README.md` 与 `doc/research/reference-projects.md` 的双处约定）
+
+1. `reference/README.md` §4 表新增一行 —— **由生成器产物逐字粘贴**，不是手抄
+   （`node scripts\gen-reference-index.mjs` 输出与表段做了一次 `-ceq` 逐字节比对，
+   结果 `IDENTICAL`，50 行）。
+2. 新增 `reference/local-refs/deepseek-harness-codearts-reference-notes.md`（入库）：
+   逐条 `文件:行号` 取证它的声明面。
+3. `doc/research/reference-projects.md` 总表 + 逐条采用记录 + `local-refs` 表三处补齐。
+4. 新增 `doc/architecture-vs-official-plugins.md`（本轮主交付物）并登记进 `doc/README.md`。
+
+### 三、顺带修掉的**既有记账漂移**（4 处，都不是本轮引入的）
+
+| 项 | 原值（错） | 实测（对） | 根因 |
+| --- | --- | --- | --- |
+| `reference/` 条目数 | 「35 个第三方项目」「共 36 个目录」 | **48 个目录**（40 clone + 8 非 clone） | 手写计数没人核对 |
+| 体积 | 「978.9 MB（46 个条目）」 | **1189.4 MB** | 同上；且 ≥10 MB 的是 **10 个**不是 9 个 |
+| `§4` 表 | 48 行、正文写「46 个条目」、磁盘 47 目录 —— **三者互不相等** | 表 = 磁盘 = 48 | 生成器**只扫磁盘、不删陈旧行**；`--check` 只验「磁盘存在的」条目，**陈旧行它抓不到** |
+| `local-refs` 内容 | 「6 份 md + 2 个归档子目录」 | **10 份 md + 3 个子目录** | 同上 |
+
+另外**删掉了 §4 表里一行陈旧条目** `steel-browser-npm`：磁盘上实测**不存在**
+（`Test-Path` 为 `False`），但表里一直留着。`--missing` 读数因此从 9 条降到 **8 条**。
+
+> ⚠️ **教训（值得记进 `doc/long-term-issues.md` 的那一类）**：
+> `gen-reference-index.mjs --check` 的语义是「凡在**本机存在**的条目，README 必须与磁盘逐字一致」，
+> 这是**为了干净克隆上不假红**而刻意设计的（见该脚本头「已知边界」）。
+> 代价是：**磁盘上消失的条目，它永远不会报**。
+> ⇒ 删目录后必须**手工**同步 §4 表；这条限制此前没有写在任何地方。
+
+### 四、对照审计的核心结论（详见 `doc/architecture-vs-official-plugins.md`）
+
+**声明面：逐字段一致，无一处自造协议。** 差异全在执行层，且是**路线差异**。
+
+**一条已判定并纠正的旧结论**（本轮最硬的一段取证）：
+
+- 本项目 `lib/index.js:920-926` 的注释断言「同时调 `registerConfigurableProviders`
+  会让 GUI 把 provider 当成需要 endpoint 配置的 provider，**模型反而不出现在主选择器里**」。
+- **源码级判定：后半句不成立。** `buildModelCatalog` **只读 `ctx.llm.listProviders()`**
+  （`reference/deepseek-harness/packages/api/session-controller/src/catalog.ts:20`；
+  实装 0.2.0-rc.2 的 `dsh-api-session-controller/lib/index.js` 同）。
+  `listConfigurableProviders()` 的**唯一**客户端消费者是设置页
+  （`packages/client/ui-settings-models/src/client/store.ts:185`）。
+- ⇒ 调它**不会**影响主选择器；本项目**不调仍然正确**，但理由要换成
+  「provider 注册即激活、directory 无语义信息量，且会渲染出语义错误的凭据徽章」。
+- **已登记为待办**（对照审计 §6 第 2 条）；本轮**没有改代码注释**（零代码改动）。
+
+**一条被两个独立仓库交叉验证的契约事实**：
+静态 `inject` 里**不得**放「只有部分 profile 提供」的服务（本项目 `webServer` / `agentTeams`，
+codearts 的 `connection`），必须改走 `ctx.inject([...], cb)`。
+两边各自踩到同一个真机坑：headless profile 整条 entry pending、退出 1。
+
+### 五、本轮的闸门读数（全部实测）
+
+```
+ref-index        PASS   48 个存在条目与本机一致
+repo-hygiene     PASS   BOM / doc-README 死链 / Node 版本
+check-ledger     PASS   version 0.19.51、testFiles 118/118
+long-term-issues PASS   正文 37 条 ↔ 一览表 38 行自洽
+plugin-contract  PASS   七条契约
+lint-comments    PASS   244 文件，error 0 / warn 0
+单测             PASS   1274 tests / 0 fail（`node --test test/*.test.mjs`）
+```
+
+> ⚠️ `scripts/ci-local.mjs` 的 `test` 步在本机会红，**与本轮改动无关**：
+> 它先跑 `pnpm install`，在无 TTY 环境下抛
+> `ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY`（需 `CI=true` 或 `confirmModulesPurge=false`）。
+> 直接跑 `node --test test/*.test.mjs` 全绿（1274 通过）。这是一条**环境事实**，
+> 不是代码缺陷——但下次有人跑 `ci-local` 时会再撞一次，故记在这里。
+
+### 六、下一步（未做，留待拍板）
+
+1. 按对照审计 §3.1 改写 `lib/index.js:920-926` 的注释（**改注释要跑 `gen-index`**）。
+2. 决定 `attributionHeaders()` 的豁免是否要显式写进注释（对照审计 §6 第 1 条）。
+3. 决定是否声明 `@deepseek-ai/dsh-llm` 等 peer（§6 第 3 条；**仅 0.2.0-rc.2 起**有门禁）。
+
+---
+
 ## 0.19.51 修 DSH 0.2.0-rc.2 上升级后插件「整套消失」（2026-09-30）
 
 **一句话**：DSH 升到 `0.2.0-rc.2` 之后，插件**根本没有被加载**——右栏面板、任务板、
@@ -2002,7 +2189,7 @@ MUTATED ok — 缺陷写法已写回（断言替换确实生效，而不是空�
 | 已装版本（profile） | **0.19.26（2026-09-26 装箱并装入 web / headless 双 profile）**：本轮把三车（README 更正 / CodeQL 两条真缺陷修复 / 思维链退化重复通用检测）一并装箱。**待用户重启 `dsh web` 生效**（运行中的进程仍是旧代码）。<br>**上一版行（0.19.25，保留）**：**0.19.25（2026-09-26 装箱并装入 web / headless 双 profile）**：声明（`profiles/<p>/package.json` 的 `file:…dsh-webcode-bridge-0.19.25.tgz`）= `node_modules` 实装 version = 仓库根 tarball **三方一致**，包内 `LICENSE`（标准 MIT 全文）与 `headlessCallTailAt` 均在位。**待用户重启 `dsh web` 生效**（运行中的进程仍是旧代码）。<br>**上一版行（保留）**：web = **0.21.0**、headless = **0.21.0**（2026-09-25 装箱；0.21.0 = 「0.21.0 范围」行：WebRTC 页面自采主路 + liveHeaded 有头三件套隐藏 + 失败自动降级投屏）、headless = **0.20.2**（2026-09-25 三次装箱；0.20.2 修「画面不适配面板大小+画质低」：hub 按面板尺寸 ×2 超采样做 CDP 视口仿真（viewportForPanel，钳制 720–1280 / 900–2000），投屏上限同步、quality 90，客户端 canvas 按 devicePixelRatio 绘制 + ResizeObserver 防抖上报、同尺寸跳过；护栏 14/14，真机探针帧元数据 640×900→1024×1440 仿真生效、点击端到端仍 PASS；0.20.1 修真机首因「正在加载遮罩盖死画面流」——LivePane 分支无 iframe、ready 永不置位、不透光遮罩盖住已连上的画面，修法=遮罩条件排除画面流分支；0.20.0 内容见「0.20.0 范围」行）（2026-09-25 用 `dsh plugin --profile <p> add` 持久装入；两 profile 的 `package.json` 依赖、`pnpm-lock.yaml` specifier、`node_modules` 实装版本三方实测均为 0.20.0；tarball sha512 `en1q5VLu7U2R3bguyR+Y8nF+iKvTNlrexbNVGauG1s3ulCm0Oq7gLF007SSqyqQwqI5Wb1jj+r9MVabPI6hBBQ==`；新符号 `lib/live.js`（createLiveHub/mapMouseInput/mapKeyInput）与 `browser-driver` 的 `live` API、`client.cjs` 的 `LivePane`/`LIVE_SITES` **全部就位**） |
 | 运行中的进程 | **2026-09-26 16:41 实测**：`dsh web` **PID 11268**（14:20:23 启动）**仍加载 0.19.23 的代码**——装进 profile 的 0.19.24 只在磁盘与声明上生效，**重启才会加载**；而它是本 GUI 的服务进程，重启会终止在跑会话，**由用户自行决定**，本轮不代为重启。<br>**上一版行（保留）**：3080 侧 relay 实测 `/__webcode/status` 的 `build` = `{hash:'ad70f8c267de', version:'0.19.11'}`、`browserSource='bundled'`（chromium-1232）（2026-09-25 01:05 实读）⇒ 磁盘已是 **0.20.0**，**进程仍跑 0.19.11，待用户手动重启** |
 | 上游 | **本轮三车已推送 `origin/main`**（起点 `3de2089`）：`3ba8d68` = 0.19.24 DSH STORE 收录契约 + GLM 无头调用残片修复；`425b9a6` = 0.19.25 许可识别修正（标准 MIT 全文，GitHub 实读 `license.key=mit`）；`61d54f0` = 契约闸门加固（许可正文逐字等于 MIT 模板）。**本条台账收口为第 4 车，推送后远端 `main` 即含本行**。推送途中 GitHub 直连多次超时，重试后成功（本机 127.0.0.1:7897 的代理 TCP 可连但 TLS 握手失败，未采用）。<br>**上一版行（保留）**：`origin/main` = `fb7cd6e`（0.16.31 文档收口）；本轮 0.16.32–0.16.40 待提交/待推（0.16.38 / 0.16.39 / 0.16.40 **均已打包装机**） |
-| 单测基线 | **118/118**（台账口径 = `test/*.test.mjs` 文件数；0.19.51 **未新增测试文件**，只在既有文件里加断言，故仍 118。**全量实跑读数（2026-09-30，118 文件逐文件跑）= 118/118 全部 exit 0**；`parse.test.mjs` **22/22**、`run-m1.js` **M1 RESULT: PASS**、`bench-ci.mjs` 与 `artifacts-check.mjs` 均 PASS。**注意与 0.19.50 行的差别**：上一版记的是「115 通过 / 3 失败」，本版是 **118/118**——三处变化都可归因：① `run-m1.js` 那条**自 0.19.42 起恒红**的空壳断言本轮修好（见 0.19.51 节，`M1` 首次 PASS）；② `prompt-store` 上一版记为「调用方式产物」的假红，本轮按 `NODE_TEST_CONTEXT=child-v8` 的正确调用方式复跑为**绿**；③ `regression` 53/1 与 `aux-delta-compact` 4/1 两条长期问题 **#37** 的读数**未在本轮复跑**（本轮未触碰 `WEB_SESSION_LOST` 重放路径），**如实标注为未复跑**，不计入本轮读数。**上一版行（0.19.50，保留）**：**118/118**（台账口径 = `test/*.test.mjs` 文件数；0.19.50 新增 `answer-selector` 5 项与 `provider-surface` 6 项，故 116 → 118。**全量实跑读数（2026-09-30，118 文件逐文件跑）= 115 通过 / 3 失败**，三条全部归因完毕，**无一是本轮引入的回归**：① `prompt-store`——设 `NODE_TEST_CONTEXT` 后 **11/11 通过**，是**调用方式产物**（该用例显式要求 `node --test` 环境，断言原文「node --test 进程不许写真实 `~/.dsh/webcode/`」）；② `regression` **53/1**、③ `aux-delta-compact` **4/1**——两条**既有常红**，已用 `git stash push -u` 撤掉本轮全部改动在**干净树**上复跑，**逐字同样红**（同一条用例、同样 60s 超时）。这两条是**同一条行为**（`WEB_SESSION_LOST` → 整段重放），落在「绝不静默丢上下文」红线区，已登记为 `long-term-issues` **#37**（此前只以脚注存在于本格）。新增护栏均已按本仓库纪律做**反向验证**：`answer-selector` 两条（优先级调反 ⇒ 1 条红；兜底串改一字符 ⇒ 2 条红）、`provider-surface` 一条（去掉 GLM 组名覆盖 ⇒ 1 条红）。**上一版行（0.19.49，保留）**：**117/117**（台账口径 = `test/*.test.mjs` 文件数；0.19.49 新增 `think-effort-realtext` 5 项，故 115 → 116。**全量实跑读数**：0.19.48 树上的全量 116 文件 = **114 通过 / 2 失败，耗时 2780s**，两个失败是 `accounts-integration` 与 `model-picker`——**都不是 0.19.49 引入的**，真因是 0.19.43「删四站点自造的 auto 档」改了 `providers.js` 的模型表却**漏改这两个测试文件**（`ecc6ef2` 的 `--name-only` 里没有它们），它们从那时起一直红着。本轮一并修好：`model-picker` 7/7、`accounts-integration` 16/16，并且顺带发现并修掉一个**真 bug**——带槽的兼容别名解析不了（`zai@work:auto` 报「不支持的网页模型」而 `zai:auto` 正常，两者本该等价）。逐文件读数：`think-effort` 27/27、`think-effort-realtext` 5/5（新增）、`model-picker` 7/7、`accounts-integration` 16/16、`accounts` 38/38、`model-labels` 12/12。**如实交代**：新增的 `think-effort-realtext` 与改动后的两个测试文件只跑了**各自的文件级**绿色，全量在 0.19.49 树上的复跑结果见下一行（同一行内已按实际读数改写）。**上一版行（0.19.48，保留）**：**115/115**（台账口径 = `test/*.test.mjs` 文件数；0.19.48 新增 `think-effort` 25 项，故 114 → 115，**只跑了受影响集**：新增 `think-effort` 25/25、`model-labels` 12/12、`multi-site-decoder` 28/28、`empty-response` 5/5、`zero-progress` 13/13、`thinking-image` 3/3、`control-routes` **17/17**；`regression` **53/1** 的那 1 条红已用 `git show HEAD:` 换回旧版 `browser-driver.js` + `index.js` 复跑确认**逐字同样红**（「网页会话丢失时用整段首轮提示词重放」，与本轮改动无关，台账 0.19.47 行已记过同一读数）。并已按真机读数反向变异确认红灯基线（把 `menuOpen` 判据退回「页面上有 checked 即开着」⇒ ④j 变红；把回读判据退回「文本含目标」⇒ ③ 变红）；0.19.47 新增 `mirror-slot-isolation` 6 项 + `glm-think-tag-leak` 4 项，故 112 → 114；**同时修好两条常年假红**——`control-routes`（断言已删的 `glm:auto`）与 `multi-site-decoder`（同因），两者现在 17/17 与 28/28 全绿。**如实交代：0.19.47 只跑了受影响集**——新增 6/6 与 4/4 通过、各自已反向变异确认红灯基线；`glm-tool-snapshot-dedup` 3/3、`glm-conversation` 18/18、`glm-hybrid-call` 5/5、`glm-attach-limit` 5/5、`decoder-fragment-diff` 9/9、`model-labels` 12/12、`client-render` 63/63、`client-server-contract` 2/2、`account-identity-cache` 7/7、`zero-progress-scene` 5/5、`pre-deliver-window` 6/6 全绿。未跑全量）。**上一版行（0.19.46，保留）**：**112/112**（台账口径 = `test/*.test.mjs` 文件数；0.19.46 新增 `account-identity-cache` 7 项，故 111 → 112。**如实交代：0.19.46 只跑了受影响集**——新增文件 7/7 通过、并已反向变异确认红灯基线（退回「无活页即全 null」⇒ ②④ 变红）；`zero-progress-scene` 5/5、`pre-deliver-window` 6/6、`browser-source` 4/4、`settings-transport` 8/8、`site-prompt-transport` 8/8、`session-continuity` 14/14 全绿。未跑全量 112 个文件）。**上一版行（0.19.45，保留）**：**111/111**（台账口径 = `test/*.test.mjs` 文件数；0.19.45 新增 `zero-progress-scene` 5 项，故 110 → 111。**如实交代：0.19.45 只跑了受影响集**——新增文件 5/5 通过、并已反向变异确认红灯基线（去掉流尾段 ⇒ ② 变红）；`pre-deliver-window` 6/6、`stall-settle` 15/15、`capture-stall-rescue` 18/18、`watchdog-first-byte` 9/9、`idle-window` 18/18、`glm-attach-limit` 5/5、`glm-hybrid-call` 5/5、`kimi-decoder` 5/5、`zai-answer-selector` 6/6 全绿；`regression` 53/1 的 1 条红**已用 `git show HEAD:` 换回旧版确认与本轮无关**。未跑全量 111 个文件）。**上一版行（0.19.44，保留）**：**110/110**（台账口径 = `test/*.test.mjs` 文件数；0.19.44 新增 `pre-deliver-window` 6 项，故 109 → 110。**如实交代：0.19.44 只跑了受影响集**——新增文件 6/6 通过、并已反向变异确认红灯基线；`watchdog-first-byte` 9/9、`idle-window` 18/18、`timeout-order` 5/5、`capture-stall-rescue` 18/18、`stall-settle` 15/15、`session-continuity` 14/14、`tool-loop` 14/14、`wait-stats` 40/40、`settings-transport` 8/8、`prompt-transport` 12/12、`glm-attach-limit` 5/5、`captcha-gate` 5/5、`model-labels` 12/12 全绿；`regression` 53/1 与 `control-routes` 16/1 各有 1 条红，**已用 `git show HEAD:` 换回旧版 `lib/index.js` 复跑确认两条在 HEAD 上逐字同样红 ⇒ 与本轮改动无关**。未跑全量 110 个文件）。**上一版行（0.19.41，保留）**：**109/109**（台账口径 = `test/*.test.mjs` 文件数，2026-09-27 实测）。**0.19.41 冻结工作树后全量逐文件串行实跑：109 个文件 / 109 通过 / 0 失败 / exit 0，耗时 1866s**。本轮新增 4 个护栏文件：`composer-single-write` 4 项（富文本必须一次性写入）、`captcha-gate` 5 项（站点风控闸门必须提前如实报错）、`kimi-decoder` 5 项（生成状态与服务端原话必须用起来）、`zai-answer-selector` 6 项（z.ai 助手节点选择器；由 teammate 交付、★ 项已反向变异确认），故 103/103 → 109/109。**如实交代（本轮两次全量结论不同的原因）**：首次全量是在**树被编辑中**跑的（`agent-preset.js` 的解析改动尚未定稿），结果 6 个文件红；定稿后冻结工作树重跑才得到 109/109。**编辑中的红不算读数**（与本文件既有的并发判据同一条纪律）。**上一版行（0.19.40，保留）**：**103/103**。**0.19.40 首次跑通全量：1162 项 / 1162 通过 / 0 失败 / exit 0**（`node --test test/*.test.mjs`）。此前 0.19.30–0.19.39 各轮按用户指示只跑轻量集（那是「省时间」而非「跑不动」）；本轮按「确保没有因为快速而进行质量减少」的要求补跑全量，结果证实没有质量折损，唯一的 1 条失败是**环境相关的假红**（见「工作树版本」0.19.40 行 ③，已归因到 HEAD 并用 `git show` 对照确认与本轮改动无关，修后全绿）。**上一版行（0.19.39，保留）**：**103/103**（台账口径 = `test/*.test.mjs` 文件数，2026-09-27 实测）。**如实交代：本轮 0.19.39 未跑全量**——用户明确指示「先不进行全量测试耗时，直接轻量测试，过了就回报结果」。本轮实跑的轻量集全绿（197 项）：`client-render` / `hooks-order` / `control-routes` / `update`（新增 11 项纯函数）/ `wait-stats` / `client-server-contract` / `settings-transport` / `accounts` / `accounts-integration`；并做了**反向变异确认**（见 0.19.39 行 ⑤，三处变异全部精确变红）。**其余 94 个文件本轮未跑**，不得据此行推断它们全绿。<br>**上一版行（102/102，保留）**：**102/102**（台账口径 = `test/*.test.mjs` 文件数，2026-09-27 实测）。**如实交代：本轮 0.19.34 未跑全量**——用户明确指示「先不进行全量测试耗时，直接轻量测试，过了就回报结果」。本轮实跑的轻量集全绿：`wait-stats` 56/56、`control-routes` 56/56、`client-render` 59/59、`client-server-contract` 2/2；并做了**反向变异确认**（见「工作树版本」0.19.34 行 ⑤）。**其余 98 个文件本轮未跑**，不得据此行推断它们全绿。<br>**上一版行（101/101，保留）**：**101/101 测试文件全绿**（2026-09-26 逐文件实跑。本轮新增 1 个护栏文件 `column-fs` **10 项**——并列三列**产物围栏**：canonicalize-then-contain、前缀伪装/绝对路径/路径穿越/**符号链接指向工作区外**四类拒绝（**已反向变异确认**：摘掉围栏 ⇒ 2 条拒绝判据变红、还原即绿）、不同列/不同会话目录互不可见、以及「落盘 best-effort 不得把成功发送报成失败」的三跳接线判据，故 100/100 → 101/101）。<br>**上一版行（100/100，保留）**：**100/100 测试文件全绿**（2026-09-26 全量 `node --test test/*.test.mjs`，串行独占。本轮新增 1 个护栏文件 `driver-scope` 5 项——GLM「整轮无回复」的跨作用域引用回归判据，含扫描器自检 + 反向变异确认，故 99/99 → 100/100）。<br>**上一版行（99/99，保留）**：**99/99 测试文件全绿**（2026-09-26 全量 `node --test test/*.test.mjs` **1109/1109 通过、exit 0**、串行独占 380s。本轮新增 2 个护栏文件、15 项：`ssrf-redirect-guard` 4 项（含起点公网→内网必须抛错且内网零命中、起点回环保持旧行为）＋ `repeat-detect` 11 项（9 项判据 + 2 项**接线断言**，接线用例已反向变异确认），故 97/97 → 99/99）。<br>**上一版行（97/97，保留）**：**97/97 测试文件全绿**（2026-09-26 全量 `node --test test/*.test.mjs` **1094/1094 通过、exit 0**。新增 `headless-call-tail` 11 项——真机 session-c20f43e9 无头调用残片（`name":"pwsh"…` 缺 JSON 头）泄漏的修复护栏：纯函数 + 整段/快照/逐字符三种到达方式 E2E + 散文对照，故 96/96 → 97/97；修复细节与反向变异见 `doc/research/2026-09-26-headless-call-tail-fragment.md`）。<br>**上一版行（96/96，保留）**：**96/96 测试文件全绿**（2026-09-26 全量 `node --test test/*.test.mjs` **1083/1083 通过、exit 0**。0.19.23 在既有文件内新增 4 项（GLM 原生 code part 1 项 + `closingFenceAfter` 开启围栏单元 1 项 + **切分粒度穷举** 1 项 + `firstEventSeen` 相位分诊 1 项）；0.19.21 新增 `column-context` 6 项；0.19.16 新增 `multi-site-decoder` / `wip-settle`；0.19.17 新增 `fence-tail`；0.19.18 新增 `bridge-lock` 14 项，故 91/91 → 95/95 → 96/96）。<br>**上一版行（95/95，保留）**：**95/95 测试文件全绿**（2026-09-26 全量 `node --test test/*.test.mjs` **1062/1062 通过、exit 0**。0.19.16 新增 `multi-site-decoder` / `wip-settle`；0.19.17 新增 `fence-tail`；0.19.18 新增 `bridge-lock` 14 项，故 91/91 → 95/95）。<br>**上一版行（94/94，保留）**：**94/94 测试文件全绿**（2026-09-26 全量 `node --test test/*.test.mjs` **1046/1046 通过、exit 0**。0.19.16 新增 `multi-site-decoder` / `wip-settle`，0.19.17 新增 `fence-tail` 8 项，故 91/91 → 94/94）。<br>**更早一行（91/91，保留）**：**91/91 测试文件全绿**（2026-09-25 逐文件实跑；全量 `node --test test/*.test.mjs` **1017/1017 通过、exit 0**、串行独占 602s。0.19.12 新增 1 个护栏文件 `capture-stall-rescue` 18 项，故从 90/90 升到 91/91）。**M1 例外（既有状态，本轮未引入）**：`node test/run-m1.js` **3 项失败**（turn1 fresh / turn2 same / parallel agents 的会话连续性断言）；`git stash` 对照 **HEAD（f988ba1，0.19.10）同样 3 项失败** ⇒ 失败先于本轮存在（0.19.11 一轮的「90/90」读数只跑了 `node --test`，未跑 run-m1，正是这样漏掉的）。归因与修复留作独立任务，不混入本轮。<br>**复核方式必须写清（本轮踩过一次）**：全量必须**串行独占**——本轮曾让两个作业并发跑测试，结果 `empty-response` 挂住 53 分钟、`regression` 从 8 分钟涨到 19 分钟；单独复跑 `empty-response` **69.8s / 5/5 通过**。并发下的红/慢**不算读数**（本文件 0.19.0 行已记过同型判据）。 |
+| 单测基线 | **119/119**（台账口径 = `test/*.test.mjs` 文件数；本轮新增 `profile-isolation` 1 个 ⇒ 118 → 119。**本轮实跑读数（2026-09-30，逐文件、`NODE_TEST_CONTEXT=1` 统一条件）**：受影响面全部实跑——`regression` **54/54（9.9s，修前 571.4s）**、`aux-delta-compact` **5/5**（重放用例 **1.02s**，修前 60.02s 压线）、`cursor-persistence` 5/5、`session-anchor` 7/7、`settings-transport` 8/8、`profile-isolation` **4/4（新增）**；全量 119 文件读数见下方引号内（后台实跑完成后回填）。**0.19.51 行（保留）**：**118/118**（台账口径 = `test/*.test.mjs` 文件数；0.19.51 **未新增测试文件**，只在既有文件里加断言，故仍 118。**全量实跑读数（2026-09-30，118 文件逐文件跑）= 118/118 全部 exit 0**；`parse.test.mjs` **22/22**、`run-m1.js` **M1 RESULT: PASS**、`bench-ci.mjs` 与 `artifacts-check.mjs` 均 PASS。**注意与 0.19.50 行的差别**：上一版记的是「115 通过 / 3 失败」，本版是 **118/118**——三处变化都可归因：① `run-m1.js` 那条**自 0.19.42 起恒红**的空壳断言本轮修好（见 0.19.51 节，`M1` 首次 PASS）；② `prompt-store` 上一版记为「调用方式产物」的假红，本轮按 `NODE_TEST_CONTEXT=child-v8` 的正确调用方式复跑为**绿**；③ `regression` 53/1 与 `aux-delta-compact` 4/1 两条长期问题 **#37** 的读数**未在本轮复跑**（本轮未触碰 `WEB_SESSION_LOST` 重放路径），**如实标注为未复跑**，不计入本轮读数。**上一版行（0.19.50，保留）**：**118/118**（台账口径 = `test/*.test.mjs` 文件数；0.19.50 新增 `answer-selector` 5 项与 `provider-surface` 6 项，故 116 → 118。**全量实跑读数（2026-09-30，118 文件逐文件跑）= 115 通过 / 3 失败**，三条全部归因完毕，**无一是本轮引入的回归**：① `prompt-store`——设 `NODE_TEST_CONTEXT` 后 **11/11 通过**，是**调用方式产物**（该用例显式要求 `node --test` 环境，断言原文「node --test 进程不许写真实 `~/.dsh/webcode/`」）；② `regression` **53/1**、③ `aux-delta-compact` **4/1**——两条**既有常红**，已用 `git stash push -u` 撤掉本轮全部改动在**干净树**上复跑，**逐字同样红**（同一条用例、同样 60s 超时）。这两条是**同一条行为**（`WEB_SESSION_LOST` → 整段重放），落在「绝不静默丢上下文」红线区，已登记为 `long-term-issues` **#37**（此前只以脚注存在于本格）。新增护栏均已按本仓库纪律做**反向验证**：`answer-selector` 两条（优先级调反 ⇒ 1 条红；兜底串改一字符 ⇒ 2 条红）、`provider-surface` 一条（去掉 GLM 组名覆盖 ⇒ 1 条红）。**上一版行（0.19.49，保留）**：**117/117**（台账口径 = `test/*.test.mjs` 文件数；0.19.49 新增 `think-effort-realtext` 5 项，故 115 → 116。**全量实跑读数**：0.19.48 树上的全量 116 文件 = **114 通过 / 2 失败，耗时 2780s**，两个失败是 `accounts-integration` 与 `model-picker`——**都不是 0.19.49 引入的**，真因是 0.19.43「删四站点自造的 auto 档」改了 `providers.js` 的模型表却**漏改这两个测试文件**（`ecc6ef2` 的 `--name-only` 里没有它们），它们从那时起一直红着。本轮一并修好：`model-picker` 7/7、`accounts-integration` 16/16，并且顺带发现并修掉一个**真 bug**——带槽的兼容别名解析不了（`zai@work:auto` 报「不支持的网页模型」而 `zai:auto` 正常，两者本该等价）。逐文件读数：`think-effort` 27/27、`think-effort-realtext` 5/5（新增）、`model-picker` 7/7、`accounts-integration` 16/16、`accounts` 38/38、`model-labels` 12/12。**如实交代**：新增的 `think-effort-realtext` 与改动后的两个测试文件只跑了**各自的文件级**绿色，全量在 0.19.49 树上的复跑结果见下一行（同一行内已按实际读数改写）。**上一版行（0.19.48，保留）**：**115/115**（台账口径 = `test/*.test.mjs` 文件数；0.19.48 新增 `think-effort` 25 项，故 114 → 115，**只跑了受影响集**：新增 `think-effort` 25/25、`model-labels` 12/12、`multi-site-decoder` 28/28、`empty-response` 5/5、`zero-progress` 13/13、`thinking-image` 3/3、`control-routes` **17/17**；`regression` **53/1** 的那 1 条红已用 `git show HEAD:` 换回旧版 `browser-driver.js` + `index.js` 复跑确认**逐字同样红**（「网页会话丢失时用整段首轮提示词重放」，与本轮改动无关，台账 0.19.47 行已记过同一读数）。并已按真机读数反向变异确认红灯基线（把 `menuOpen` 判据退回「页面上有 checked 即开着」⇒ ④j 变红；把回读判据退回「文本含目标」⇒ ③ 变红）；0.19.47 新增 `mirror-slot-isolation` 6 项 + `glm-think-tag-leak` 4 项，故 112 → 114；**同时修好两条常年假红**——`control-routes`（断言已删的 `glm:auto`）与 `multi-site-decoder`（同因），两者现在 17/17 与 28/28 全绿。**如实交代：0.19.47 只跑了受影响集**——新增 6/6 与 4/4 通过、各自已反向变异确认红灯基线；`glm-tool-snapshot-dedup` 3/3、`glm-conversation` 18/18、`glm-hybrid-call` 5/5、`glm-attach-limit` 5/5、`decoder-fragment-diff` 9/9、`model-labels` 12/12、`client-render` 63/63、`client-server-contract` 2/2、`account-identity-cache` 7/7、`zero-progress-scene` 5/5、`pre-deliver-window` 6/6 全绿。未跑全量）。**上一版行（0.19.46，保留）**：**112/112**（台账口径 = `test/*.test.mjs` 文件数；0.19.46 新增 `account-identity-cache` 7 项，故 111 → 112。**如实交代：0.19.46 只跑了受影响集**——新增文件 7/7 通过、并已反向变异确认红灯基线（退回「无活页即全 null」⇒ ②④ 变红）；`zero-progress-scene` 5/5、`pre-deliver-window` 6/6、`browser-source` 4/4、`settings-transport` 8/8、`site-prompt-transport` 8/8、`session-continuity` 14/14 全绿。未跑全量 112 个文件）。**上一版行（0.19.45，保留）**：**111/111**（台账口径 = `test/*.test.mjs` 文件数；0.19.45 新增 `zero-progress-scene` 5 项，故 110 → 111。**如实交代：0.19.45 只跑了受影响集**——新增文件 5/5 通过、并已反向变异确认红灯基线（去掉流尾段 ⇒ ② 变红）；`pre-deliver-window` 6/6、`stall-settle` 15/15、`capture-stall-rescue` 18/18、`watchdog-first-byte` 9/9、`idle-window` 18/18、`glm-attach-limit` 5/5、`glm-hybrid-call` 5/5、`kimi-decoder` 5/5、`zai-answer-selector` 6/6 全绿；`regression` 53/1 的 1 条红**已用 `git show HEAD:` 换回旧版确认与本轮无关**。未跑全量 111 个文件）。**上一版行（0.19.44，保留）**：**110/110**（台账口径 = `test/*.test.mjs` 文件数；0.19.44 新增 `pre-deliver-window` 6 项，故 109 → 110。**如实交代：0.19.44 只跑了受影响集**——新增文件 6/6 通过、并已反向变异确认红灯基线；`watchdog-first-byte` 9/9、`idle-window` 18/18、`timeout-order` 5/5、`capture-stall-rescue` 18/18、`stall-settle` 15/15、`session-continuity` 14/14、`tool-loop` 14/14、`wait-stats` 40/40、`settings-transport` 8/8、`prompt-transport` 12/12、`glm-attach-limit` 5/5、`captcha-gate` 5/5、`model-labels` 12/12 全绿；`regression` 53/1 与 `control-routes` 16/1 各有 1 条红，**已用 `git show HEAD:` 换回旧版 `lib/index.js` 复跑确认两条在 HEAD 上逐字同样红 ⇒ 与本轮改动无关**。未跑全量 110 个文件）。**上一版行（0.19.41，保留）**：**109/109**（台账口径 = `test/*.test.mjs` 文件数，2026-09-27 实测）。**0.19.41 冻结工作树后全量逐文件串行实跑：109 个文件 / 109 通过 / 0 失败 / exit 0，耗时 1866s**。本轮新增 4 个护栏文件：`composer-single-write` 4 项（富文本必须一次性写入）、`captcha-gate` 5 项（站点风控闸门必须提前如实报错）、`kimi-decoder` 5 项（生成状态与服务端原话必须用起来）、`zai-answer-selector` 6 项（z.ai 助手节点选择器；由 teammate 交付、★ 项已反向变异确认），故 103/103 → 109/109。**如实交代（本轮两次全量结论不同的原因）**：首次全量是在**树被编辑中**跑的（`agent-preset.js` 的解析改动尚未定稿），结果 6 个文件红；定稿后冻结工作树重跑才得到 109/109。**编辑中的红不算读数**（与本文件既有的并发判据同一条纪律）。**上一版行（0.19.40，保留）**：**103/103**。**0.19.40 首次跑通全量：1162 项 / 1162 通过 / 0 失败 / exit 0**（`node --test test/*.test.mjs`）。此前 0.19.30–0.19.39 各轮按用户指示只跑轻量集（那是「省时间」而非「跑不动」）；本轮按「确保没有因为快速而进行质量减少」的要求补跑全量，结果证实没有质量折损，唯一的 1 条失败是**环境相关的假红**（见「工作树版本」0.19.40 行 ③，已归因到 HEAD 并用 `git show` 对照确认与本轮改动无关，修后全绿）。**上一版行（0.19.39，保留）**：**103/103**（台账口径 = `test/*.test.mjs` 文件数，2026-09-27 实测）。**如实交代：本轮 0.19.39 未跑全量**——用户明确指示「先不进行全量测试耗时，直接轻量测试，过了就回报结果」。本轮实跑的轻量集全绿（197 项）：`client-render` / `hooks-order` / `control-routes` / `update`（新增 11 项纯函数）/ `wait-stats` / `client-server-contract` / `settings-transport` / `accounts` / `accounts-integration`；并做了**反向变异确认**（见 0.19.39 行 ⑤，三处变异全部精确变红）。**其余 94 个文件本轮未跑**，不得据此行推断它们全绿。<br>**上一版行（102/102，保留）**：**102/102**（台账口径 = `test/*.test.mjs` 文件数，2026-09-27 实测）。**如实交代：本轮 0.19.34 未跑全量**——用户明确指示「先不进行全量测试耗时，直接轻量测试，过了就回报结果」。本轮实跑的轻量集全绿：`wait-stats` 56/56、`control-routes` 56/56、`client-render` 59/59、`client-server-contract` 2/2；并做了**反向变异确认**（见「工作树版本」0.19.34 行 ⑤）。**其余 98 个文件本轮未跑**，不得据此行推断它们全绿。<br>**上一版行（101/101，保留）**：**101/101 测试文件全绿**（2026-09-26 逐文件实跑。本轮新增 1 个护栏文件 `column-fs` **10 项**——并列三列**产物围栏**：canonicalize-then-contain、前缀伪装/绝对路径/路径穿越/**符号链接指向工作区外**四类拒绝（**已反向变异确认**：摘掉围栏 ⇒ 2 条拒绝判据变红、还原即绿）、不同列/不同会话目录互不可见、以及「落盘 best-effort 不得把成功发送报成失败」的三跳接线判据，故 100/100 → 101/101）。<br>**上一版行（100/100，保留）**：**100/100 测试文件全绿**（2026-09-26 全量 `node --test test/*.test.mjs`，串行独占。本轮新增 1 个护栏文件 `driver-scope` 5 项——GLM「整轮无回复」的跨作用域引用回归判据，含扫描器自检 + 反向变异确认，故 99/99 → 100/100）。<br>**上一版行（99/99，保留）**：**99/99 测试文件全绿**（2026-09-26 全量 `node --test test/*.test.mjs` **1109/1109 通过、exit 0**、串行独占 380s。本轮新增 2 个护栏文件、15 项：`ssrf-redirect-guard` 4 项（含起点公网→内网必须抛错且内网零命中、起点回环保持旧行为）＋ `repeat-detect` 11 项（9 项判据 + 2 项**接线断言**，接线用例已反向变异确认），故 97/97 → 99/99）。<br>**上一版行（97/97，保留）**：**97/97 测试文件全绿**（2026-09-26 全量 `node --test test/*.test.mjs` **1094/1094 通过、exit 0**。新增 `headless-call-tail` 11 项——真机 session-c20f43e9 无头调用残片（`name":"pwsh"…` 缺 JSON 头）泄漏的修复护栏：纯函数 + 整段/快照/逐字符三种到达方式 E2E + 散文对照，故 96/96 → 97/97；修复细节与反向变异见 `doc/research/2026-09-26-headless-call-tail-fragment.md`）。<br>**上一版行（96/96，保留）**：**96/96 测试文件全绿**（2026-09-26 全量 `node --test test/*.test.mjs` **1083/1083 通过、exit 0**。0.19.23 在既有文件内新增 4 项（GLM 原生 code part 1 项 + `closingFenceAfter` 开启围栏单元 1 项 + **切分粒度穷举** 1 项 + `firstEventSeen` 相位分诊 1 项）；0.19.21 新增 `column-context` 6 项；0.19.16 新增 `multi-site-decoder` / `wip-settle`；0.19.17 新增 `fence-tail`；0.19.18 新增 `bridge-lock` 14 项，故 91/91 → 95/95 → 96/96）。<br>**上一版行（95/95，保留）**：**95/95 测试文件全绿**（2026-09-26 全量 `node --test test/*.test.mjs` **1062/1062 通过、exit 0**。0.19.16 新增 `multi-site-decoder` / `wip-settle`；0.19.17 新增 `fence-tail`；0.19.18 新增 `bridge-lock` 14 项，故 91/91 → 95/95）。<br>**上一版行（94/94，保留）**：**94/94 测试文件全绿**（2026-09-26 全量 `node --test test/*.test.mjs` **1046/1046 通过、exit 0**。0.19.16 新增 `multi-site-decoder` / `wip-settle`，0.19.17 新增 `fence-tail` 8 项，故 91/91 → 94/94）。<br>**更早一行（91/91，保留）**：**91/91 测试文件全绿**（2026-09-25 逐文件实跑；全量 `node --test test/*.test.mjs` **1017/1017 通过、exit 0**、串行独占 602s。0.19.12 新增 1 个护栏文件 `capture-stall-rescue` 18 项，故从 90/90 升到 91/91）。**M1 例外（既有状态，本轮未引入）**：`node test/run-m1.js` **3 项失败**（turn1 fresh / turn2 same / parallel agents 的会话连续性断言）；`git stash` 对照 **HEAD（f988ba1，0.19.10）同样 3 项失败** ⇒ 失败先于本轮存在（0.19.11 一轮的「90/90」读数只跑了 `node --test`，未跑 run-m1，正是这样漏掉的）。归因与修复留作独立任务，不混入本轮。<br>**复核方式必须写清（本轮踩过一次）**：全量必须**串行独占**——本轮曾让两个作业并发跑测试，结果 `empty-response` 挂住 53 分钟、`regression` 从 8 分钟涨到 19 分钟；单独复跑 `empty-response` **69.8s / 5/5 通过**。并发下的红/慢**不算读数**（本文件 0.19.0 行已记过同型判据）。 |
 | **0.20.0 范围（本轮，2026-09-25）：新路线「自带内核工作区」P1** | 用户拍板（对话取证：官方 `ui-sidebar-browser` Web 端=iframe 实为「用户自己浏览器的内核」，桌面端才有 webview ⇒ Web 平台「原生嵌第二内核」不存在）：右栏弃镜像 iframe，改为**自带 Chromium 的实时画面投屏**——登录只有自带内核 profile 一份（右栏画面=驱动=同一浏览器），图片查看/文件预览/下载/弹窗回归真实浏览器行为，同站点多账户=每槽一实例，多站点并存=工作区标签条。方案全文 [`PLAN-2026-09-25-live-workspace.md`](plans/PLAN-2026-09-25-live-workspace.md)。<br>**P1 落地四层**：<br>① `lib/live.js`：输入映射纯函数（mapMouseInput/mapKeyInput，非法形状返回 null 丢弃）+ createLiveHub（WebSocketServer noServer 挂中继 upgrade；每连接一个 CDP 会话；Page.startScreencast 损伤帧下发+逐帧 ack；Input.* 回传；断开必 detach）。**安全面双重**：远端地址必须回环 + Origin 出现时必须回环（缺席=非浏览器本机客户端，放行——undici/CLI 不发 Origin，真机踩过一次）。<br>② `browser-driver` 新增 `live` API：listPages/openPage/closePage/activatePage/attach（ctx.newCDPSession）/onPagesChanged；**activatePage 只 bringToFront 绝不 repoint 自动化页**、面板不得关自动化页（`automation-page` 拒绝）。<br>③ 中继 `onUpgrade` 钩子 + index.js 建 liveHub（getDriver 惰性接 driverFor）。<br>④ 客户端 `LivePane`：canvas 拟合绘制 + 帧元数据坐标换算（pageX=(mx-dx)·deviceWidth/dw）+ 鼠标/滚轮/键盘转发 + 页面标签条（激活/关闭/新开主页）+ 状态遮罩；**P1 只有 deepseek 走画面流**（`LIVE_SITES`），面板一键「改用镜像页」回落旧 iframe 且本会话不再自动切回。<br>**验证**：护栏 `test/live-view.test.mjs` 11/11（纯函数真值表 + 假驱动假 CDP 全行为 + 非回环拒绝 + 接线结构）；真机探针 `test-mock/real-live-view.mjs` **ALL PASS**——无头自带 Chromium（临时 profile，about:blank 级页面，不碰登录站点）：握手/页面列表/**真实损伤帧+视口元数据**/点击输入端到端生效（页面 onclick 改 title，playwright 直读证实）。affected 护栏（client-render/hooks-order/control-routes/browser-source/capture-stall-rescue）129/129 通过。 |
 | **0.20.0 已知边界（如实记）** | ① P1 范围：仅 deepseek 走画面流，其余站点仍镜像（模板复制在 P3）；账户槽 tab 复用现有槽机制，画面流的槽内多页标签条已就绪、跨槽切换 UI 在 P2。② IME 组合输入不走键事件转发（P2 用 Input.insertText 文本直输兜底）。③ 右键原菜单不可投（已 preventDefault，页面内菜单不受影响）。④ 文字放大略软（位图极限）。⑤ 下载落在内核下载目录（P2 下载卡片）。⑥ regression 全量本轮在跑（10–19 分钟级），结果见单测基线行。 |
 | **0.19.12 范围（2026-09-25）** | 修**真机复现的「开流后捕获链中断、内容整轮丢失」**，四层一次落齐：<br>① **归因（reply-log 时间线，不是猜）**：会话 `session-12d9c3c6`，2026-09-24 22:10:40 上一轮 `finished`；22:11 用户发三问，本轮首事件已到（报错「判定相位=已开流后的静默」）；22:13:10 前后适配器看门狗开火（120s 中流窗口，设计如此不给宽限），现场读数「最近驱动活动 2s 前（WIP 巡检在采页面）+ 页面已有 1072 字回复未回传」；22:26/22:27 重试成功、原始回复 **1081 字 ≈ 未回传的 1072 字** ⇒ 网页侧完整生成完了，是「页面 SSE → 页内捕获 → 解码器」管道在前几个事件后中断；中止轮不落 reply-log（22:10→22:26 的 16 分钟空档佐证）。既有三道防线为何都救不了：`shouldSettleWip` 要求 bodyReady（正文得先从流来过——恰恰没有）、思考硬上限救出的仍是流里的内容、看门狗只负责报错丢弃。<br>② **判据（纯函数，可离线反向验证）**：`metrics.shouldRescueStalledCapture`——流静默 ≥ `captureStallRescueMs`（默认 45s，**必须 < 看门狗 120s**）+ 本轮 DOM 相对发送后基线**变过**（防把上一轮留在页面上的旧回复张冠李戴）+ `domLen>0`（剥计时文案后）+（页面仍在写 或 流从未送来过正文）。反向安全线：流在动不救、DOM 没变不救、只有计时器在动不救、`0`=显式关闭。<br>③ **动作（与既有 partial 收束同形，不新增第二条收尾通路）**：`startWipWatch` tick 在 bodyReady 早退**之前**判定，命中则把 `cleanAnswerDomText` 剥计时文案后的 DOM 文本当 `{partial:true, reason:'dom-rescue-capture-stall'}` 交回——runTurn 的部分流落账（`recoveredTurns`/`lastRecovered`/`noteEndReason`）全部复用，适配器拿到正常 `{end}` 走原解析链。`active` 增基线字段 `domTextAtStart`/`domTextChanged`/`domRescueDone`（每拍重算、一轮至多一救）。配置 `captureStallRescueMs` 进 DEFAULTS 并**两处驱动创建点显式传入**（同 `answerTimeoutMs` 的教训）。<br>④ **护栏**：`test/capture-stall-rescue.test.mjs` 18 项——判据真值表（4 正向含真机形状 + 7 反向安全线含边界取等）+ 清洗与 `answerDomLength` 同源断言 + 5 条接线结构断言（tick 内调用、先于 bodyReady、partial 同形、基线字段、配置三处贯通）。 |

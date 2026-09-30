@@ -24,7 +24,7 @@
 | 是否入库 | **不入库** —— `.gitignore:9` `reference/*/` 排除 |
 | 唯一例外 | `reference/local-refs/`（`.gitignore:10` 显式重新打开）：**本项目自己的笔记**，入库 |
 | PDF | `.gitignore:13` `reference/*.pdf` 排除（见 §5 的待决项） |
-| 为什么 | 本机 `reference/` 实测 **978.9 MB** 第三方代码（含 `deepseek-harness` 349.3 MB、`qwen-code` 255.7 MB），不该进本仓库历史 |
+| 为什么 | 本机 `reference/` 实测 **1189.4 MB** 第三方代码（含 `deepseek-harness` 349.3 MB、`qwen-code` 255.7 MB、`steel-browser` 200.7 MB），不该进本仓库历史 |
 
 > **陷阱**：`git add -f reference/<某个 clone>` 会**绕过** gitignore 把它提交进去。
 > 不要这么做——需要引用某段实现时，把结论写进 `local-refs/`，而不是把那棵代码树搬进来。
@@ -66,6 +66,7 @@ node scripts\gen-reference-index.mjs --missing  # 只列「不是 clone」的条
 | `cursor-2api` | https://github.com/lza6/cursor-2api.git | `70c6af8b74eea1683f02462a90d458781eccc18d` | 0.1 MB |
 | `deepseek-free-api` | https://ghfast.top/https://github.com/Httyhu1314/deepseek-free-api.git ⚠️镜像 | `989c7a9049f8083d8763d4af0ce7869132c245f9` | 0.5 MB |
 | `deepseek-harness` | https://github.com/deepseek-ai/deepseek-harness.git | `00102833dfaee1da9f48a3a8eae9d34005a75218` | 349.3 MB |
+| `deepseek-harness-codearts` | https://gitee.com/iJetLi/deepseek-harness-codearts | `af2039800ac2875a5ef8edc7d1842cfc1ef71ae9` | 9.6 MB |
 | `deepseek-reverse-api` | https://github.com/Wu-jiyan/deepseek-reverse-api.git | `1ffacb796e545393615c4b7db0467befcf22bc42` | 1.4 MB |
 | `deepseek-web-api` | https://github.com/kittors/deepseek-web-api.git | `9b62d6a17ba502fa6aefa2dceb527d1e925aa6ce` | 0.5 MB |
 | `deepseek-web-import` | https://github.com/wpc0323/deepseek-web-import | `8780b8c80addf9f6519a02106f6a28d2ebaedb99` | 0.1 MB |
@@ -95,7 +96,6 @@ node scripts\gen-reference-index.mjs --missing  # 只列「不是 clone」的条
 | `Qwen-Copilot` | https://ghfast.top/https://github.com/zelosleone/Qwen-Copilot.git ⚠️镜像 | `6e33880263d5946c496d8385de7ec3451ec5687f` | 0.5 MB |
 | `qwen-free-api` | https://ghfast.top/https://github.com/LNpks/qwen-free-api.git ⚠️镜像 | `bf42bce60f2b1eea3801f9f6f3277ebf64226816` | 3.8 MB |
 | `steel-browser` | https://github.com/steel-dev/steel-browser.git | `04f691d3e40677fefbebfc7fac2fcd92c3af4cb6` | 200.7 MB |
-| `steel-browser-npm` | **不是 clone**（见 §6「约定违例」） | — | 0 MB |
 | `wabac.js` | https://github.com/webrecorder/wabac.js.git | `281e9bc7affba4ce520301b10723b01f661aa7e5` | 2.8 MB |
 | `web-login` | **不是 clone**（npm 包解包，见 `local-refs/web-login-notes.md`）：`dsh-login@0.1.1` / `@islibaodong/dsh-login@0.2.1` / `dsh-auth-gate@0.13.0` | — | 1.4 MB |
 | `WebBridge` | https://github.com/kxdds/WebBridge.git | `0256c4590846e4e5d67bbe50283df8c2f18dd229` | 0.4 MB |
@@ -118,16 +118,28 @@ git -C reference/glm-free-api checkout 3237198289d8c672cbac065bec4d6dceca62deae
 | 项 | 现状 | 选项 |
 | --- | --- | --- |
 | `reference/赋能 dsh-webcode-bridge：…蓝图.pdf`（341.8 KB） | 是**本项目的立项蓝图**，但被 `.gitignore:13` 排除，**换机器就没了**；且它是本目录唯一**不可从 remote 复现**的资产（没有 URL 可克隆） | ① 移到 `reference/local-refs/`（那里入库，能活过克隆）；② 不入库，改为在文档里记 sha256 + 外部位置。**倾向 ①**，代价是 git 历史里多一个 342 KB 二进制 |
-| `steel-browser-npm/` | **空目录**（0 文件），是个中断的克隆 | 删掉，或重新克隆 |
+| ~~`steel-browser-npm/`~~ | **已不存在**（2026-09-30 实测：磁盘上无此目录，`Test-Path reference\steel-browser-npm` 为 `False`）。它此前登记为「空目录（0 文件），是个中断的克隆」，看来已被清理，但 §4 的表里**仍留着一行**（生成器只扫磁盘，扫不到的东西它不会删） | 从 §4 表里删掉那一行；否则「README 提到、磁盘没有」的条目会一直被后续读者当成待办 |
 | `agent-team/` | **没有 `.git`**，是 3 个 DSH 官方实验包的手工拷贝（`service/package.json` 显示 `@deepseek-ai/dsh-experimental-agent-team@0.1.5-rc.1`） | 重新按上游 URL 克隆（拿到 URL 后补进 §4 表），或在旁加一份来源说明 |
-| 体积 | 本机实测 **978.9 MB**（46 个条目）；9 个目录 ≥10 MB（`deepseek-harness` 349.3、`qwen-code` 255.7、`claude-code-reverse` 95.3、`kimi-code` 93.1、`doubao2api` 49.8、`dsh-session-graph` 39.5、`dsh-task-graph` 14.3、`agent-browser` 11.9、`agentdock` 10.3） | 可选：`--depth 1` 重新克隆，或删内层 `.git`（**会丢掉 §4 的取证能力**，不推荐） |
+| 体积 | 本机实测 **1189.4 MB**（48 个条目）；**10 个**目录 ≥10 MB（`deepseek-harness` 349.3、`qwen-code` 255.7、`steel-browser` 200.7、`claude-code-reverse` 95.3、`kimi-code` 93.1、`doubao2api` 49.8、`dsh-session-graph` 39.5、`dsh-task-graph` 14.3、`agent-browser` 11.9、`agentdock` 10.3） | 可选：`--depth 1` 重新克隆，或删内层 `.git`（**会丢掉 §4 的取证能力**，不推荐） |
+
+> ⚠️ **2026-09-30 的口径修正**：上表与 §6 此前写的「**978.9 MB**（46 个条目）」、
+> 「9 个目录 ≥10 MB」、「9 条违例」都是**当时**的读数。本轮实测为 **48 个目录 /
+> 1189.4 MB**，其中 **40 个是 clone、8 个不是**，≥10 MB 的是 **10 个**
+> （新增的 `deepseek-harness-codearts` 为 9.6 MB，不在 ≥10 MB 之列）。
+> 另外 **§4 的表原先也是 48 行**（当时磁盘 47 个目录 + 1 行陈旧条目 `steel-browser-npm`），
+> 而正文写「46 个条目」——**正文与表、表与磁盘三者当时都对不上**。这是生成器
+> 「只扫磁盘、不删陈旧行」的直接后果：`--check` 只校验**磁盘上存在的**条目
+> （理由见脚本头「已知边界」），所以**陈旧行它抓不到**。
+> 计数一律以 `node scripts\gen-reference-index.mjs --json` 的实测为准，**不要手抄**。
 
 ## 6. 约定违例（`--missing` 会列出）
 
 跑 `node scripts\gen-reference-index.mjs --missing`：
 
 - `local-refs` —— **故意**不是 clone（它是本项目自己的笔记，入库）。**不是违例**。
-- `agent-team`、`steel-browser-npm` —— 见 §5，确实需要处理。
+- `agent-team` —— 见 §5，确实需要处理。
+  （**`steel-browser-npm` 已不在本清单里**：2026-09-30 实测该目录在磁盘上不存在，
+  已从 §4 表中一并删除。`--missing` 的读数因此从 9 条降到 **8 条**。）
 - `dsh-task-board`、`dsh-archive-manager`（2026-09-17 新增） —— 与 `agent-team` 同级：**不是 clone**，
   而是从 npm 取源的**已发布包解包**（`npm pack` 后 `tar -xzf --strip-components=1`）。
   入库理由与 `agent-team` 相同：它们是**本机曾安装、现已卸载**的第三方 DSH 插件，
@@ -161,10 +173,11 @@ git -C reference/glm-free-api checkout 3237198289d8c672cbac065bec4d6dceca62deae
 
   `dsh-market`（1.47.0 解包）、`dsh-drop-caret`（0.2.3 解包）与 `dsh-official-plugins` 同属这一类。
 
-  也就是说 §6 的违例清单（`--missing` 实测 9 条，去掉故意不算的 `local-refs` 是 **8 条**）：
+  也就是说 §6 的违例清单（`--missing` 实测 **8 条**，去掉故意不算的 `local-refs` 是 **7 条**）：
   `agent-team`、`dsh-archive-manager`、`dsh-drop-caret`、`dsh-market`、`dsh-official-plugins`、
-  `dsh-task-board`、`steel-browser-npm`、`web-login`（`web-login` 是 npm 解包，表里已带注记）。
-  §4 的表 46 行里 **37 行是可复现的 clone**，其余 9 行是上述非 clone 条目。
+  `dsh-task-board`、`web-login`（`web-login` 是 npm 解包，表里已带注记）。
+  §4 的表 **49 行**里 **40 行是可复现的 clone**，其余 9 行是上述非 clone 条目
+  （8 条违例 + 故意不算违例的 `local-refs`）。
 
 ## 7. 权威清单在哪
 

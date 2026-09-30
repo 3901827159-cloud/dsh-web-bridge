@@ -1,6 +1,6 @@
 # 参考项目清单（`reference/` 调研素材）
 
-本文件记录 `reference/` 目录下 35 个第三方项目的来源、与本仓库的关系，以及**哪些被真正采用过**（连同 `local-refs/` 共 36 个目录）。这个数字不是手抄的，可用 `node scripts\gen-reference-index.mjs` 直接从磁盘生成核对——**表里的条目数应与该脚本的输出一致**。
+本文件记录 `reference/` 目录下第三方项目的来源、与本仓库的关系，以及**哪些被真正采用过**。目录总数不在这里手写——它由 `node scripts\gen-reference-index.mjs --json` 从磁盘直接算出（2026-09-30 实测 **48 个目录**：40 个 clone + 8 个非 clone，其中 `local-refs/` 是本项目自己的笔记）。**表里的条目数应与该脚本的输出一致**。
 
 `reference/` 是**只读调研素材**，不在运行链路里：`doc/review-guide.md` 已明确写着「`extension/`、`reference/`、`doc/` 都不是运行链路，审查时可以直接跳过」。删除整个 `reference/` 不影响任何行为。
 
@@ -25,6 +25,8 @@
 | `claude-code-reverse` | Claude Code 源码 map 逆向分析报告 | **参考实现（2026-09-14 补录）**：子代理与 Team 的面板形态、`Task`/`tasks` 的分离（子代理 worker vs 对等 teammate）——本轮 UI 要把两者分开的形态依据；`src/src/Task.ts`、`src/src/tasks.ts` | 否 |
 | `cursor-2api` | 把 Cursor 网页版转成 OpenAI 标准 API | 未直接采用 | 否 |
 | `deepseek-free-api` | DeepSeek 网页反向代理（Python/FastAPI，含 PoW 求解） | DSML 标记剥离的写法参考（`strip_dsml_markup`） | 否 |
+| `deepseek-harness` | **DSH 官方 monorepo 源码**（0.1.7-alpha.2；`packages/client/ui-*`、`packages/boot/plugin-manager`、`packages/experimental/agent-team` 等） | **参考实现（官方权威）**：插件声明面、UI 插槽契约、插件兼容门禁、AgentTeams 逻辑的**一手来源**；本仓库多处注释引它。详见 `local-refs/2026-09-23-dsh-official-plugins-and-boundaries.md` 与 `local-refs/deepseek-harness-official-notes.md` | 否 |
+| `deepseek-harness-codearts` | **DSH 插件**（`dsh-codearts-auth`，gitee）：华为云 CodeArts + 腾讯 CodeBuddy/WorkBuddy + 有道 LobsterAI + Qoder/QoderCN + TRAE + Cline + Loomy + Raccoon + ZCode 共 **11 个 LLM provider 路由**的登录/凭据/适配聚合插件 | **参考实现（同类插件，2026-09-30 新增）**：与本项目**目标同构**（都是给 DSH 加 LLM provider 路由的插件），差别只在模型来源（官方 HTTP API vs 本项目驱动网页）。用于对照**插件声明面**是否偏离官方契约：`cordis.patch.yml` 形状、`dsh.bundle.patch` + `dsh.client.platform`、`inject` 的可选依赖纪律、`Config` 必须是 schemastery、`__ModuleLoader__` 客户端 bundle 包装、peer 范围必须枚举 prerelease tuple。详见 `local-refs/deepseek-harness-codearts-reference-notes.md` | 否（同类插件，非依赖） |
 | `deepseek-reverse-api` | DeepSeek 网页版 OpenAI 兼容 API（Python/Flask） | 未直接采用 | 否 |
 | `deepseek-web-api` | Node.js 实现的 DeepSeek 网页 API（CI + 测试较完整） | 未直接采用（协议事实由 `local-refs` 笔记交叉验证） | 否 |
 | `deepseek-web-import` | **DSH 插件**：把 chat.deepseek.com 历史对话导入 DSH 正式会话 | 两条：同源挂载模式；控制面安全立场（被我们「收紧后」沿用） | 否（同类插件，非依赖） |
@@ -54,7 +56,9 @@
 
 > **2026-09-16 补录的 4 个 `dsh-*` 仓库**（`dsh-compass`、`dsh-flowglass`、`dsh-session-graph`、`dsh-task-graph`，合计 59.4 MB）此前漏登记。它们的「是什么」一列摘自外部清单 [`awesome-deepseek-harness-README.zh-CN.md`](awesome-deepseek-harness-README.zh-CN.md)（分别在该文件的 3509 / 2182 / 1455 / 2047 行）；本仓库 `package/` 下 `grep` 不到对这四个名字的任何引用，按上文「本文件的取证口径」记「未直接采用」。
 
-统计：35 项中 **7 项**有源码级出处标注（`glm-free-api`、`Kimi-Free-API`、`LLMs2API`、`qwen-free-api`、`deepseek-free-api`、`opencode2dsh`、`zai-copilot-chat`），另加 `agentdock`/`deepseek-web-import`/`webcode`/`claude-code-reverse` 各 1 条明确引用，共 **11 项**可确证被参考过。其余 24 项为背景素材（含上条补录的 4 个 `dsh-*` 插件）。
+统计（2026-09-30 复核，口径为**逐条可确证被参考过**）：`glm-free-api`、`Kimi-Free-API`、`LLMs2API`、`qwen-free-api`、`deepseek-free-api`、`opencode2dsh`、`zai-copilot-chat` **7 项**有源码级出处标注（形如「（xxx 同构）」）；另加 `agentdock`、`deepseek-web-import`、`webcode`、`claude-code-reverse`、`deepseek-harness`（官方 monorepo，多处注释引用）、`deepseek-harness-codearts`（声明面对照基准，2026-09-30 新增）各 1 条明确引用，共 **13 项**可确证被参考过。其余为背景素材。
+
+> ⚠️ **2026-09-30 口径修正**：本文件此前写「35 个第三方项目」「连同 `local-refs/` 共 36 个目录」「统计 35 项中 7 项 + 4 项 = 11 项」——这些数字**当时就已落后于磁盘**（本轮实测 48 个目录）。根因与 `reference/README.md` §5 记的是同一类：**手写的计数没人核对**。现在目录总数改为引用生成脚本的读数，**不在这里手抄**。
 
 ## 逐条：确实被采用的项目
 
@@ -135,6 +139,50 @@
 
 > 备注：`reference/webcode` 的目录名与本插件的命名（`webcode-bridge`、`/__webcode/*`、`window.__webcodeCaptureInstalled`）**同名不同物**。全仓库 grep `webcode` 有数百处命中，其中绝大多数是插件自身命名，**只有上面这一处**是对该参考项目的引用。本文件不把同名命中当作采用证据。
 
+### `deepseek-harness-codearts` → 官方插件声明面的同类对照（2026-09-30 新增）
+
+> 这是本轮唯一新增的参考仓库，也是**目前与本项目目标最接近的一个**：
+> 两者都是「给 DSH 增加 LLM provider 路由的插件」，差别只在**模型从哪来**
+> （它走官方/半官方 HTTP API，本项目驱动网页版 AI）。
+
+**它不是「被采用的代码」**（本项目一行都没抄），而是**声明面的对照基准**。已确证的对照点：
+
+- **`cordis.patch.yml` 形状**：`- insert: [{ id, name }]`（它的 `cordis.patch.yml:3-5`）
+  与本项目 `package/dsh-webcode-bridge/cordis.patch.yml:3-5` **逐字段一致**；
+- **`dsh` 字段**：`bundle.patch` + `client.platform`（它的 `package.json:62-69`）
+  与本项目 `package.json:38-45` 一致；客户端 bundle 都经 `exports["./client"]` 暴露；
+- **可选服务依赖纪律**：它把 `connection` 排除出静态 `inject`（`src/index.ts:48-54`），
+  改走 `ctx.inject(['connection'], cb)`（`src/jet-hub-rpc.ts:653`）；本项目把 `webServer` /
+  `agentTeams` 排除出静态 `inject`（`lib/index.js:112-126`），同样改走
+  `ctx.inject(['webServer'], …)`（`lib/index.js:4413-4415`）。
+  **两个独立仓库各自踩到同一个真机坑**（headless profile 整条 entry pending、退出 1）
+  ⇒ 这条可当**已交叉验证的官方契约事实**；
+- **`__ModuleLoader__` 客户端契约**：它的 esbuild 包装（`plugin-src/client/build.mjs:29-38`）
+  与本项目手写的 `lib/client.cjs:19-21` 形状一致（`factory(require, module)`、CJS、
+  react 由宿主提供）；
+- **`registerAdapter` + 持有适配器实例**：两边都持有实例（它因为 `listAllModels`，
+  `src/llm-adapter.ts:1796-1797`；本项目因为 `listModels` 读实时目录）。
+
+**一处已确证的相反取舍（尚未判定谁对）**：它**同时**调
+`registerConfigurableProviders` 与 `registerAdapter`（`src/llm-adapter.ts:1785-1795`），
+而本项目**刻意只调后者**，理由是「两处都声明会让 GUI 把 provider 当成需要 endpoint
+配置的 provider，模型反而不出现在主选择器里」（`lib/index.js:920-926`）。
+**本文件不对这条下结论**——判定它需要读官方 `ctx.llm` 契约原文，属于「本项目 vs 官方
+适配插件体系」那项任务的取证范围。
+
+**尚未判定、登记为待办的差异**（不要在别处当结论引用）：
+
+1. 本项目 `peerDependencies` 只声明了 optional 的
+   `@deepseek-ai/dsh-client-ui-sidebar-right`（`package.json:81-88`），**没有**声明
+   `@deepseek-ai/dsh-llm` / `dsh-credentials` / `dsh-commands`；而 codearts 声明了它们，
+   且其 `AGENTS.md` 用整章论证「peer 范围必须枚举 prerelease tuple，纯区间在 npm 下
+   仍 `ERESOLVE`」。
+2. 它的 `Config` 必须是 schemastery schema（裸函数会让 `SettingsForms.describe()` 抛
+   `.toJSON is not a function`，连带整块 settings 界面失效）；本项目用 `settingsNs: webcode`，
+   是否受同一约束未验证。
+3. 前后端通信路线不同：它走 `ctx.connection` 的 management RPC
+   （`plugin-src/management-rpc.mjs`），本项目走 `ctx.webServer` 上的 `/__webcode/*`。
+
 ### `zcode` / `qwen-code` / `doubao2api` → 国内五站协议转换的官方/逆向对照（2026-09-21 补录）
 
 > 这三个是**本轮为 `doc/plans/2026-09-21-domestic-sites-protocol.md` 新拉的参考**，是后续国内站适配（GLM 打样）的对照基准，**尚未写入任何代码**。按本文件「不伪造采用痕迹」的立场，这里登记它们的既定用途与理由，具体采用点等实现任务落地后回填。
@@ -153,10 +201,11 @@
 
 ## `reference/local-refs/` —— 真正的事实来源
 
-这个目录是**本项目自己的调研笔记**（不是第三方项目）：**根级 6 份 `.md` + 两个归档子目录（`2026-09-12-review-sources/` 11 个文件、`2026-09-21-zcode-docs/` 4 个 HTML 快照）**。计数口径可直接核对：
+这个目录是**本项目自己的调研笔记**（不是第三方项目）：**根级 10 份 `.md` + 三个归档子目录（`2026-09-12-review-sources/` 11 个文件、`2026-09-21-zcode-docs/` 4 个 HTML 快照、`model-tool-calling/` 1 个文件）**。计数口径可直接核对：
 
 ```powershell
-Get-ChildItem reference\local-refs                    # 6 份 md + 2 个归档目录
+Get-ChildItem reference\local-refs -File -Filter *.md   # 10 份 md
+Get-ChildItem reference\local-refs -Directory           # 3 个归档子目录
 Get-ChildItem reference\local-refs\2026-09-12-review-sources   # 11 个文件
 Get-ChildItem reference\local-refs\2026-09-21-zcode-docs       # 4 个 HTML（ZCode 官方文档快照）
 ```
@@ -170,6 +219,8 @@ Get-ChildItem reference\local-refs\2026-09-21-zcode-docs       # 4 个 HTML（ZC
 | `deepseek-2api-README.md` | DeepSeek 转 API 路线摘录 |
 | `deepseek-free-api-README.md` | 上述反代项目的能力摘录 |
 | `agentdock-reference-notes.md` | AgentDock 三个同名项目的关联度整理与落点 |
+| `deepseek-harness-codearts-reference-notes.md` | **DSH 插件 `dsh-codearts-auth` 的声明面取证（2026-09-30 新增）**：11 个 provider 路由、`cordis.patch.yml` / `dsh` 字段 / `inject` 可选依赖纪律 / `Config` schemastery / `__ModuleLoader__` bundle 包装 / peer 范围枚举 prerelease tuple 的逐条 `文件:行号` 取证，以及与本项目**已确证一致**与**相反取舍**的对照清单。是「本项目 vs 官方适配插件体系」的对照基准 |
+| `deepseek-harness-official-notes.md` | DSH 官方 monorepo 的取证笔记 |
 | `agent-teams-reference-notes.md` | DSH 官方实验包 `agent-team` 的取证笔记（发布 tarball 的 SHA1 逐字核对、rc.1 与 rc.2 的兼容结论）。**承重文档**：`lib/accounts.js` 的注释直接引用它（复核行号 18） |
 | `2026-09-12-review-sources/`（11 个文件） | 右栏一致性评审的原始快照：9 份 HTML（Playwright Screencast、CDP Page domain、ReplayWeb 嵌入、MCP-UI 与 MCP Apps、Cloudflare / Browserbase Live View、ChatGPT 双 iframe 沙箱、SO 低 FPS 问答）+ 评审结论 `external-review-2026-09-12.md` + 来源清单 `README.md` |
 | `2026-09-21-zcode-docs/`（4 个 HTML） | 智谱官方 ZCode 文档快照（2026-09-21 拉取），用于 GLM 站适配的官方口径：`welcome.html` / `agents.html` / `configuration.html` / `skill.html`。`thought-level.html` 404 未取到 |

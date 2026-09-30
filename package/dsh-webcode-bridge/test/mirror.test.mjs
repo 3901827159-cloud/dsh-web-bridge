@@ -1,11 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
+import { listen } from './fixtures/listen.js';
 import { createMirror } from '../lib/mirror.js';
-
-function listen(server) {
-  return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(server.address().port)));
-}
 
 test('mirror serves a fixed upstream for the sidebar iframe', async (t) => {
   const upstream = http.createServer((req, res) => {

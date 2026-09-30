@@ -48,7 +48,7 @@
 | 34 | **zai / doubao 的思考等级回读只有静态复算，没有真机读数**（2026-09-29 新登记）——「复算」≠真机；若实际已坏则该站点每轮抛 `THINK_EFFORT_UI_CHANGED` | 中 | 否 | `lib/think-effort.js`、`test-mock/probe-think-effort-live.mjs`、`doc/research/2026-09-28-think-effort-readback.md` |
 | 35 | **并列三列的「列级沙箱」是约定而非拦截**（2026-09-29 新登记）——provider 通路会真改文件、控制面通路只回文本；两列今天对工作区没有文件效果，且本插件**结构上**不拥有权限层 | 中 | 否 | `lib/column-context.js`、`lib/column-fs.js`、`doc/research/2026-09-26-column-sandbox-round1-thinking.md` |
 | 36 | **`ref-index` 既有红**（2026-09-29 复核：**已解决**）——登记的是「曾被记为欠账、实测已不在」这次更正本身 | 低 | 否 | `reference/README.md`、`scripts/gen-reference-index.mjs` |
-| 37 | **两条既有常红是同一条行为：网页会话丢失 → 整段重放**（2026-09-30 复核，**干净树同样红**）——`regression` 53/1 与 `aux-delta-compact` 4/1，同为 60s 超时；此前只以脚注存在于 `progress.md` 的单测基线格 | 高 | 否 | `lib/index.js`（辅助轮重放）、`test/regression.test.mjs`、`test/aux-delta-compact.test.mjs` |
+| 37 | **两条既有常红是同一条行为：网页会话丢失 → 整段重放**（2026-09-30 复核归因：**已修——根因是测试隔离缺陷，不是重放分支**；2026-09-30 晚登记）——`regression` 53/1 与 `aux-delta-compact` 4/1 的 60s 压线来自裸测试读到真实 profile 的发送间隔与基准 | 高 | 否 | `lib/index.js`（profile 落盘守卫）、`test/profile-isolation.test.mjs`、`doc/progress.md`（2026-09-30 段） |
 
 > **一览表完整性（2026-09-16 修正；2026-09-26 补上闸门）**：本表此前**漏登记 #19 与 #20**（正文有、表里没有）。
 > 这两条都是可机检的登记错误，而当时没有任何闸门覆盖「正文条目 ↔ 表格条目」的一致性。
@@ -2125,7 +2125,54 @@ z.ai 浏览器「端口文件在、连不上」；2026-09-29 复跑时**五个�
 
 ---
 
-## 37. **两条既有常红是同一条行为：网页会话丢失 → 整段重放**（2026-09-30 新登记）
+## 37. **两条既有常红是同一条行为：网页会话丢失 → 整段重放**（2026-09-30 登记当晚**已修**）
+
+### 二次复核（2026-09-30 晚，**推翻本条最初的归因**）
+
+> **原归因「60s 超时说明用例在等一个永不到来的事件」是错的。** 用例在等一个**真实存在的**
+> 事件——用户的真实限流窗口。
+
+**真因：测试隔离缺陷，不是重放分支。** 完整根因链（每步实测）：
+
+1. 裸测试 `apply(ctx, {port:0, driver})` **不传 `profileDir`** ⇒ `cfg.profileDir` 回落
+   DEFAULTS 的**真实** `~/.dsh/webcode-edge-profile`（`lib/index.js` DEFAULTS）。
+2. settings / send-state / wait-stats 三个落盘路径**没有任何测试守卫**（同文件里
+   reply-log / prompt-store / continue-budget 都有 `NODE_TEST_CONTEXT` 守卫，
+   唯独这三处漏了）⇒ 测试读到真实 `webcode-settings.json` 的 `sendGapMs: 30000`
+   与真实 `webcode-send-state.json` 里 24h 内的发送基准。
+3. 重放用例 = 同一账号 3 次发送 ⇒ 2 段 30s 真实等待 = **60.02s**，压线撞 node:test
+   默认 60s 用例超时 ⇒ **红**。基准只在 24h 内有效 ⇒ **红绿随本机状态漂移**：
+   「干净树同样红」为真，「过一天自己变绿」也为真——两条都是同一个缺陷的表现。
+4. `regression` 那条 90s（54 用例中最慢）与 `aux-delta-compact` 那条 60s 同源。
+5. **反向污染（比假红更糟的一半）**：`rememberSend` 把测试的假发送时间戳写回真实
+   send-state（实测：跑一遍 regression 后 deepseek 条目 `send=1790715108997` =
+   2026-09-30 04:51:49，正是测试运行时刻）——用户的下一轮真实请求被测试凭空压上
+   30s 发送间隔。
+
+### 修法（一处判据，六个落盘点）
+
+`lib/index.js` 新增统一判据（与 reply-log / prompt-store / continue-budget 守卫同族）：
+
+```js
+const profilePersistenceUsable = () => Boolean(config && config.profileDir) || !process.env.NODE_TEST_CONTEXT;
+```
+
+- 裸测试形态：settings 读/写、send-state 读/写、wait-stats 读/写全部跳过真实 profile。
+- **对称修复（顺带解决的生产死链）**：cursor-state 的旧判据 `Boolean(config.profileDir)`
+  前提「生产必传 profileDir」是错的——**DSH bundle 形态（cordis.patch.yml）不传它** ⇒
+  0.21.1 的游标持久化在生产从未生效（真实 profile 里没有 `webcode-cursor-state.json`，
+  修前实测）。新判据的「非测试进程」分支放行生产；standalone（显式传）不变。
+
+### 护栏与读数
+
+- `test/profile-isolation.test.mjs` **4 项**（判据形状 + 裸 apply 零污染 + 零等待 +
+  显式形态不回归）；反向验证：判据改坏 ⇒ 红、删 send-state 读守卫 ⇒ 红。
+- 修后同机同命令：`aux-delta-compact` 重放用例 **60.02s → 1.02s**（5/5）；
+  `regression` **571.4s → 9.9s**（54/54）；`cursor-persistence` 5/5、
+  `session-anchor` 7/7、`settings-transport` 8/8 均不回归。
+- 完整根因链与闸门读数见 `doc/progress.md` 的「profile 落盘测试隔离」段（2026-09-30）。
+
+### 原始登记（2026-09-30 早，保留供对照）
 
 ### 现象（本轮全量实测）
 
@@ -2134,8 +2181,8 @@ z.ai 浏览器「端口文件在、连不上」；2026-09-29 复跑时**五个�
 | 测试文件 | 读数 | 归因 |
 | --- | --- | --- |
 | `prompt-store.test.mjs` | 11/11 **通过**（设 `NODE_TEST_CONTEXT`） | **调用方式产物**，不是缺陷：该用例显式要求 `node --test` 环境（断言原文「node --test 进程不许写真实 `~/.dsh/webcode/`」）。逐文件跑时该变量不存在 ⇒ 假红 |
-| `regression.test.mjs` | **53 / 1** | **既有常红**，见下 |
-| `aux-delta-compact.test.mjs` | **4 / 1** | **既有常红**，见下 |
+| `regression.test.mjs` | **53 / 1** | **既有常红**，见上 |
+| `aux-delta-compact.test.mjs` | **4 / 1** | **既有常红**，见上 |
 
 ### 关键读数：两条红都与本轮改动无关（干净树复跑取证）
 
@@ -2146,7 +2193,8 @@ node test/regression.test.mjs          → 53 pass / 1 fail（同一条、同样
 git stash pop                # 恢复
 ```
 
-**逐字同样的红**。因此这两条**不是本轮引入的回归**。
+**逐字同样的红**。因此这两条**不是本轮引入的回归**。（复核注：这个取证本身是对的，
+但「干净树同样红」恰恰说明红与代码无关——真正该测的是**为什么**会等 60s，见上。）
 
 ### 为什么仍要单列成一条长期问题（而不是继续当脚注）
 
@@ -2165,17 +2213,9 @@ git stash pop                # 恢复
    （「regression 53/1 的那 1 条红…与本轮改动无关」）。**一份 5000 行的台账里的脚注，
    不是一条欠账**——下一个人看到的只会是「全量测试是绿的」这个汇总印象。
 
-### 若要修，从哪下手
+### 修后补记
 
-1. **先判性质**：60s 超时说明用例**在等一个永不到来的事件**，而不是断言立刻失败。
-   因此第一步是把该用例的等待路径打出来（它用的是假驱动，理论上不该真的等待）——
-   优先怀疑**假驱动与 `drain()` 的协作**，而不是产品代码；
-2. 对照 `lib/index.js` 的辅助轮重放分支（`purpose` 轮、`aux::<purpose>::<sessionId>` 槽）
-   与 `doc/research/2026-09-25-compact-aux-delta.md` 记的修法；
-3. **修完必须反向验证**：把重放分支改回「丢增量」，两条护栏都必须变红——
-   若改不红，说明它们本来就测不到那条路径（那才是真问题）。
-
-**本轮不修**：本轮的范围是规范对齐 + 站点解耦 + 结构清晰化，且用户要求**能力不变**；
-动这条路径属于「改协议收尾行为」，是独立一轮。
+「重放必须含本轮压缩指令」这条断言本身仍然有效（5/5 绿）；护栏现在**真的在保护**那条路径，
+而不是靠 60s 超时偶发地通过。红线（绝不静默丢上下文）上的这道防线恢复常绿。
 
 

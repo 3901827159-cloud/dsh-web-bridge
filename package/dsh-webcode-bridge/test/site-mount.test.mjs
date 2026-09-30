@@ -6,6 +6,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
+import { listen } from './fixtures/listen.js';
 import os from 'node:os';
 import path from 'node:path';
 import { createMirror } from '../lib/mirror.js';
@@ -14,7 +15,6 @@ import { isLoopbackHost, originMatchesHost } from '../lib/loopback.js';
 import { composerStrategy } from '../lib/browser-driver.js';
 
 const logger = { log() {}, warn() {} };
-const listen = (server) => new Promise((r) => server.listen(0, '127.0.0.1', () => r(server.address().port)));
 
 test('loopback 判定：IP / localhost / <site>.localhost 回环，其它一律拒绝', () => {
   for (const ok of ['127.0.0.1:8931', '127.0.0.1', '[::1]:8931', 'localhost:8931', 'localhost',

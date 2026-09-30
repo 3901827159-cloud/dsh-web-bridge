@@ -42,6 +42,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { listen } from './fixtures/listen.js';
 import { promptTransportPlan } from '../lib/browser-driver.js';
 
 const pkg = path.dirname(import.meta.dirname);
@@ -167,8 +168,7 @@ async function withControlPlane({ config = {}, driver }, fn) {
     if (def) return def.handler(req, res);
     res.writeHead(404).end();
   });
-  await new Promise((r) => server.listen(0, '127.0.0.1', r));
-  const port = server.address().port;
+  const port = await listen(server); // 共享守卫：坏端口/null 重试（见 fixtures/listen.js 头注的两类 flake）
   const call = async (method, name, body) => {
     const r = await fetch(`http://127.0.0.1:${port}/__webcode/${name}`, {
       method,

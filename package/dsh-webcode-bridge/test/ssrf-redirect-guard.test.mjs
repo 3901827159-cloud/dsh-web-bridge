@@ -22,14 +22,12 @@ import dns from 'node:dns/promises';
 import { isPrivateHost } from '../lib/loopback.js';
 import { httpFetch } from '../lib/upstream.js';
 
-/** 起一个只绑回环的临时服务器，返回 `{ port, close }`。 */
-function listen(server) {
-  return new Promise((resolve) => {
-    server.listen(0, '127.0.0.1', () => resolve({
-      port: server.address().port,
-      close: () => new Promise((r) => server.close(r)),
-    }));
-  });
+/** 起一个只绑回环的临时服务器，返回 `{ port, close }`。
+ *  端口守卫走共享 helper（null / undici 保留坏端口都重试，见 fixtures/listen.js）。 */
+async function listen(server) {
+  const { listen: guarded } = await import('./fixtures/listen.js');
+  const port = await guarded(server);
+  return { port, close: () => new Promise((r) => server.close(r)) };
 }
 
 test('A. isPrivateHost 必须拦住内网字面量（含规格化形态）', () => {
