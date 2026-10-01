@@ -288,14 +288,27 @@ test('①c 等级声明只有一份：providers 的条目必须与 think-effort 
   }
 });
 
-test('①d 宿主载荷形状：efforts 只有 id/name，且刻意不声明 defaultEffort', () => {
+test('①d 宿主载荷形状：efforts 只有 id/name，逐站声明 defaultEffort（0.19.52 决策反转）', () => {
   const r = reasoningEffortsFor('kimi');
-  assert.deepEqual(r, { efforts: [{ id: '标准', name: '标准' }, { id: '进阶', name: '进阶' }] });
+  assert.deepEqual(r, {
+    efforts: [{ id: '标准', name: '标准' }, { id: '进阶', name: '进阶' }],
+    defaultEffort: '标准',
+  });
   assert.equal(reasoningEffortsFor('deepseek'), null, '没有等级的站点必须返回 null（宿主据此不显示那一栏）');
-  // defaultEffort 一旦声明，宿主会把它 materialize 进每一轮请求 ⇒ 选择器里「Default」消失、
-  // 网页被强行改档。用户要的是「能主动选」，不是「桥替他定档」。
+  // 0.19.52（用户指令「去除没有的 auto 挡位」）：不声明 defaultEffort 时宿主选择器恒显示
+  // 「Default」行——网页上没有这档，它就是那枚「没有的 auto」。声明后该行消失、选模型
+  // 即携带站点默认档。每个默认值都有取证（THINK_EFFORT 条目注释）；改这里必须带新读数。
+  // 值同时必须落在本站 efforts 里——声明一个菜单上不存在的档会让每轮抛
+  // THINK_EFFORT_UNKNOWN。
+  const expectedDefaults = { kimi: '标准', glm: '极致', zai: '最高', qwen: '自动', doubao: '快速' };
   for (const s of SITES) {
-    if (s.efforts) assert.equal(thinkEffortFor(s.id).defaultEffort, undefined, `${s.id} 不该声明 defaultEffort`);
+    if (!s.efforts) continue;
+    const def = thinkEffortFor(s.id).defaultEffort;
+    assert.equal(def, expectedDefaults[s.id],
+      `${s.id} 的 defaultEffort 应为「${expectedDefaults[s.id]}」（THINK_EFFORT 条目注释里逐条有取证；改动必须附新读数）`);
+    assert.ok(s.efforts.some((e) => e.id === def),
+      `${s.id} 的 defaultEffort「${def}」不在本站档位清单里——会每轮 THINK_EFFORT_UNKNOWN`);
+    assert.equal(reasoningEffortsFor(s.id).defaultEffort, def, `${s.id} 的 defaultEffort 必须随载荷外发`);
   }
   assert.deepEqual(effortById('kimi', '进阶'), { id: '进阶', name: '进阶', ordinal: 2 });
   assert.equal(effortById('kimi', '不存在的档'), null);

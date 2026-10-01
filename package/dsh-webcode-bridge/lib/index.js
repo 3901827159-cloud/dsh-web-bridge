@@ -865,7 +865,20 @@ export function apply(ctx, config = {}) {
   // 单独网站设置能够单独设置」。回落链与 sendGapMsBySlot 逐字同构：
   // 站点档（本站点显式值）→ 全局档（promptTransport）→ 插件 config → 'attach'。
   // 默认空对象 = 行为与 0.19.31 逐字相同（每个站点都跟随全局）。
-  const defaultConfig = { extraPrompt: '', extraPromptBySite: {}, defaultModel: 'deepseek', defaultModelBySite: {}, previewRefreshRate: 5000, thinkMode: 'on', subAgentMode: 'own', subAgentSite: 'follow', sendGapMs: 0, sendGapBasis: 'send-to-send', accounts: [], sendGapMsBySlot: {}, promptTransport: 'attach', promptTransportBySite: {} };
+  // maxConcurrentLanes（0.19.52，用户指令「真并发 = 多 profile，我需要实现」）：
+  // 不同账号车道之间的**真并发上限**。车道本身（同账号串行、跨账号并发）0.19.4 起就在
+  // relay.js 里；本键把它从常量提升为设置项——多账号用户把每站开好槽后，调大这里即可
+  // 真并发（每条车道是独立的浏览器实例，见 drivers Map）。默认 2 是 0.19.4 的保守起点
+  // 逐字保留：没配多账号的用户行为不变（车道数 ≤ 账号数，2 与 5 对单账号无差别）。
+  // 夹取范围 1..8：数值一律夹进区间（0/负数 → 1，>8 → 8），非数值（NaN/缺键）归默认 2。
+  // 0 会把所有请求堵死在队列里，而写 0 的人多半想要「串行」= 1；8 以上是本机浏览器
+  // 实例的内存/风控边界（每实例是一个完整 Chromium）。三处（本函数、web-control 的
+  // GET/POST、设置页提交）判据逐字同源。
+  const laneCapOf = (s) => {
+    const n = Math.round(Number(s?.maxConcurrentLanes));
+    return Number.isFinite(n) ? Math.min(8, Math.max(1, n)) : 2;
+  };
+  const defaultConfig = { extraPrompt: '', extraPromptBySite: {}, defaultModel: 'deepseek', defaultModelBySite: {}, previewRefreshRate: 5000, thinkMode: 'on', subAgentMode: 'own', subAgentSite: 'follow', sendGapMs: 0, sendGapBasis: 'send-to-send', accounts: [], sendGapMsBySlot: {}, promptTransport: 'attach', promptTransportBySite: {}, maxConcurrentLanes: 2 };
   // 设置**修订号**（0.19.33）：单调递增的进程内计数器，每次 set() 自增。
   //
   // 为什么必须有它：设置面有多处读数（提示词模板 / 再教学 / 投递形态生效值）是从
@@ -882,6 +895,11 @@ export function apply(ctx, config = {}) {
   // web-control 的 POST settings 与 POST account-add 都走 set()，放在路由里就会漏掉
   // account-add（它同样改变设置）。
   let settingsRevision = 0;
+  // 并发上限的「设置已保存」落点：configManager 声明在 relay 之前，而 set() 是
+  // POST settings / account-add 的唯一落盘路径（见上方注释）。这里用一个可后绑定的
+  // sink，relay 创建后接上——保存即生效，不需要重启。绑定前（极早期）调用是 no-op，
+  // relay 创建那一刻会直接读一次设置补上。
+  let laneCapSink = null;
   const configManager = {
     get() {
       // settingsService 已在初始化时校验 get/set 双全；此处仍防御式包裹
@@ -912,6 +930,9 @@ export function apply(ctx, config = {}) {
     set(newConfig) {
       const merged = { ...defaultConfig, ...newConfig };
       settingsRevision += 1;
+      // 并发上限即存即生效（见 laneCapSink 声明处的理由）。失败不影响保存——
+      // 上限退回旧值只是「下次重启才生效」，不该让设置保存 500。
+      try { laneCapSink?.(merged); } catch { /* 见上：统计类副作用不进主链路 */ }
       // settingsService 初始化时已确认可写；运行期异常仍回落文件，绝不让保存 502
       if (settingsService) {
         try { settingsService.set('webcode', merged); return merged; } catch (err) { warn('host settings set failed:', err?.message); }
@@ -1151,10 +1172,12 @@ export function apply(ctx, config = {}) {
       // 一栏「推理等级」，选中值随 `GenerateOptions.reasoningEffort` 回来（宿主契约见
       // dsh-llm 的 resolveCallWithInfo：未知值会被它挡成 UNSUPPORTED_REASONING_EFFORT）。
       //
-      // **刻意不声明 defaultEffort**：声明它等于桥替用户定档，而且宿主会把该值materialize
-      // 进每一轮请求（`adapterDefaults.reasoningEffort`），于是「Default」这一项消失、
-      // 网页被强行改档。不声明时选择器显示「Default」，`reasoningEffort` 恒 undefined，
-      // 桥一个字都不动网页——与本次改动前逐字相同；只有用户主动选了某一档才下发。
+      // **0.19.52 起逐站声明 defaultEffort**（用户指令：「去除没有的 auto 挡位」）：
+      // 不声明时宿主选择器恒显示「Default」行——网页上根本没有这一档，它就是用户
+      // 说的那枚「没有的 auto」。声明后 Default 行消失、选模型即携带站点自己的
+      // 默认档（THINK_EFFORT 逐条附取证）。0.19.48 曾以「不替用户定档」为由全部
+      // 不声明；2026-09-30 用户明确要求反转——确定性优先，代价（每轮下发并核对档位）
+      // 见 think-effort.js 头注。
       // 清单本身只有一份（lib/think-effort.js），这里只做形状适配。
       const reasoning = reasoningEffortsFor(m.siteId);
       return {
@@ -3251,6 +3274,11 @@ function imageMarkdown(images) {
     // 限流退避重试，本来就该比单轮预算宽。护栏见 test/watchdog-first-byte.test.mjs。
     requestTimeoutMs: (Number(cfg.requestTimeoutMs) || 240_000) * 2,
     logger: console,
+    // 并发上限（0.19.52）：`...cfg` 摊平进来的是 DEFAULTS / 插件 config 的静态值，
+    // 设置页保存的值在这里覆盖（settings > config 的优先序，与 sendGapMs 同型）。
+    // relay 的 cfg 对象经 `get config()` 暴露，dispatch 每次现读 ⇒ 改这个字段即时生效。
+    maxConcurrentLanes: laneCapOf(configManager.get()),
+    minSendIntervalMs: cfg.minSendIntervalMs,
     // 累计等待时长的记账入口（见 recordWaitMetrics）。
     onMetrics: recordWaitMetrics,
     // Session mode routes into the session's own web conversation (only the
@@ -3826,6 +3854,10 @@ function imageMarkdown(images) {
       front.handle(req, res, pathname);
     },
   });
+  // 并发上限的「保存即生效」接线（见 configManager 声明处的 laneCapSink）。
+  // relay 的 cfg 经 `get config()` 暴露、dispatch 每次现读，因此只需改这一个字段。
+  laneCapSink = (s) => { try { relay.config.maxConcurrentLanes = laneCapOf(s); } catch { /* 设置副作用不进主链路 */ } };
+  laneCapSink(configManager.get());
   const webControl = createWebControl({
     driver, relay, config: cfg, host, logger: console,
     // settings-page prompt-template preview: the exact first-turn text the

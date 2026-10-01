@@ -395,6 +395,24 @@ pre.preset {
         </select>
         <div class="hint">「距上次发出」针对滑窗频控；「距上次回复完成」控制对话节奏避免过密回复。</div>
       </div>
+      <!-- 并发上限（0.19.52，多 profile 真并发）。
+           车道模型：同一账号串行（一个网页会话只有一个输入框），不同账号真并发
+           （每条车道是独立浏览器实例）。此值限制同时在跑的车道数，调大前先在
+           「网站账号」分组把各站点配好多个账号——单账号下 2 与 8 无差别。 -->
+      <div class="form-row">
+        <label for="maxConcurrentLanes">并发车道上限（多账号真并发）</label>
+        <select id="maxConcurrentLanes">
+          <option value="1">1（完全串行）</option>
+          <option value="2">2（默认）</option>
+          <option value="3">3</option>
+          <option value="4">4</option>
+          <option value="5">5</option>
+          <option value="6">6</option>
+          <option value="7">7</option>
+          <option value="8">8（每车道一个浏览器实例，注意内存）</option>
+        </select>
+        <div class="hint">同一账号永远串行；不同账号（「网站账号」里配置的槽）可真并发，此值限制同时在跑的数量。保存即生效，无需重启。</div>
+      </div>
       <div class="form-row">
         <label for="previewRefreshRate">预览刷新率 (毫秒)</label>
         <input type="number" id="previewRefreshRate" min="1000" max="30000" step="500" value="5000">
@@ -472,6 +490,10 @@ pre.preset {
       // 「面板选中项」与「真实行为」分叉时用户没有任何办法发现。
       document.getElementById('sendGapBasis').value =
         data.sendGapBasis === 'end-to-start' ? 'end-to-start' : 'send-to-send';
+      // 并发上限（0.19.52）：后端 GET /settings 已夹取后带回（未保存过时是默认 2），
+      // 前端只按值选中，不自己造默认（与 sendGapBasis 同一条纪律）。
+      const laneEl = document.getElementById('maxConcurrentLanes');
+      if (laneEl) laneEl.value = String(Number(data.maxConcurrentLanes) || 2);
       // 投递形态：后端（GET /settings）已经带默认值回来（未保存过时是 'attach'），
       // 因此这里只需按值选中；前端不自己造默认值——否则「面板选中项」与「驱动真实
       // 行为」会各有一份默认，而这两者分叉时用户没有任何办法发现。
@@ -916,6 +938,12 @@ pre.preset {
 
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
+    // 并发上限（0.19.52）：先算后用——本文件整体是模板字符串，对象字面量里塞
+    // 复杂表达式一旦写错，node --check 只查外壳、查不到内层脚本；保持每个成员
+    // 一行可读。提交前夹取（数值夹 1..8，非数值归 2），服务端写入侧还会再
+    // 归一化一次，两处判据同源（与 sendGapBasis 同一条纪律）。
+    const laneN = Math.round(parseInt(document.getElementById('maxConcurrentLanes').value, 10));
+    const laneCap = Number.isFinite(laneN) ? Math.min(8, Math.max(1, laneN)) : 2;
     const payload = {
       extraPrompt: document.getElementById('extraPrompt').value,
       defaultModel: document.getElementById('defaultModel').value,
@@ -934,6 +962,7 @@ pre.preset {
       // 「跟随全局」用**删键**表达——写一个第三值会让「没配」与「配成跟随全局」
       // 在设置文件里变成同一件事，而它们语义不同（同 extraPromptBySite 的空串删键）。
       promptTransportBySite: Object.fromEntries(Object.entries(siteTransportDraft).filter(([, v]) => v)),
+      maxConcurrentLanes: laneCap,
     };
     try {
       const res = await fetch(API_BASE + '/settings', {

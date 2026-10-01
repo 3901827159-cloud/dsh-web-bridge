@@ -168,11 +168,16 @@ test('conversationNav：站点没有地址形状 → unsupported 且原因可分
 test('接线：sendTurn 走 conversationNav 三态，且 unsupported 必须抛码', () => {
   const src = readLib('browser-driver.js');
   assert.ok(/conversationNav\(/.test(src), 'sendTurn 必须走三态判定');
-  const at = src.indexOf('const nav = conversationNav(');
+  // 0.19.52：`let nav`（stay 分支会在 unsupported 之后改判为 resume——落地地址锚）。
+  // 判据按「const 或 let」匹配，钉的是「三态判定的存在」而不是声明关键字。
+  const at = src.search(/(?:const|let) nav = conversationNav\(/);
   assert.ok(at > 0, '应有 nav 判定');
-  const body = src.slice(at, at + 1400);
-  assert.ok(/nav\.state === 'unsupported'/.test(body), 'unsupported 必须被显式处理');
-  assert.ok(/err\.code = 'WEB_SESSION_LOST'/.test(body), 'unsupported 必须抛 WEB_SESSION_LOST');
+  // 0.19.52 二改：stay 分支插在 nav 判定与 unsupported 处理之间（约 40 行），固定
+  // 窗口会漏——改锚「unsupported 块本身」，抛码就在它里面。
+  const unsupportedAt = src.indexOf("if (nav.state === 'unsupported')");
+  assert.ok(unsupportedAt > 0, 'unsupported 必须被显式处理');
+  const unsupportedBody = src.slice(unsupportedAt, unsupportedAt + 1200);
+  assert.ok(/err\.code = 'WEB_SESSION_LOST'/.test(unsupportedBody), 'unsupported 必须抛 WEB_SESSION_LOST');
   // 关键：不得再有「默默开新会话」的老路径
   assert.ok(!/navigate = root\.origin \+ '\/a\/chat\/s\/'/.test(src),
     'DeepSeek 专用地址拼接不得残留在驱动里（已收口到 providers）');

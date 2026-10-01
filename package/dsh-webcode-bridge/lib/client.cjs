@@ -4822,6 +4822,19 @@ window.__ModuleLoader__.load({
      */
     let pendingPaneSite = null;
 
+    /**
+     * 站点探活的**会话级**缓存（0.19.52，用户报障「每次打开右侧都要停顿加载」的
+     * 客户端一半）。
+     *
+     * 旧实现把缓存挂在组件实例的 `useRef` 上，而注释写的是「会话内缓存」——
+     * DSH 官方标签条切走再切回会**卸载再重挂**面板（宿主标签的固有生命周期，
+     * 见 ui-sidebar-files 的 README：切走即卸载、切回即重挂），useRef 随之清零，
+     * 于是每次切回都要把探活**串行地**重跑一遍（可达站点一次真实外网往返，
+     * 不可达站点最长 30s 超时），然后才轮到 connect 和 iframe。提升到模块级
+     * 后，同一次页面加载内探活只跑一次；「重试」按钮仍传 force 强制重探。
+     */
+    const siteProbeCache = new Map(); // siteId → { reachable, status, reason, ms, at }
+
     function Conversation({ browserSrc, onSplit, onFloat, siteId: controlledSite, slot: controlledSlot }) {
       const [siteId, setSiteId] = React.useState(() => {
         const handed = pendingPaneSite;
@@ -4948,16 +4961,17 @@ window.__ModuleLoader__.load({
       // 两种真实失败态：站点本机不可达（下方 unreachable）与内嵌被站点拦截
       // （frameBlocked）。返回恒 false 即「不再引导」。
       const shouldGuide = () => false;
-      // 站点探活（不可达站点不挂 iframe）：会话内缓存，点「重试」强制重探。
-      // probesRef 必须先于 probeSite 声明：probeSite 的闭包捕获它，虽然实际调用
-      // 发生在 render 之后的 effect 里（那时已初始化），但把声明放在后面等于埋一个
-      // TDZ 陷阱——后人把 probeSite 提前调用就会炸。
+      // 站点探活（不可达站点不挂 iframe）：**会话级**缓存（模块级 siteProbeCache，
+      // 0.19.52——旧实现挂在组件 ref 上，面板随标签卸载就丢），点「重试」强制重探。
+      // `probes` 这个 React state 只服务**渲染**（不可达横幅），probeSite 的命中
+      // 判据一律走缓存本体，两者不共用同一份引用。
       const [probes, setProbes] = React.useState({});     // siteId → { reachable, status, reason, ms, at }
-      const probesRef = React.useRef({});
       const probeSite = React.useCallback((sid, force) => {
-        if (!force && probesRef.current[sid]) return Promise.resolve(probesRef.current[sid]);
+        // 命中会话级缓存（0.19.52，见 siteProbeCache 声明处）直接回——面板重挂
+        // 不再串行重跑探活；force（「重试」按钮）仍然真探。
+        if (!force && siteProbeCache.has(sid)) return Promise.resolve(siteProbeCache.get(sid));
         return api('site-probe', { siteId: sid }, 30000)
-          .then(r => { probesRef.current = { ...probesRef.current, [sid]: r }; setProbes(probesRef.current); return r; })
+          .then(r => { siteProbeCache.set(sid, r); setProbes(prev => ({ ...prev, [sid]: r })); return r; })
           .catch(() => null);
       }, []);
       const unreachable = sid => { const p = probes[sid]; return p && p.reachable === false ? p : null; };

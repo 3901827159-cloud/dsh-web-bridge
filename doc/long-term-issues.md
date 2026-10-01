@@ -15,16 +15,16 @@
 | 2 | 会话槽 LRU 上限与淘汰 | 中 | 否 | `lib/index.js` |
 | 3 | 网页 UI 漂移 | 高 | 否 | `lib/providers.js`、`lib/contract.js`、`lib/decoder.js`、`lib/browser-driver.js` |
 | 4 | 模型选择契约覆盖率 | 中 | 否 | `lib/providers.js`、`lib/browser-driver.js`、`lib/model-picker.js` |
-| 5 | 单槽吞吐（FIFO 队列） | 中 | 否 | `lib/relay.js`、`lib/index.js` |
+| 5 | 单槽吞吐（**多账号真并发已实现，0.19.4 车道；上限可配 0.19.52**；同账号串行是网页会话的物理约束） | 中 | 否 | `lib/relay.js`、`lib/index.js`、`lib/settings-page.js` |
 | 6 | 超时口径三者关系 | 中 | 否 | `lib/index.js`、`lib/browser-driver.js`、`lib/metrics.js` |
 | 7 | profile 锁与孤儿 Edge | 中 | 否 | `lib/browser-driver.js` |
 | 8 | 发送间隔的基准语义 | 低 | 否 | `lib/index.js`、`lib/metrics.js` |
-| 9 | 三项既有假失败 | 低 | 否 | `doc/review-guide.md`、`test-mock/run-m2*.js` |
+| 9 | 三项既有假失败（**2026-09-30 实证收口：m2b/m2c 双门全绿——真因三处已修；run-m2.js 已于 0.15.8 删除，登记漂移一并更正**） | 低 | 否 | `doc/review-guide.md`、`test-mock/run-m2b-driver.js`、`test-mock/run-m2c-webapi.js` |
 | 10 | 测试脚本的收集口径与环境限制 | 低 | 否 | `package.json` |
 | 11 | 大 prompt 的性能提示（可选节） | 低 | 否 | `lib/browser-driver.js` |
 | 12 | 图片预算（可选节） | 低 | 否 | `lib/index.js` |
 | 13 | 网页端「部分流」自愈（可选节） | 低 | 否 | `lib/browser-driver.js` |
-| 14 | Z.ai 无会话地址形状（新，0.14.2） | 中 | 否 | `lib/providers.js`、`lib/browser-driver.js` |
+| 14 | Z.ai 无会话地址形状（**0.19.52 landedUrl 会话锚已落地：`/c/<uuid>` 实锤、原地续聊 + 锚回导航；「每轮新开对话」形态就此关闭**；交错会话边界见正文） | 中 | 否 | `lib/providers.js`、`lib/browser-driver.js`、`lib/contract.js` |
 | 15 | `<call>` / `</call_call>` 残片漏进正文（**已修，0.14.6**；无下划线族 **0.15.0**） | 中 | 否 | `lib/agent-preset.js`、`test-mock/parse-session-log.mjs` |
 | 16 | 同站多账户（**已实现，0.14.7**）+ Team 面板（**已实现，0.15.0**） | — | 否 | `lib/accounts.js`、`lib/providers.js`、`lib/browser-driver.js`、`lib/client.cjs`、`lib/roster.js` |
 | 17 | 工具调用参数缺失族（**0.16.16 归因落定**：熔接形吃参；熔接形**已修**，`command` 原样本无法确证同形） | 中 | 否 | `lib/agent-preset.js`（`normalizeDsml`）、`lib/index.js` |
@@ -40,12 +40,12 @@
 | 26 | **`empty response from web AI`：思考-only 流走硬失败**（2026-09-19 新登记，**0.16.11 已修**） | 高 | 否 | `lib/index.js`、`lib/browser-driver.js`；与 #22 同族 |
 | 27 | **站点品牌图标的来源无法在本机复核**（0.16.36 新登记，**0.16.37 已解决**） | 低 | 否 | `lib/client.cjs`（`SITE_ICON_PATHS`） |
 | 28 | **思维链退化重复（同段内容原地打转）**（2026-09-26 新登记，**已修 0.19.26**）——#22 的一个可判定子形态 | 中 | 否 | `lib/repeat-detect.js`、`lib/index.js`（`thinkingOnlyNotice`）、`test/repeat-detect.test.mjs` |
-| 29 | **Z.ai 自带风控闸门（验证通过前不发请求）**（2026-09-27 新登记）——**代码无法解决**，已改为提前如实报错 | 高 | 否 | `lib/providers.js`（`captchaSelector`）、`lib/browser-driver.js`（`WEB_CAPTCHA_REQUIRED`）、`test/captcha-gate.test.mjs` |
-| 30 | **Z.ai 真实流帧格式未录制**（2026-09-27 新登记）——9 个既有 decoder 都读不了它 | 高 | 否 | `lib/decoder.js`、`lib/providers.js`（ZAI 的 `decoder` 刻意未改） |
-| 31 | **四站的「思考等级」没有真机读数 ⇒ 刻意不声明**（2026-09-28 新登记）——kimi 的 `标准` 档亦未取证 | 中 | 否 | `lib/think-effort.js`、`lib/providers.js`、`test-mock/probe-think-control.mjs` |
+| 29 | **Z.ai 自带风控闸门（验证通过前不发请求）**（2026-09-27 新登记；2026-09-30 实时复现 + 新读数：**滑块弹在无头浏览器里，用户看不见**——「人工打开没见过验证」与「桥轮次被拦」同时为真）——**代码无法解决**，已改为提前如实报错 | 高 | 否 | `lib/providers.js`（`captchaSelector`）、`lib/browser-driver.js`（`WEB_CAPTCHA_REQUIRED`）、`test/captcha-gate.test.mjs` |
+| 30 | **Z.ai 真实流帧格式未录制**（2026-09-27 新登记）——9 个既有 decoder 都读不了它；**取证工具链已就绪**（有头探针 + 实时 tee，见正文 2026-09-30 段），缺一次人肉滑块配合 | 高 | 否 | `lib/decoder.js`、`lib/providers.js`（ZAI 的 `decoder` 刻意未改） |
+| 31 | **四站的「思考等级」没有真机读数 ⇒ 刻意不声明**（2026-09-28 新登记；**0.19.52 五站已声明 `defaultEffort`——「Default」行消失**；四站缺口维持）——kimi 的 `标准` 档亦未取证 | 中 | 否 | `lib/think-effort.js`、`lib/providers.js`、`test-mock/probe-think-control.mjs` |
 | 32 | **kimi 的登录态在 localStorage 而非 cookie ⇒ 「拷 profile 副本」式探针拿到的是游客页**（2026-09-28 新登记，**已给出替代取证法**）——会让真机读数与线上现场错位 | 中 | 否 | `lib/providers.js`（kimi 的 `storageState` 相关注释）、`test-mock/probe-think-effort-live.mjs`、`test-mock/probe-think-control.mjs` |
 | 33 | **需要人才能过的验收环节没有「提醒人手动过」的回路**（2026-09-29 新登记）——桥不会自己起浏览器、也不会在取不到读数时明确提示「请手动过一下 z.ai」 | 中 | 否 | `test-mock/probe-think-effort-live.mjs`、`test-mock/probe-think-control.mjs`、`doc/verify.md` |
-| 34 | **zai / doubao 的思考等级回读只有静态复算，没有真机读数**（2026-09-29 新登记）——「复算」≠真机；若实际已坏则该站点每轮抛 `THINK_EFFORT_UI_CHANGED` | 中 | 否 | `lib/think-effort.js`、`test-mock/probe-think-effort-live.mjs`、`doc/research/2026-09-28-think-effort-readback.md` |
+| 34 | **zai / doubao 的思考等级回读只有静态复算，没有真机读数**（2026-09-29 新登记；**2026-09-30 补上：zai 实时只读 CDP 读数在案（pill「深度思考 最高」）、doubao fresh dump ×4（「豆包 快速」）**） | 中 | 否 | `lib/think-effort.js`、`test-mock/probe-think-effort-live.mjs`、`doc/research/2026-09-28-think-effort-readback.md` |
 | 35 | **并列三列的「列级沙箱」是约定而非拦截**（2026-09-29 新登记）——provider 通路会真改文件、控制面通路只回文本；两列今天对工作区没有文件效果，且本插件**结构上**不拥有权限层 | 中 | 否 | `lib/column-context.js`、`lib/column-fs.js`、`doc/research/2026-09-26-column-sandbox-round1-thinking.md` |
 | 36 | **`ref-index` 既有红**（2026-09-29 复核：**已解决**）——登记的是「曾被记为欠账、实测已不在」这次更正本身 | 低 | 否 | `reference/README.md`、`scripts/gen-reference-index.mjs` |
 | 37 | **两条既有常红是同一条行为：网页会话丢失 → 整段重放**（2026-09-30 复核归因：**已修——根因是测试隔离缺陷，不是重放分支**；2026-09-30 晚登记）——`regression` 53/1 与 `aux-delta-compact` 4/1 的 60s 压线来自裸测试读到真实 profile 的发送间隔与基准 | 高 | 否 | `lib/index.js`（profile 落盘守卫）、`test/profile-isolation.test.mjs`、`doc/progress.md`（2026-09-30 段） |
@@ -305,6 +305,19 @@ transcript。但**网页 composer 的真实上限未知**——它是网页端�
 
 ## 5. 单槽吞吐：网页一次只能跑一轮，并行子代理只能排队
 
+> ### 2026-09-30 结账（0.19.52）：「多 profile 真并发」的可调面已落地
+>
+> 车道模型（同账号串行、跨账号真并发、每车道独立浏览器实例）0.19.4 起就在
+> `relay.js`；本轮（用户指令「真并发 = 多 profile，我需要实现」）把**上限**从常量
+> 提升为设置项：`maxConcurrentLanes`（默认 2 = 保守起点逐字保留，夹取 1..8，
+> 设置页「速度与排队保护」分组，**保存即生效**——`configManager.set()` 经
+> `laneCapSink` 直写 `relay.config`）。用法：设置页「网站账号」给站点配多个账号
+> （每账号独立 profile/浏览器），再调大上限即真并发。护栏 `settings-transport` ⑨。
+> **仍不解决的**：同一账号内的并发（一个网页会话只有一个输入框，多发互相污染——
+> 被操作对象决定的物理约束，与实现无关）。
+>
+> 下面保留原文（「为什么当时不做」的推理仍有效：单账号场景的串行是约束不是缺陷）。
+
 ### 现状
 
 `lib/relay.js` 是一个**单槽执行器 + FIFO 队列**：`busy` 标志保证同一时刻只有一个请求在跑
@@ -508,7 +521,29 @@ metrics 里对应 `sendWaitMs` / `gapTargetMs` / `sincePrevSendMs`
 
 ---
 
-## 9. 三项「既有假失败」：**归因错误**（2026-09-16 复核推翻）
+## 9. 三项「既有假失败」：**归因错误**（2026-09-16 复核推翻；**2026-09-30 实证收口**）
+
+> ### 2026-09-30 实证收口：m2b/m2c 双门全绿，「UNTESTABLE」的旧判作废
+>
+> 本会话的沙箱不再挡子进程派生（danger-full-access），两门**真跑**后的实锤——
+> 2026-09-16 那条「断言从未被执行」的环境结论在本机已不成立，且真跑暴露了
+> 三处真因（全部已修，读数见 `doc/progress.md` 2026-09-30 第二轮 §六）：
+>
+> 1. `bin/bridge-standalone.js` 的 `driverFor` 条件**反了**：mock 形态
+>    （`WEBCODE_SITE` 已设）的 deepseek 请求被派去指向**真实站点**的懒驱动
+>    ⇒ NEED_LOGIN ⇒ `completion via driver` 恒失败——这正是被记为「恒 FAIL」的
+>    那一条，**它是真缺陷，不是环境假失败**。
+> 2. m2b 断言停在两处旧语义：consent 0.19.31 起默认开（关闸的正确形态 = 落盘
+>    `accepted:false`；`WEBCODE_NO_CONSENT` 是「无闸」不是「关闸」）；非流式
+>    content 0.16.x 起是 parts 数组（图片支持）。
+> 3. mock-server 停在旧版 UI 形态（模型 select），现行契约是统一 UI 的
+>    「深度思考」pill + `model_type/thinking_enabled` 请求体——mock 已升级。
+>
+> **收口读数**：`run-m2b-driver.js` PASS；`run-m2c-webapi.js` **10/10 PASS**。
+> 另更正一处登记漂移：`run-m2.js` 已于 0.15.8 随归档**删除**（git 实查），
+> 本条标题里的「三项」实际只剩两门。
+>
+> 下面两段保留原文（历史归因链，含 2026-09-16 的复核）。
 
 > ### 2026-09-16 复核推翻（本条的归因是错的）
 >
@@ -762,6 +797,30 @@ durable 图片块的读取按优先级降级，每一档失败都**记名不静�
 ---
 
 ## 14. Z.ai 没有会话地址形状：只能整段重建（0.14.2 新发现）
+
+> ### 2026-09-30 结账（0.19.52）：landedUrl 会话锚落地，「每轮新开对话」形态关闭
+>
+> **新证据（本轮两轮一致）**：发送后页面导航到 `/c/<uuid>`（`/c/ac06aeb0` 与
+> `/c/fb527fa1`，2026-09-30 实测）——SPA 确实以 `/c/<uuid>` 承载会话；但 goto 深链
+> 仍被弹回根地址（0.19.41 的旧读数维持），因此**继续不声明形状**（编形状的代价
+> 见下方原文）。
+>
+> **修法（`landedUrl` 会话锚，`test/session-stay.test.mjs` 6 项护栏）**：
+> 会话槽记录扩展为双身份（`webSessionId` + `landedUrl`）；`conversationStay`
+> 纯判据（同源 + 同 pathname + 非站点根）判定「页面还停在本会话上」⇒ **原地
+> 续聊**（不导航、不重放、不新开）；页面不在锚上时先 `goto(锚)` 再验证（锚回
+> 导航——重启后新页停在根的恢复路径；z.ai 弹回根则验证失败、照旧整段重建，
+> 零额外风险）。七站「每轮 WEB_SESSION_LOST → 整段重放 → 每轮新开对话」的形态
+> 就此关闭（真机实锤：`webcode-sessions-zai.json` / `-doubao.json` 此前恒为
+> 2 字节空对象——从未存下过映射）。
+>
+> **仍不解决的（如实记）**：同账号**交错**的多 DSH 会话（主会话与子代理同站
+> 同槽交替）换手时仍会重建/导航重载——彻底解法是「每会话一个标签页」
+> （`sessionPages` Map + 参数化 `installPage` + LRU），本轮不做（驱动最敏感区
+> 的风险控制），作为后续项。另：右栏面板卸载 = iframe 销毁（浏览器事实），
+> 切回必然整页重载——「跨卸载常驻」需要 DOM holder 叠加方案，同记于此。
+>
+> 下面保留原文（「为什么不能编形状」的推理依然有效）。
 
 ### 现状
 
@@ -1804,6 +1863,20 @@ node .tmp/icon-source-verify.mjs    # 退出码 0 = 九条逐字相同
 
 ## 29. **Z.ai 自带风控闸门：验证通过前根本不发请求**（2026-09-27 新登记）
 
+> ### 2026-09-30 复核：闸门仍在，且拿到一条解释「用户看不见」的新读数
+>
+> 在**实时浏览器**（桥自己的实例，`DevToolsActivePort` 2070）驱动一次无害发送
+>（`请只回复三个字：你好呀`，与既有探针同一口径）：**阿里云滑块全窗弹出、
+> completion 请求零发出**（页面内 fetch tee 零命中）；无头副本探针同形（0.19.41
+> 以来第四次复现）。同时用户报告「人为打开从未见过验证」——两者同时为真的原因
+> 实锤：**弹窗发生在无头浏览器里，用户看不见**；用户手工（有头窗口）发送时
+> 风控打分不同（或曾静默通过）。桥按纪律不绕过风控；现场已恢复干净（重载清掉
+> 悬置滑块）。`WEB_CAPTCHA_REQUIRED` 的如实报错维持。
+>
+> **待办（一条）**：z.ai 自动化轮次要可用，需要一次**有人能看到的**滑块配合
+>（有头探针 `$env:PROBE_HEADED='1'; node .tmp-probe/zai/probe-zai-chat-frames.mjs`，
+> 或实时版 `live-zai-send-tee.mjs`）——它同时补 #30 的帧取证。用户本轮选择跳过。
+
 ### 现象（用户原话）
 
 > 「然后z.ai:本轮运行失败WEB_NO_PROGRESS: 网页侧超过 120s 没有任何新内容（页面在，判定相位=
@@ -1857,6 +1930,16 @@ headed×1）**全部 0 帧**；把 UA 从 `HeadlessChrome` 换成正常 Chrome �
 
 ## 30. **Z.ai 真实流帧格式未录制：现有 9 个 decoder 都读不了它**（2026-09-27 新登记）
 
+> ### 2026-09-30 进展：取证工具链就绪，缺一次人肉滑块配合
+>
+> 新增实时版探针 `.tmp-probe/zai/live-zai-send-tee.mjs`（在桥自己的浏览器里装
+> fetch tee + 无害发送，避开「拷副本丢上下文」的形态）与只读检查
+> `live-zai-readonly.mjs`（档位控件/验证码/地址的实时读数，2026-09-30 已跑：
+> pill「深度思考 最高」、零验证码节点、发送后地址 `/c/<uuid>`）。帧仍为零——
+> 闸门（#29）挡在发送之前。**拿帧只差一步**：有头窗里人肉拖一次滑块（两脚本
+> 任一），帧会自动落盘；届时按下方字段形状写 decoder 并存逐字夹具。
+> 用户本轮选择跳过，维持登记。
+
 ### 结论来自站点 bundle 的逐字片段（**不是**一次真实响应）
 
 站点自带前端里 `"parts"` 出现 **0** 次、`choices` **0** 次、`reasoning_content` **0** 次
@@ -1893,6 +1976,18 @@ headed×1）**全部 0 帧**；把 UA 从 `HeadlessChrome` 换成正常 Chrome �
 （goto 后地址逐字不变、读回上轮标记）形成对照，z.ai **继续维持 `unsupported`**。
 
 ## 31. **四站的「思考等级」没有真机读数 ⇒ 刻意不声明**（2026-09-28 新登记）
+
+> ### 2026-09-30 结账（0.19.52）：五站 `defaultEffort` 已声明——「Default」行消失
+>
+> 用户指令「去除没有的 auto 挡位」推翻了 0.19.48 的「刻意不声明 defaultEffort」
+> 决策：不声明时宿主选择器恒显示「Default」行——网页上没有这档，它就是那枚
+> 「没有的 auto」。五站现声明默认档（kimi 标准 / glm 极致 / zai 最高 / qwen 自动 /
+> doubao 快速，逐条取证写在 `think-effort.js` 条目注释，zai 侧含 2026-09-30
+> 实时 CDP 读数）；声明后 Default 行消失、选模型即携带该档。代价如实记：每轮
+> 下发并核对档位，站点改版让回读失效时症状从「选档才报错」变成「每轮
+> THINK_EFFORT_UI_CHANGED」——用户明确选择的确定性。
+> **四站缺口（chatgpt/gemini/grok/claude）维持**：网络不可达，无读数不声明
+>（正文表格不变）。
 
 ### 现状（这是有意的，不是漏做）
 
@@ -1984,6 +2079,20 @@ kimi（Kimi Agent，`www.kimi.com/agent`）的登录凭据**不在 cookie 里** 
 不抵代价。因此记在这里，等真的需要「不依赖线上浏览器」的 kimi 探针时再决定。
 
 ## 34. **zai / doubao 的思考等级回读只有静态复算，没有真机读数**（2026-09-29 新登记）
+
+> ### 2026-09-30 读数补齐（0.19.52 轮）
+>
+> - **zai**：实时只读 CDP（`.tmp-probe/zai/live-zai-readonly.mjs`，桥自己的无头
+>   浏览器）：pill 文本「深度思考 最高」可见、当前档 = **最高**——档位控件在、
+>   形态与声明一致（triggerText「深度思考」+ 后缀档位）。回读判据的**下发-回读
+>   循环**仍未跑（受 #29 闸门挡住真实轮次），但「控件在、形态对」已从静态复算
+>   升级为实时读数。
+> - **doubao**：fresh 页 think-control dump ×4（2026-09-28）：模型下拉
+>   「豆包 快速 / 豆包 2.1 Turbo专家」——徽章即档位，fresh 状态 = **快速**，
+>   与 `defaultEffort: '快速'` 的声明互证。
+>
+> 「每轮 THINK_EFFORT_UI_CHANGED」的风险因此收窄为「站点改版」一档
+>（0.19.48 起的既有边界），「控件根本不在」一档已被读数排除。
 
 ### 现象
 

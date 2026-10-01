@@ -42,7 +42,12 @@ const driver = createBrowserDriver({
 const drivers = new Map();
 function driverFor(siteId) {
   const sid = getSite(siteId) ? siteId : 'deepseek';
-  if (sid === 'deepseek' && !process.env.WEBCODE_SITE) return driver;
+  // 默认槽（deepseek）永远用主驱动：非 mock 形态它挂在 profileDir 根（默认槽零位移）；
+  // mock 形态（WEBCODE_SITE 指向本地 mock）它就是「对着 mock 的那个驱动」。
+  // 旧判据 `sid === 'deepseek' && !process.env.WEBCODE_SITE` 恰好把 mock 形态的
+  // deepseek 请求派去了指向**真实站点**的懒驱动——m2b 门的真机形态：一到
+  // completion 就 NEED_LOGIN（真站无登录态），mock 页根本没被打开（0.19.52 修）。
+  if (sid === 'deepseek') return driver;
   if (!drivers.has(sid)) {
     const st = getSite(sid);
     drivers.set(sid, createBrowserDriver({

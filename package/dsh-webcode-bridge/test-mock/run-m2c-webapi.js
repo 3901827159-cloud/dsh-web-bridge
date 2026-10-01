@@ -105,7 +105,11 @@ try {
     method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ model: 'deepseek-web', messages: [{ role: 'user', content: 'M2c 会话追踪 XYZ999' }] }),
   })).json();
-  const content = completion?.choices?.[0]?.message?.content || '';
+  // 非流式 content 兼容两种形态：旧字符串与 0.16.x 起的 parts 数组（图片支持）。
+  const rawContent = completion?.choices?.[0]?.message?.content;
+  const content = Array.isArray(rawContent)
+    ? rawContent.filter((p) => p?.type === 'text').map((p) => p?.text || '').join('')
+    : String(rawContent || '');
   ok('completion via driver', completion?.object === 'chat.completion' && content.includes('MOCK-ANSWER'), `chars=${content.length}`);
 
   const st = await (await fetch(`${BASE}/bridge/status`)).json();

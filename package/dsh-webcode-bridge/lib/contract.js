@@ -99,4 +99,50 @@ export function conversationNav({ siteId, origin, fresh, sessionId } = {}) {
   return { state: 'resume', url, reason: null };
 }
 
+/**
+ * 「落地 URL 会话锚」：没有地址形状的站点，页面**此刻**是否还停在上一轮落地的
+ * 那条会话上（0.19.52，任务书「一 DSH 会话 = 一网页会话，后续也保证同一会话」）。
+ *
+ * ## 为什么需要它（真机读数，2026-09-30）
+ *
+ * `CONVERSATION_URL_SHAPES/BUILDERS` 只有 deepseek/glm/kimi 三家。其余七站
+ * （zai/doubao/qwen/chatgpt/grok/claude/gemini）没有「由 id 构造地址」的能力 ⇒
+ * `conversationNav` 对它们恒回 `unsupported` ⇒ 每一轮非 fresh 都 WEB_SESSION_LOST
+ * → 上层整段重放 → **每轮新开一个网页对话**（真机读数：`webcode-sessions-zai.json`
+ * 与 `-doubao.json` 均为 2 字节的空对象——从未存下过任何映射）。用户报的
+ * 「所有网站切换新会话、对话条目每天异常多」正是这一族。
+ *
+ * 修法不是给它们编形状（z.ai 的 `/c/<uuid>` 实测 goto 会被弹回根地址——导航
+ * 不回去），而是**锚住页面本身**：只要页面从上一轮落地起就没被导航走，它就
+ * 仍在那条会话上——不需要导航，直接续聊即可。
+ *
+ * ## 判据（全部来自入参，纯函数可离线断言）
+ *
+ *   · `origin` 相同（同源才可能是同一会话）；
+ *   · `currentUrl` 与 `landedUrl` 的 **pathname 相同**（query 漂移容忍：kimi 会
+ *     自己补 `?chat_enter_method=…`，glm 会补 `?lang=zh`——按整串比会误判离开）；
+ *   · 该 pathname **不是站点根**（`freshPath`，即 `new URL(cfg.site).pathname`）：
+ *     根路径不携带会话身份，把根当锚会让「手动回了首页」被误判成「还在原会话」，
+ *     把增量发进一个新开的空对话——正是三条不可越界约束里「绝不静默丢上下文」
+ *     要防的那件事。
+ *
+ * @param {object} o
+ * @param {string} o.origin          站点根（如 https://chat.z.ai）
+ * @param {string} o.freshPath       开新会话的 pathname（cfg.site 的 pathname）
+ * @param {string} o.currentUrl      页面此刻的地址
+ * @param {string|null} o.landedUrl  上一轮落地时记录的地址（无记录为 null）
+ * @returns {boolean} 页面仍停在那条会话上（true = 可以原地续聊，不导航）
+ */
+export function conversationStay({ origin, freshPath, currentUrl, landedUrl } = {}) {
+  if (!origin || !currentUrl || !landedUrl) return false;
+  let cur, landed;
+  try { cur = new URL(currentUrl); landed = new URL(landedUrl); } catch { return false; }
+  let root;
+  try { root = new URL(origin); } catch { return false; }
+  if (cur.origin !== root.origin || landed.origin !== root.origin) return false;
+  if (cur.pathname !== landed.pathname) return false;
+  const fresh = String(freshPath || '/');
+  return landed.pathname !== fresh && landed.pathname !== '/';
+}
+
 export { DEEPSEEK, SITES, resolveWebModel, getSite, expectedModelType, expectedRequestMetadata, conversationIdFromUrl, conversationUrlFor };

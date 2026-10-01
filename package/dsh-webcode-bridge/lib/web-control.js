@@ -991,6 +991,12 @@ export function createWebControl(deps = {}) {
     'GET settings': async () => {
       if (!settingsStore) return { ok: true, extraPrompt: '' };
       const config = settingsStore.get();
+      // 并发上限（0.19.52）：先夹取再回带——从未保存过时设置文件里没有这个键，
+      // 回默认 2 而不是 undefined（否则设置页的下拉像「坏了」）；手写坏的值在这里
+      // 就归一。口径与 POST settings / index.js 的 laneCapOf 逐字同源：数值夹 1..8，
+      // 非数值（NaN/缺键）归 2。
+      const laneN = Math.round(Number(config.maxConcurrentLanes));
+      const laneCap = Number.isFinite(laneN) ? Math.min(8, Math.max(1, laneN)) : 2;
       // 投递形态与间隔**基准**都必须带默认值回给调用方（0.16.3 / 0.16.31）：设置页
       // 要显示「当前生效值」，而用户从未保存过时设置文件里根本没有这个键。回
       // undefined 会让面板上的下拉/单选一个都没选中，看起来像「设置坏了」——
@@ -1011,6 +1017,7 @@ export function createWebControl(deps = {}) {
         // 站点级投递形态（0.19.32）：同上——从未保存过时设置文件里没有这个键，
         // 回 undefined 会让前端渲染成「加载失败」。回空对象 = 每个站点都跟随全局。
         promptTransportBySite: config.promptTransportBySite && typeof config.promptTransportBySite === 'object' ? config.promptTransportBySite : {},
+        maxConcurrentLanes: laneCap,
       };
     },
     'POST settings': async (body) => {
@@ -1032,6 +1039,14 @@ export function createWebControl(deps = {}) {
       // 只许退化成默认行为，不许变成第三种谁也没定义过的口径。
       if ('sendGapBasis' in updated) {
         updated.sendGapBasis = updated.sendGapBasis === 'end-to-start' ? 'end-to-start' : 'send-to-send';
+      }
+      // 并发上限（0.19.52，多 profile 真并发的可调面）：数值夹进 1..8
+      //（0/负数 → 1——写 0 的人多半想要「串行」，而真 0 会把请求堵死在队列里），
+      // 非数值一律归 2（默认）。与 index.js 的 laneCapOf、GET settings 的回带口径
+      // 三处一致。
+      if ('maxConcurrentLanes' in updated) {
+        const n = Math.round(Number(updated.maxConcurrentLanes));
+        updated.maxConcurrentLanes = Number.isFinite(n) ? Math.min(8, Math.max(1, n)) : 2;
       }
       // 账户槽（0.14.7）：`accounts` 与槽级间隔都来自界面，但设置文件可手改，
       // 因此写入前一律用 accounts.js 的纯函数归一化——非法条目丢弃而不是抛错，

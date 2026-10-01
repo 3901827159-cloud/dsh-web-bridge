@@ -30,8 +30,12 @@ const PAGE = `<!DOCTYPE html>
 </style></head>
 <body>
   <h3>Mock chat.deepseek.com</h3>
-  <select aria-label="Model"><option value="flash">Flash</option><option value="vision">Vision</option><option value="deepseek">DeepSeek</option></select>
   <div class="row">
+    <!-- 0.19.52：mock 升级为 2026-09-10 起的真实统一 UI 形态——「深度思考」
+         aria-pressed 开关（detectDeepSeekUi 判 unified 的判据），不再有旧版
+         模型 select/pill。请求体也随之带 model_type/thinking_enabled，
+         驱动的「绝不静默降级」核验（MODEL_UI_CHANGED）才有真东西可比。 -->
+    <button id="think" class="btn" aria-pressed="true">深度思考</button>
     <textarea class="ds-scroll-area" id="chat-input"></textarea>
     <div role="button" id="send" class="btn"><svg><path d="M8.3125 6.5 L10 8"></path></svg>send</div>
     <div role="button" id="stop" class="btn" hidden><svg><path d="M2 4.88 L4 6"></path></svg>stop</div>
@@ -43,7 +47,11 @@ const PAGE = `<!DOCTYPE html>
     const ta = document.getElementById('chat-input');
     const sendBtn = document.getElementById('send');
     const stopBtn = document.getElementById('stop');
+    const thinkBtn = document.getElementById('think');
     const log = document.getElementById('log');
+    thinkBtn.addEventListener('click', () => {
+      thinkBtn.setAttribute('aria-pressed', thinkBtn.getAttribute('aria-pressed') === 'true' ? 'false' : 'true');
+    });
     function append(s) { log.textContent += s + '\\n'; }
     function sidFromLocation() {
       const m = location.pathname.match(/^\\/a\\/chat\\/s\\/([0-9a-zA-Z-]{4,64})$/);
@@ -61,7 +69,14 @@ const PAGE = `<!DOCTYPE html>
       const xhr = new XMLHttpRequest();
       xhr.open('POST', '/api/v0/chat/completion');
       xhr.setRequestHeader('content-type', 'application/json');
-      xhr.send(JSON.stringify({ chat_session_id: sid, messages: [{ role: 'user', content: prompt }] }));
+      // 统一 UI 的真实请求体（真机 probe-19/20）：model_type 恒为 default，
+      // 模式差异只剩 thinking_enabled（「深度思考」开关的当下状态）。
+      xhr.send(JSON.stringify({
+        chat_session_id: sid,
+        model_type: 'default',
+        thinking_enabled: thinkBtn.getAttribute('aria-pressed') === 'true',
+        messages: [{ role: 'user', content: prompt }],
+      }));
       await new Promise((resolve) => { xhr.onloadend = resolve; });
       append('[MOCK] done');
       sendBtn.hidden = false; stopBtn.hidden = true;

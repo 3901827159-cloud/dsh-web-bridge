@@ -480,3 +480,60 @@ test('⑧ 附件探针与「最近一次实际投递」不得出现在用户界�
   assert.ok(server.includes('attach-probe'),
     '服务端的 attach-probe 动作被删了 —— 本轮只撤界面，不删能力');
 });
+
+// ── ⑨ 并发车道上限（0.19.52，多 profile 真并发的可调面）────────────────────────
+//
+// 用户原话：「真并发 = 多 profile 产品决策，我需要实现」。车道模型（relay.js）0.19.4
+// 起就是「同账号串行、跨账号真并发」；本轮把**上限**从常量提升为设置项。判据分三层：
+//   ① 面层往返：GET 默认 2、POST 写 5 读回 5、非法值夹取到 1..8（0/负数→1，越界→8，
+//      NaN→2）——写坏的配置只许退化成合法值，不许变成第三种谁也没定义过的口径；
+//   ② 接线层（源码）：defaultConfig 声明默认 + createRelay 用 laneCapOf(设置) 覆盖
+//      静态值 + laneCapSink 在 set() 后同步（保存即生效，不需要重启）；
+//   ③ 设置页：下拉存在、保存 payload 带这个键。
+test('⑨ 并发车道上限：往返 + 夹取 + 保存即生效的接线', async () => {
+  // ① 面层：默认值、写入往返、非法值夹取。
+  await withControlPlane({ driver: statusStub('attach') }, async ({ get, post }) => {
+    const before = await get('settings');
+    assert.equal(before.json.maxConcurrentLanes, 2,
+      '从未保存过时 GET settings 必须带默认 2 回来（否则下拉像「坏了」）：'
+        + JSON.stringify(before.json.maxConcurrentLanes));
+
+    const w = await post('settings', { maxConcurrentLanes: 5 });
+    assert.equal(w.status, 200, 'POST settings 写 maxConcurrentLanes 必须可用：' + w.status);
+    const after = await get('settings');
+    assert.equal(after.json.maxConcurrentLanes, 5, '写入 5 后读不回 5（读写不闭环）');
+
+    // 夹取三档：下界、上界、非数字。
+    await post('settings', { maxConcurrentLanes: 0 });
+    assert.equal((await get('settings')).json.maxConcurrentLanes, 1, '0 必须夹到 1（0 会把队列堵死）');
+    await post('settings', { maxConcurrentLanes: 99 });
+    assert.equal((await get('settings')).json.maxConcurrentLanes, 8, '99 必须夹到 8（内存/风控边界）');
+    await post('settings', { maxConcurrentLanes: 'abc' });
+    assert.equal((await get('settings')).json.maxConcurrentLanes, 2, '非数字必须归默认 2');
+  });
+
+  // ② 接线层（源码结构；relay 是 apply() 作用域内的真对象，单测拿不到句柄）。
+  const src = fs.readFileSync(path.join(LIB, 'index.js'), 'utf8');
+  assert.match(src, /const laneCapOf = \(s\) => \{\s*\r?\n\s*const n = Math\.round\(Number\(s\?\.maxConcurrentLanes\)\);/,
+    'laneCapOf 夹取函数缺失或口径变了（数值夹 1..8，非数值归 2）——三处（index/web-control/设置页）同源');
+  assert.match(src, /return Number\.isFinite\(n\) \? Math\.min\(8, Math\.max\(1, n\)\) : 2;/,
+    'laneCapOf 的夹取语义必须保持：数值→1..8，NaN→默认 2（0 会堵死队列，写 0 的人要的是 1）');
+  assert.match(src, /maxConcurrentLanes: 2 \}/,
+    'defaultConfig 必须声明 maxConcurrentLanes: 2（0.19.4 的保守起点，未配置用户零位移）');
+  assert.match(src, /maxConcurrentLanes: laneCapOf\(configManager\.get\(\)\)/,
+    'createRelay 必须用「设置值」覆盖 ...cfg 摊平的静态值（settings > config 优先序）');
+  assert.match(src, /laneCapSink = \(s\) => \{ try \{ relay\.config\.maxConcurrentLanes = laneCapOf\(s\); \}/,
+    'laneCapSink 必须在 relay 创建后绑定到 relay.config（保存即生效的落点）');
+  assert.match(src, /try \{ laneCapSink\?\.\(merged\); \} catch/,
+    'configManager.set() 必须在落盘后调 laneCapSink（POST settings / account-add 两条写路径都会经过它）');
+
+  // ③ 设置页：字段存在 + 保存 payload 带键（模板串内脚本，只能按源码文本钉）。
+  const { renderSettingsPage } = await import('../lib/settings-page.js');
+  const html = renderSettingsPage([]);
+  assert.ok(html.includes('id="maxConcurrentLanes"'), '设置页没有并发上限下拉（id=maxConcurrentLanes）');
+  const page = fs.readFileSync(path.join(LIB, 'settings-page.js'), 'utf8');
+  assert.match(page, /const laneCap = Number\.isFinite\(laneN\) \? Math\.min\(8, Math\.max\(1, laneN\)\) : 2;/,
+    '设置页保存前必须按同一口径夹取（先算后用，不把复杂表达式塞进对象字面量）');
+  assert.match(page, /maxConcurrentLanes: laneCap,/,
+    '设置页保存 payload 必须带 maxConcurrentLanes 键（键名丢了会静默保存不了上限）');
+});

@@ -67,10 +67,17 @@ export const EFFORT_CONTROL_KINDS = Object.freeze(['popup', 'toggle']);
  *   · `efforts`        —— 等级清单，`id` 就是网页菜单里的**逐字文本**（驱动按文本点），
  *                         `name` 是 DSH 选择器里显示的名字（现在是逐字相同）。
  *                         `ordinal` 只用于「回读不到具体档位文本」时的兜底判定与排序。
- *   · `defaultEffort`  —— **刻意全部不声明**。声明它等于让桥替用户定一个档；不声明时
- *                        DSH 选择器显示「Default」，而 `reasoningEffort` 恒为 undefined，
- *                        桥**一个字都不动网页**（行为与本次改动前逐字相同）。用户显式选了
- *                        某一档，`reasoningEffort` 才出现——「能主动选择」正是用户要的。
+ *   · `defaultEffort`  —— **0.19.52 起逐站声明**（用户指令：「去除没有的 auto 挡位」）。
+ *                         值 = 该站点**新开会话页上的默认档**，取证逐条写在各条目里。
+ *                         宿主契约（ModelSelect）是「声明了 defaultEffort ⇒ 选择器
+ *                         不再显示「Default」行，选模型即携带该档」——不声明时那一行
+ *                         就是用户看到的「没有的 auto 挡位」（网页上不存在这档）。
+ *                         代价如实记：声明后**每一轮**都会下发并核对档位；站点改版
+ *                         让回读失效时，症状从「用户主动选档才报错」变成「每轮
+ *                         THINK_EFFORT_UI_CHANGED」——这是用户明确选择的确定性。
+ *                         （0.19.48 曾刻意全部不声明，理由是「不替用户定档」；
+ *                         2026-09-30 用户指令推翻该决策，改为「选择器只显示网页
+ *                         真实存在的档位，默认档 = 站点自己的默认」。）
  *   · `effortControl`  —— 控件契约；缺省表示「本站点不暴露思考等级」。
  *       `triggerText`    打开弹层的控件上必须出现的文本（单个 token）；
  *       `triggerText`   触发控件**固定可见的那一段文本**（z.ai「深度思考」、kimi「快速」、豆包「豆包」）。
@@ -99,6 +106,12 @@ export const THINK_EFFORT = Object.freeze({
       { id: '标准', name: '标准', ordinal: 1 },
       { id: '进阶', name: '进阶', ordinal: 2 },
     ],
+    // 默认档取证（0.19.52）：线上已登录页（2026-09-28 只读 CDP，`.tmp-probe/cdp-verify-fix.mjs`）
+    // 触发控件读数是 **`K3 标准`**——K3 是站点旗舰默认模型、`标准` 是它的默认档，且
+    // `span.current-effort` 的文本**恰好就是档位本身**（生产判据复算：目标「标准」
+    // 判 match）。游客页副本（think-control dump）显示的是「快速」模型的「进阶」——
+    // 那是游客默认**模型**的另一套档，不是登录用户的默认，不采信。
+    defaultEffort: '标准',
     effortControl: {
       kind: 'popup',
       // ## 0.19.49：`triggerText` 从 `'快速'` 改成 `'K3'`？——**都不是**，改成不声明 + readbackSelector
@@ -147,6 +160,12 @@ export const THINK_EFFORT = Object.freeze({
       { id: '深度', name: '深度', ordinal: 2 },
       { id: '极致', name: '极致', ordinal: 3 },
     ],
+    // 默认档取证（0.19.52）：fresh 页两路读数一致为**极致**——
+    //   · think-control dump（2026-09-28，登录副本上的 alltoolsdetail 首开页）：
+    //     `.think-label-think` 文本 = 「极致」；
+    //   · 0.19.49 只读 CDP（线上已登录页）：触发文本 `GLM-Flash极致`（无缝拼接）。
+    // 两处都是「没人动过档位」的页面状态，即站点自己的默认档。
+    defaultEffort: '极致',
     effortControl: {
       kind: 'popup',
       // ## 0.19.49：补 `readbackSelector`
@@ -182,6 +201,12 @@ export const THINK_EFFORT = Object.freeze({
       { id: '高', name: '高', ordinal: 2 },
       { id: '最高', name: '最高', ordinal: 3 },
     ],
+    // 默认档取证（0.19.52）：**最高**——两路读数一致：
+    //   · think-control dump（2026-09-28，fresh 落地页）：pill 文本「深度思考 最高」；
+    //   · 线上实时只读 CDP（2026-09-30，`.tmp-probe/zai/live-zai-readonly.mjs`）：
+    //     pill 文本「深度思考 最高」，同页**零验证码节点可见**（用户报告「人工打开
+    //     从未见过验证」的独立复核）。
+    defaultEffort: '最高',
     effortControl: {
       kind: 'popup',
       triggerText: '深度思考',
@@ -201,6 +226,13 @@ export const THINK_EFFORT = Object.freeze({
       { id: '思考', name: '思考', ordinal: 2 },
       { id: '自动', name: '自动', ordinal: 3 },
     ],
+    // 默认档取证（0.19.52）：**自动**——think-control dump（2026-09-28，fresh 页）
+    // `.qwen-thinking-selector` 的文本就是「自动」，即站点 fresh 会话的默认档。
+    // 注意这里的 irony：qwen 自己的默认档就叫「自动」——用户要去除的「auto」是
+    // DSH 侧的「Default」行（桥不声明 defaultEffort 时宿主恒显示的那行），不是
+    // qwen 菜单里真实存在的这一档；声明 defaultEffort='自动' 后 Default 行消失，
+    // 而网页行为与站点默认逐字一致（零点击，回读恒 match）。
+    defaultEffort: '自动',
     effortControl: {
       kind: 'popup',
       // ## 0.19.49：不再声明 `triggerText`（它**就是**档位 id，不是固定前缀）
@@ -249,6 +281,10 @@ export const THINK_EFFORT = Object.freeze({
       { id: '快速', name: '快速', ordinal: 1 },
       { id: '专家', name: '专家', ordinal: 2 },
     ],
+    // 默认档取证（0.19.52）：**快速**——think-control dump（2026-09-28，fresh 页，
+    // 共 4 份一致）：模型下拉触发文本「豆包 快速」（下拉两条 = 「豆包 快速」与
+    // 「豆包 2.1 Turbo专家」，徽章即档位）。fresh 状态是「快速」，采信。
+    defaultEffort: '快速',
     effortControl: {
       kind: 'popup',
       triggerSelectors: ['[data-testid="chat_input_action_model"]'],

@@ -19,7 +19,7 @@
 import { chromium } from 'playwright-core';
 import { findSystemChromium, resolveBrowserExecutable, isBundledChromiumPath, installBundledChromium } from './browser-runtime.js';
 import { toPlaywrightCookie } from './cookies.js';
-import { getSite, getContract, resolveWebModel, conversationNav, conversationIdFromUrl } from './contract.js';
+import { getSite, getContract, resolveWebModel, conversationNav, conversationIdFromUrl, conversationStay } from './contract.js';
 import { DEFAULT_SLOT, normalizeSlot } from './accounts.js';
 import { selectWebModel, pickerUsable } from './model-picker.js';
 import { deriveLastRate, shouldSettleWip, shouldSettleStalledThinking, answerDomLength, cleanAnswerDomText, shouldRescueStalledCapture } from './metrics.js';
@@ -1245,6 +1245,15 @@ export function createBrowserDriver(options = {}) {
   // 有头展示窗口：openWindow 打开，headlessMode 记录「无头会话是否曾在
   // 展示窗口上执行」——展示窗口被用户关闭后，Page#close 事件触发 relaunch。
   let headed = false;
+  // 展示窗口当前是否处于**最小化**态（0.19.52，任务书「打开网站窗口慢 / 切换后
+  // 要重新加载」的根因修复）。旧实现「关闭窗口 = ctx.close + 立即重启无头」，
+  // 「打开窗口 = 再重启回有头 + goto 站点根」——一次开关循环要整浏览器重启两遍、
+  // 整页重载两遍，而且 goto 的是站点根，正在看的会话现场直接丢掉。现在「关闭」
+  // 改为最小化（页面、登录态、会话原地保留），「打开」= 恢复窗口 + bringToFront，
+  // 全程零重载。真关掉（X 按钮 / 浏览器整个退出）走 ctx 'close' 兜底：headed 一并
+  // 复位，下一次 ensure 回无头形态——旧实现漏了这刀，手 X 之后 headed 悬空成
+  // true，下一次 openWindow 在无头浏览器上跑「有头」分支，窗口永远不出现。
+  let windowMinimized = false;
   const storePath = () => path.join(cfg.profileDir, 'webcode-sessions-' + siteId + '.json');
 
   function loadStore() {
@@ -1253,7 +1262,12 @@ export function createBrowserDriver(options = {}) {
     try {
       const j = JSON.parse(fs.readFileSync(storePath(), 'utf8'));
       if (j && typeof j === 'object') for (const [k, v] of Object.entries(j)) {
-        if (v && typeof v.webSessionId === 'string') conversations.set(k, v);
+        // 0.19.52 起槽记录有两种合法形态：带 webSessionId（有地址形状/流里有 id
+        // 的站点），或 webSessionId 为 null 但带 landedUrl（无形状站点——会话身份
+        // 就是「落在这个地址上的那页」）。两者都不是的脏记录照旧丢弃。
+        if (v && typeof v === 'object'
+          && (typeof v.webSessionId === 'string'
+            || (v.webSessionId === null && typeof v.landedUrl === 'string'))) conversations.set(k, v);
       }
     } catch { /* first run / corrupt → empty */ }
   }
@@ -1296,15 +1310,35 @@ export function createBrowserDriver(options = {}) {
    * 对话里」。会话身份只要**落地**就已经确定，与轮次成败无关——所以调用点前移
    * 到导航落地那一刻（runTurn 里的 noteLanded），失败路径同样算数。
    *
+   * 0.19.52 起支持**两种身份**并采用合并语义（任务书「一 DSH 会话 = 一网页会话，
+   * 后续也保证同一会话」）：
+   *   · `webSessionId` —— 有地址形状/流里有 id 的站点（deepseek/glm/kimi…）；
+   *   · `landedUrl` —— 没有形状的站点（zai/doubao/qwen…）：上一轮落地时页面停在
+   *     的**会话地址**（如 z.ai 的 `/c/<uuid>`，真机 2026-09-30 两轮一致）。这些
+   *     站点永远拿不到「由 id 构造地址」的能力（goto 深链会被弹回根地址），
+   *     页面本身就是唯一锚点。
+   * 合并规则：传 null 的那半保留旧值——resume 轮次拿不回流 id（zai 解不出流）
+   * 时不会把已有身份抹掉；两个都传 null 则维持「槽空」不写。
+   *
    * @param {string} key 会话键（DSH 的 `<sessionId>::<agentId>`）
-   * @param {string} webSessionId 网页侧会话 id
+   * @param {string|null} webSessionId 网页侧会话 id（无形状站点为 null）
    * @param {'store'|'url-heal'} [source] 这条记录的来历（默认 'store'）
+   * @param {string|null} [landedUrl] 上一轮落地时的页面地址（站点根不算会话身份，
+   *                                   调用方负责只传会话路径）
    */
-  function rememberConversation(key, webSessionId, source = 'store') {
+  function rememberConversation(key, webSessionId, source = 'store', landedUrl = null) {
     loadStore();
-    conversations.set(String(key || 'main'), { webSessionId, at: Date.now(), source });
+    const prev = conversations.get(String(key || 'main')) || null;
+    const id = webSessionId === null && prev ? prev.webSessionId ?? null : webSessionId;
+    const url = landedUrl === null && prev ? prev.landedUrl ?? null : landedUrl;
+    if (!id && !url) return; // 两半都空 = 没有可记的身份（fresh 轮落在站点根等）
+    conversations.set(String(key || 'main'), {
+      ...(id ? { webSessionId: id } : { webSessionId: null }),
+      ...(url ? { landedUrl: url } : {}),
+      at: Date.now(), source,
+    });
     // 一个 id 能被重新写下，就证明它是活的：清掉它的「不可达」标记（见 deadSessions）。
-    deadSessions.delete(String(webSessionId));
+    if (id) deadSessions.delete(String(id));
     if (conversations.size > 128) {
       let oldestKey = null; let oldestAt = Infinity;
       for (const [k, v] of conversations) if (v && v.at < oldestAt) { oldestAt = v.at; oldestKey = k; }
@@ -1347,6 +1381,17 @@ export function createBrowserDriver(options = {}) {
         webSessionId: rec.webSessionId,
         at: rec.at ?? null,
         // 旧版本落盘的记录没有 source 字段：按 'store' 报（它确实是槽里的值）。
+        source: rec.source === 'url-heal' ? 'url-heal' : 'store',
+      };
+    }
+    // 0.19.52：无形状站点的「落地地址身份」——webSessionId 是 null 但槽里锚着
+    // 上一轮落地的会话地址（zai/doubao/qwen…）。如实报出来，而不是显示成「没有
+    // 会话」；stay 判据（sendTurn）用的就是这份 landedUrl。
+    if (rec?.landedUrl) {
+      return {
+        webSessionId: null,
+        landedUrl: rec.landedUrl,
+        at: rec.at ?? null,
         source: rec.source === 'url-heal' ? 'url-heal' : 'store',
       };
     }
@@ -2063,7 +2108,12 @@ export function createBrowserDriver(options = {}) {
     page = await ctx.newPage();
     for (const stale of stalePages) { try { await stale.close(); } catch {} }
     ctx.on('close', () => {
-      ctx = null; page = null;
+      // ctx 真死了 = 浏览器整个退出（用户 X 掉了窗口，或进程崩溃）。「有头」这一
+      // 形态随之终结——不把 headed 复位的话，下一次 ensure() 会按 cfg.headless 重启
+      // 无头浏览器，而 headed 仍写 true，openWindow 于是跳过「无头→有头」的转换
+      // 分支，在一个无头浏览器上跑有头逻辑：窗口永远不出现（见 windowMinimized
+      // 声明处的收尾说明）。
+      ctx = null; page = null; headed = false; windowMinimized = false;
       failActive(`WEB_BROWSER_CLOSED: 浏览器已关闭 — 下一轮会自动重启`, 'WEB_BROWSER_CLOSED');
     });
     await installPage();
@@ -3135,16 +3185,31 @@ export function createBrowserDriver(options = {}) {
        */
       const noteLanded = (phase) => {
         if (!key) return null;
+        const url = safeUrl(page?.url?.() || '');
         const id = sessionIdFromUrl(page?.url?.() || '');
-        if (!id) return null;
+        // 0.19.52：无形状站点（zai/doubao/qwen…）拿不到 id，但页面落在会话路径上
+        //（z.ai 真机：发送后页面导航到 `/c/<uuid>`，两轮一致）——此时「地址本身」
+        // 就是身份。站点根（fresh 落点）不算会话身份：把它记下来会让「手动回了
+        // 首页」被 stay 判据误认成「还在原会话」。判据用 contract.js 的同一份
+        // freshPath 语义（pathname 与 cfg.site 相同 = 根）。
+        let landedIdentity = null;
+        if (!id && url) {
+          try {
+            const u = new URL(url);
+            const freshPath = new URL(cfg.site).pathname;
+            if (u.pathname !== freshPath && u.pathname !== '/') landedIdentity = url;
+          } catch { /* 地址不可解析就当没有 */ }
+        }
+        if (!id && !landedIdentity) return null;
         const before = conversationFor(key)?.webSessionId || null;
-        if (before === id) return id;
-        rememberConversation(key, id);
+        if (before === id && !landedIdentity) return id;
+        rememberConversation(key, id || null, 'store', landedIdentity);
         pushNavTrace({
           phase: 'landed:' + phase, key: String(key),
-          storedBefore: before, landedId: id, pageUrl: safeUrl(page?.url?.() || ''),
+          storedBefore: before, landedId: id, landedUrl: landedIdentity || null,
+          pageUrl: safeUrl(page?.url?.() || ''),
         });
-        log(`web session slot written at ${phase}: key=${key} id=${id}${before ? ' (was ' + before + ')' : ''}`);
+        log(`web session slot written at ${phase}: key=${key} ${id ? 'id=' + id : 'landedUrl=' + landedIdentity}${before ? ' (was ' + before + ')' : ''}`);
         return id;
       };
       // ① 导航落地这一刻。resume 的目标地址本来就带 id（通常与槽里一致，无事
@@ -3785,7 +3850,7 @@ export function createBrowserDriver(options = {}) {
     //     把旧 id 记进槽反而会让下一轮续到一个缺少本轮内容的旧对话上。
     //   • 跳过 deadSessions 里刚被判「不可达」的 id，避免「导航失败 → 丢槽 →
     //     下一轮又从地址栏把同一个死会话补回来」的循环。
-    if (!existing?.webSessionId && !fresh) {
+    if (!existing?.webSessionId && !existing?.landedUrl && !fresh) {
       const fromUrl = sessionIdFromUrl(page?.url?.() || '');
       if (fromUrl && !deadSessions.has(fromUrl)) {
         rememberConversation(key, fromUrl, 'url-heal');
@@ -3795,17 +3860,81 @@ export function createBrowserDriver(options = {}) {
           phase: 'heal', key: String(key || 'main'),
           healedId: fromUrl, pageUrl: safeUrl(page?.url?.() || ''),
         });
+      } else if (!fromUrl) {
+        // 0.19.52：无形状站点的同型自愈——地址里解不出 id（没有形状表），但页面
+        // 停在**会话路径**上（≠ 站点根）。把地址本身锚进槽（身份=地址，见
+        // rememberConversation 的 landedUrl 注释），让下面的 stay 判据接得住
+        // 「落地了但槽没写下来」的现场（2026-09-17 事故的无形状形态）。
+        const pageUrl = safeUrl(page?.url?.() || '');
+        if (pageUrl) {
+          try {
+            const u = new URL(pageUrl);
+            const freshPath = new URL(cfg.site).pathname;
+            if (u.pathname !== freshPath && u.pathname !== '/') {
+              rememberConversation(key, null, 'url-heal', pageUrl);
+              existing = conversationFor(key);
+              warn(`web session slot healed from landed URL (site=${siteId}, key=${key}, url=${pageUrl})`);
+              pushNavTrace({
+                phase: 'heal', key: String(key || 'main'),
+                healedUrl: pageUrl, pageUrl,
+              });
+            }
+          } catch { /* 地址不可解析就当没有 */ }
+        }
       }
     }
     // 三态导航（C-2）：'fresh' 开新会话、'resume' 导航回既有会话、
     // 'unsupported' 明确报错。**没有第四态**——旧实现在这里默默开新会话并把增量
     // 发进去，网页模型在毫无前文的情况下接着答，是「跑着跑着变傻」的根因。
-    const nav = conversationNav({
+    let nav = conversationNav({
       siteId,
       origin: new URL(cfg.site).origin,
       fresh,
       sessionId: existing?.webSessionId,
     });
+    // 落地地址锚（0.19.52）：没有地址形状的站点（zai/doubao/qwen…）永远进不了
+    // 'resume' 态，旧实现于是**每轮** WEB_SESSION_LOST → 整段重放 → 每轮新开一个
+    // 网页对话（真机：webcode-sessions-zai.json 恒 2 字节空对象）。但只要页面从
+    // 上一轮落地起就没被导航走，它就仍在那条会话上——原地续聊即可，判据在
+    // contract.js（conversationStay：同源 + 同 pathname + 非站点根）。
+    //
+    // ② 页面**不在**锚上时（浏览器重启后的新页停在站点根 / 被别的会话导航走）：
+    // 尝试**导航回锚**再验证。锚是本会话上一轮落地的真实地址（不是猜测），这与
+    // shaped 站的 resume 导航同一语义；站点若把深链弹回根（z.ai 真机实测如此），
+    // 验证失败 ⇒ 照旧 WEB_SESSION_LOST 整段重建，零额外风险。只在锚与站点同源时
+    // 才动（防手改 store 写进外域地址）。
+    if (nav.state === 'unsupported' && !fresh && existing?.landedUrl) {
+      const siteOrigin = new URL(cfg.site).origin;
+      const freshPath = new URL(cfg.site).pathname;
+      // 锚判据要读页面地址，而 sendTurn 阶段驱动可能还没起页（懒启动——ensure
+      // 在 runTurn 里才跑）。先确保有页：起不来（浏览器启动失败）就按「不在锚上」
+      // 收场，错误由后面的 WEB_SESSION_LOST 如实带出去。
+      if (!page || page.isClosed?.()) { try { await ensure(); } catch { /* 见上 */ } }
+      let currentUrl = safeUrl(page?.url?.() || '');
+      const staysNow = () => Boolean(currentUrl && conversationStay({
+        origin: siteOrigin, freshPath, currentUrl, landedUrl: existing.landedUrl,
+      }));
+      if (!staysNow() && page && !page.isClosed()) {
+        let anchorOrigin = null;
+        try { anchorOrigin = new URL(existing.landedUrl).origin; } catch { /* 锚坏了就当没有 */ }
+        if (anchorOrigin === siteOrigin) {
+          pushNavTrace({
+            phase: 'stay-goto', key: String(key || 'main'),
+            target: existing.landedUrl, pageUrl: currentUrl,
+          });
+          try { await page.goto(existing.landedUrl, { waitUntil: 'domcontentloaded', timeout: 45_000 }); } catch { /* 导航失败按「不在锚上」收场 */ }
+          currentUrl = safeUrl(page?.url?.() || '');
+        }
+      }
+      if (staysNow()) {
+        nav = { state: 'resume', url: currentUrl, reason: 'landed-url-stay' };
+        pushNavTrace({
+          phase: 'stay', key: String(key || 'main'),
+          landedUrl: existing.landedUrl, pageUrl: currentUrl,
+        });
+        log(`web session stays on landed conversation (site=${siteId}, key=${key}, url=${currentUrl}) — 不再新开对话，原地续聊`);
+      }
+    }
     pushNavTrace({
       phase: 'nav', key: String(key || 'main'), requestedFresh: fresh,
       state: nav.state, reason: nav.reason || null,
@@ -3866,8 +3995,16 @@ export function createBrowserDriver(options = {}) {
       replaced: Boolean(storedBefore && result.sessionId && storedBefore !== result.sessionId),
       messageChars: String(message || '').length,
     });
-    if (result.sessionId) rememberConversation(key, result.sessionId);
-    else if (navigate !== 'fresh') forgetConversation(key);
+    if (result.sessionId) {
+      // 流/地址里拿到了 id：确认写（landedUrl 走合并语义保留——见
+      // rememberConversation 的注释，传 null 表示「不动旧值」）。
+      rememberConversation(key, result.sessionId, 'store', null);
+    } else if (navigate !== 'fresh' && !conversationFor(key)?.landedUrl) {
+      // 旧语义保留：resume 了却拿不回任何身份（id 与落地地址都没有）——这种会话
+      // 无法续聊，丢槽让上层整段重建。**有 landedUrl 的不算**（0.19.52）：无形状
+      // 站点的身份就是地址本身，丢掉它会把「每轮新开对话」原样请回来。
+      forgetConversation(key);
+    }
     return result;
   }
 
@@ -4355,11 +4492,30 @@ export function createBrowserDriver(options = {}) {
     throwIfTransitioning();
     // 已开着窗口：聚焦弹到最前（跳回已有窗口），不重新停靠/goto 覆盖现场。
     if (ctx && headed && page && !page.isClosed()) {
+      // 0.19.52：上次「关闭」是最小化（见 closeWindow），这里恢复窗口状态即可——
+      // 不 goto、不重载，会话现场原地保留。恢复失败不致命（bringToFront 照跑）。
+      if (windowMinimized) {
+        try {
+          const cdp = await ctx.newCDPSession(page);
+          const { windowId } = await cdp.send('Browser.getWindowForTarget');
+          await cdp.send('Browser.setWindowBounds', { windowId, bounds: { windowState: 'normal' } });
+          await cdp.detach();
+        } catch (err) { warn('window restore failed (stays minimized):', err?.message); }
+        windowMinimized = false;
+      }
       await page.bringToFront().catch(() => {});
       return { ok: true, alreadyOpen: true, ...windowState() };
     }
     const w = Math.max(360, Math.min(3840, Math.round(Number(width) || 0)) || 1000);
     const h = Math.max(480, Math.min(2160, Math.round(Number(height) || 0)) || 900);
+    // 0.19.52：打开窗口的落点**优先回到会话现场**，而不是站点根。旧实现无脑
+    // goto(cfg.site)——无头→有头每转换一次就丢一次正在看的对话（用户报的
+    // 「切换后要重新加载」的驱动侧一半）。取值顺序：调用方显式 url（登录流程
+    // 用它）→ 转换前那一页的真实地址（多数情况正是刚跑完的那条会话）→ 最近
+    // 一轮的地址读数（lastTurn.url；标签被关掉时页面已不在）→ 站点根（全新浏览器）。
+    let remembered = null;
+    if (page && !page.isClosed?.()) remembered = safeUrl(page.url());
+    remembered ||= lastTurn?.url || null;
     if (ctx && !headed) {
       // 无头上下文 → 有头窗口：持久 profile 只能开一个实例，必须先关再开。
       try { await ctx.close(); } catch {}
@@ -4369,6 +4525,7 @@ export function createBrowserDriver(options = {}) {
       await ensure();
     }
     headed = true;
+    windowMinimized = false;
     await page.setViewportSize({ width: w, height: h });
     // 停靠屏幕右半（Playwright 无直接 API，用 CDP setWindowBounds；屏幕几何
     // 只在 browser-target CDP session 上有——用 ctx.browser().newBrowserCDPSession）。
@@ -4394,7 +4551,7 @@ export function createBrowserDriver(options = {}) {
         await cdp.detach();
       }
     } catch (err) { warn('window dock failed (window stays at default position):', err?.message); }
-    const target = url || cfg.site;
+    const target = url || remembered || cfg.site;
     try { await page.goto(target, { waitUntil: 'domcontentloaded', timeout: 45_000 }).catch(() => {}); } catch { /* already there */ }
     // 与登录同一套判定（z.ai 游客页有输入框，旧「URL 不含 login 即已登录」
     // 会把未登录记成已登录）；先等输入框渲染完再判，避免瞬时误判未登录。
@@ -4405,10 +4562,38 @@ export function createBrowserDriver(options = {}) {
     return { ok: true, ...windowState() };
   }
 
-  /** 关闭展示窗口，回到无头（自动化继续，屏幕上不留窗口）。 */
+  /**
+   * 关闭展示窗口（0.19.52 起语义：**最小化**，不是关掉重启）。
+   *
+   * 旧实现是 `ctx.close() + 立即重启无头`：一次「关→开」循环要整浏览器重启两遍、
+   * 整页重载两遍，且 openWindow 一律 goto 站点根——正在看的会话直接丢现场。这正是
+   * 用户报的「每次打开网站窗口都要停顿加载很久 / 切换后要重新加载」的驱动侧根因。
+   *
+   * 最小化让页面、登录态、会话现场全部原地保留；自动化轮次照常驱动同一页面
+   *（最小化只影响渲染节流，SSE/DOM 流不受影响），重新打开 = 恢复窗口 + 前置，
+   * 全程零重载。因此也不再需要旧实现里「正在生成就先等它收场」的那段——
+   * 最小化不动页面，轮次可以继续跑。
+   *
+   * CDP 最小化失败（浏览器形态不支持等罕见情形）才回退到旧的关掉重启无头路径。
+   */
   async function closeWindow() {
     throwIfTransitioning();
     if (!headed) return { ok: true, ...windowState() };
+    if (ctx && page && !page.isClosed()) {
+      try {
+        const cdp = await ctx.newCDPSession(page);
+        const { windowId } = await cdp.send('Browser.getWindowForTarget');
+        await cdp.send('Browser.setWindowBounds', { windowId, bounds: { windowState: 'minimized' } });
+        await cdp.detach();
+        windowMinimized = true;
+        log('headed window minimized (page state preserved — reopen restores it)');
+        return { ok: true, ...windowState() };
+      } catch (err) {
+        warn('window minimize failed — falling back to headless relaunch:', err?.message);
+      }
+    }
+    // 回退路径（旧语义）：真的关掉并回到无头。这里才会打断进行中的轮次，
+    // 因此保留旧实现的「先等它收场」。
     if (busy) {
       // 正在生成：不硬关（会杀掉进行中的轮次页面），只标记意图，轮次结束后由 ensure 收尾。
       warn('a web turn is running — window will go headless after it settles');
@@ -4417,6 +4602,7 @@ export function createBrowserDriver(options = {}) {
     try { if (ctx) await ctx.close(); } catch {}
     ctx = null; page = null;
     headed = false;
+    windowMinimized = false;
     await launch({ headless: true });
     await gotoFreshChat().catch(() => {});
     return { ok: true, ...windowState() };
@@ -4444,8 +4630,12 @@ export function createBrowserDriver(options = {}) {
 
   function windowState() {
     return {
-      open: headed && Boolean(page && !page.isClosed?.()),
+      // 0.19.52：最小化态不算「开着」——面板的开关按钮按「可见」语义取值：
+      // 关闭（=最小化）后按钮回到「打开窗口」，再点走 openWindow 的恢复分支。
+      // minimized 单独透出，便于诊断「窗口在但看不见」。
+      open: headed && !windowMinimized && Boolean(page && !page.isClosed?.()),
       headed,
+      minimized: windowMinimized,
       url: page && !page.isClosed?.() ? safeUrl(page.url()) : null,
     };
   }
