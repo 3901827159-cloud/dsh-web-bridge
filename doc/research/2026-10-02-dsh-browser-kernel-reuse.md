@@ -135,6 +135,14 @@ PROBE-FAIL: browserContext.newPage: Protocol error (Target.createTarget): Not su
    本机切 system-first 立省 428 MB，新机器免下载；版本风险与今天 system 兜底同构。
 2. **等 DSH 官方能力**（触发后再评估）：`dshDesktop.browser` 服务端化 / launcher
    暴露调试口 / 官方提供浏览器模式。届时重测 §3。
-3. **清理共享缓存（低优先）**：`ms-playwright` 里的 chromium-1217 与两个
-   headless_shell 共约 676 MB 可释放，但那是**全机共享目录**（firefox 等属于
-   其他工具），删前必须先确认没有别的消费者。
+3. **清理共享缓存（✅ 2026-10-02 已执行）**：删前对全机 playwright 消费者做了
+   盘点——DSH 三 profile 与本仓库均为 playwright-core **1.63.0**（期望
+   chromium-1243 / headless_shell-1243 / firefox-1543），Python playwright
+   **1.59.0**（期望 chromium-**1217** / headless_shell-1217 / firefox-1511）。
+   据此只删**无主**的两个副本：`firefox-1534`（333 MB，两方都不期望）与
+   `chromium_headless_shell-1232`（272 MB，同），**实收约 0.6 GB**
+   （ms-playwright 1.6 GB → 1.1 GB）；删后验证桥的解析仍落在
+   chromium-1232（bundled）。**保留**：chromium-1232（桥在用）、
+   chromium-1217 + headless_shell-1217（Python 对口，删了会弄坏 Python 侧）、
+   ffmpeg / winldd（chromium 运行时小依赖）。
+   剩余可省的大头是 chromium-1232（428 MB）——等 §6-1「系统优先」落地后即可删。
