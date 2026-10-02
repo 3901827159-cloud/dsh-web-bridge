@@ -22,6 +22,19 @@
 //     是系统注入（其中 goal 模板里的 `<objective>` 已由 DSH 侧那 24 条覆盖），一律不取。
 // 来源记进 `origin`：`codex-user`（他敲的）与 `codex-annotation`（他划词批注的）。
 //
+// 2026-10-02 扩展：**ZCode 侧的会话也一起抽**。用户在 ZCode CLI 里推进本项目的会话
+// （35 个，2026-09-05 起）存在 `~/.zcode/cli/db/db.sqlite`（SQLite：`session` / `message` /
+// `part` 三张表）。判据（宁可漏报也不伪造）：
+//   · 只取 `message.role === 'user'` 且 `data.semantics.origin === 'real_user'` 的正文 text
+//     part —— todo 提醒、后台任务通知、compact 摘要、工具回执注入虽然都挂在 user 角色名下，
+//     但它们的 semantics 是 `agent_runtime/*`，靠这一个字段即可全部排除；
+//   · `session.id` 以 `sess_subagent_` 开头的子代理会话整条排除——那里的「user 消息」是
+//     主代理写给子代理的派发任务书（**也被标成 real_user**，字段层面防不住），不是他敲的字；
+//   · 划词侧聊（会话标题 Selection side chat，`semantics.uiVisibility === 'hidden'`）是他对着
+//     上一轮回答圈选后敲的追问，取，origin 记 `zcode-sidechat`。
+// 来源记进 `origin`：`zcode-user`（主会话输入框）与 `zcode-sidechat`（划词侧聊）。
+// db 不存在或当前 Node 没有 `node:sqlite` 时跳过该源并在统计里如实打印——不当作零条目沉默。
+//
 // ## 什么算「用户的话」（口径写死在这里，改口径先改这里）
 //
 // 取：
@@ -262,6 +275,69 @@ export function collectCodexVoice({ workspaces = [DEFAULT_WORKSPACE], roots = [c
   return { entries, sessions, skipped };
 }
 
+/** ZCode 会话库路径。不存在说明这台机器没装 ZCode CLI（该源整体跳过，不报错）。 */
+function zcodeDbPath() {
+  return path.join(os.homedir(), '.zcode', 'cli', 'db', 'db.sqlite');
+}
+
+/**
+ * 从 ZCode 的 SQLite 会话库里抽「他敲的字」。
+ *
+ * 判据见文件头（2026-10-02 扩展段）。`node:sqlite` 动态引入：库缺失或引擎过旧都
+ * 不让整轮抽词失败，只在返回值里带 `reason`，由 main 如实打印。会话/消息两级都在
+ * SQL 侧用 `json_extract` 过滤，part 侧再按 `type === 'text'` 拼正文——image 等
+ * 非文本 part 静默跳过（没有正文的消息本来就不成条目）。
+ */
+export async function collectZcodeVoice({ workspaces = [DEFAULT_WORKSPACE] } = {}) {
+  const empty = { entries: [], sessions: 0, skipped: 0, subagentSessions: 0, reason: null };
+  const dbFile = zcodeDbPath();
+  if (!fs.existsSync(dbFile)) return { ...empty, reason: 'ZCode 会话库不存在（' + dbFile + '）' };
+  let DatabaseSync;
+  try { ({ DatabaseSync } = await import('node:sqlite')); } catch { return { ...empty, reason: '当前 Node 没有 node:sqlite（需 ≥22.13）' }; }
+  const db = new DatabaseSync(dbFile, { readOnly: true });
+  const sessionRows = db.prepare('SELECT id, directory FROM session').all();
+  const msgStmt = db.prepare(
+    "SELECT id, sequence, time_created, data FROM message WHERE session_id = ? "
+    + "AND json_extract(data, '$.role') = 'user' "
+    + "AND json_extract(data, '$.semantics.origin') = 'real_user' "
+    + "ORDER BY sequence"
+  );
+  const partStmt = db.prepare('SELECT data FROM part WHERE message_id = ? ORDER BY sequence');
+  const entries = [];
+  let sessions = 0;
+  let skipped = 0;
+  let subagentSessions = 0;
+  for (const s of sessionRows) {
+    if (workspaces && workspaces.length && !workspaces.some((re) => re.test(s.directory))) { skipped += 1; continue; }
+    if (s.id.startsWith('sess_subagent_')) { subagentSessions += 1; continue; }
+    let used = false;
+    for (const m of msgStmt.all(s.id)) {
+      const meta = JSON.parse(m.data);
+      const sideChat = meta?.semantics?.uiVisibility === 'hidden';
+      const text = partStmt.all(m.id)
+        .map((p) => { try { return JSON.parse(p.data); } catch { return null; } })
+        .filter((p) => p && p.type === 'text' && typeof p.text === 'string')
+        .map((p) => p.text)
+        .join('\n');
+      const body = normalize(text);
+      if (!body) continue;
+      used = true;
+      entries.push({
+        sessionId: s.id,
+        workspace: s.directory,
+        at: typeof m.time_created === 'number' ? m.time_created : null,
+        seq: m.sequence,
+        origin: sideChat ? 'zcode-sidechat' : 'zcode-user',
+        goalId: null,
+        round: null,
+        text: body,
+      });
+    }
+    if (used) sessions += 1;
+  }
+  return { entries, sessions, skipped, subagentSessions, reason: null };
+}
+
 export function mergeVoice(entries) {
   const seenSeq = new Set();
   const byText = new Map();
@@ -313,6 +389,7 @@ export function renderVoice(rows, { scopeLabel = '（未指定）', command = 'n
   L.push('生成命令：`' + command + '`');
   L.push('数据源一：`.dsh` 会话落盘里 `user/message` 且 `source.kind` 为 `user` / `goal` 的事件。');
   L.push('数据源二：`~/.codex/sessions/<年>/<月>/<日>/rollout-*.jsonl` 里他敲的字（`## My request:` 之后那段）与划词批注（`<response-annotations>` 的 `annotation` 字段）。');
+  L.push('数据源三：ZCode CLI 的会话库 `~/.zcode/cli/db/db.sqlite`（`node:sqlite` 只读打开）：`session.directory` 匹配工作区的会话里 `role=user` 且 `semantics.origin=real_user` 的消息正文；`sess_subagent_*` 子代理会话整条排除。');
   L.push('');
   L.push('## 怎么用这份文件');
   L.push('');
@@ -320,6 +397,7 @@ export function renderVoice(rows, { scopeLabel = '（未指定）', command = 'n
   L.push('- 条目按时间升序；`同句另见 N 处` 是他把同一句话说过几次（最早那次就是本条的位置）；');
   L.push('- 标注 `（goal 模板里的逐字引用）` 的条目取自 goal 轮次模板，引号内是原话，**不是他直接在输入框敲的**；');
   L.push('- 标注 `来源 Codex 输入框` / `来源 Codex 划词批注` 的条目来自 Codex 客户端——前者是他敲的，后者是对上一轮回答划词写的批注（正文即批注原文）；');
+  L.push('- 标注 `来源 ZCode 输入框` / `来源 ZCode 划词侧聊` 的条目来自 ZCode CLI——后者是他圈选上一轮回答后敲的追问，会话标题是 Selection side chat；');
   L.push('- 这份记录只增不改：重跑脚本会把新会话带上，旧条目按同一去重口径稳定重现。');
   L.push('');
   L.push('## 覆盖范围');
@@ -352,12 +430,15 @@ export function renderVoice(rows, { scopeLabel = '（未指定）', command = 'n
     if (r.origin === 'goal') meta.push('来源 goal 模板（round ' + r.round + '）');
     if (r.origin === 'codex-user') meta.push('来源 Codex 输入框');
     if (r.origin === 'codex-annotation') meta.push('来源 Codex 划词批注');
+    if (r.origin === 'zcode-user') meta.push('来源 ZCode 输入框');
+    if (r.origin === 'zcode-sidechat') meta.push('来源 ZCode 划词侧聊');
     L.push('`' + meta.join('` · `') + '`');
     L.push('');
     for (const line of r.text.split('\n')) L.push(line);
     L.push('');
     if (r.origin === 'goal') L.push('> （goal 模板里的逐字引用，不是直接在输入框敲的）');
     if (r.origin === 'codex-annotation') L.push('> （他对着上一轮回答划词写的批注，正文即批注原文）');
+    if (r.origin === 'zcode-sidechat') L.push('> （他圈选上一轮回答后敲的追问，正文即原文）');
     if (r.also.length) {
       const refs = r.also.slice(0, 8).map((a) => '`' + a.sessionId.replace(/^session-/, '').slice(0, 8) + '`@' + fmt(a.at)).join('、');
       const more = r.also.length > 8 ? ' 等' : '';
@@ -391,7 +472,7 @@ function parseArgs(argv) {
  */
 export function workspaceMatchers(list) {
   return list.filter(Boolean).map((s) => new RegExp(s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
-}function main(argv) {
+}async function main(argv) {
   const opts = parseArgs(argv);
   if (opts.help) {
     console.log('用法：node scripts/user-voice-log.mjs [--stats] [--all-workspaces] [--workspace <子串>]... [--journal <文件>]');
@@ -410,19 +491,23 @@ export function workspaceMatchers(list) {
 
   const dsh = collectVoice({ workspaces });
   const codex = collectCodexVoice({ workspaces });
-  const entries = dsh.entries.concat(codex.entries);
+  const zcode = await collectZcodeVoice({ workspaces });
+  const entries = dsh.entries.concat(codex.entries, zcode.entries);
   const rows = mergeVoice(entries);
   const sessions = dsh.sessions;
   const skipped = dsh.skipped;
   const subagentSessions = dsh.subagentSessions;
   const chars = rows.reduce((n, r) => n + r.text.length, 0);
   const goals = rows.filter((r) => r.origin === 'goal').length;
+  const zcodeRows = rows.filter((r) => r.origin === 'zcode-user' || r.origin === 'zcode-sidechat').length;
   const merged = rows.filter((r) => r.also.length).length;
 
   console.log('[user-voice-log] 范围：' + scopeLabel);
   console.log('  会话 ' + sessions + ' 个（跳过 ' + skipped + ' 个不匹配/读不动；另排除子代理会话 ' + subagentSessions + ' 个）');
   console.log('  Codex 会话 ' + codex.sessions + ' 个（另有 ' + codex.entries.length + ' 条原话/批注；跳过 ' + codex.skipped + ' 个不匹配）');
-  console.log('  原始条目 ' + entries.length + ' → 去重合并后 ' + rows.length + ' 条（' + chars + ' 字符）');
+  console.log('  ZCode 会话 ' + zcode.sessions + ' 个（另 ' + zcode.entries.length + ' 条原话；排除子代理会话 ' + zcode.subagentSessions + ' 个'
+    + (zcode.reason ? '；源被跳过：' + zcode.reason : '') + '）');
+  console.log('  原始条目 ' + entries.length + ' → 去重合并后 ' + rows.length + ' 条（' + chars + ' 字符；其中 ZCode ' + zcodeRows + ' 条）');
   console.log('  其中 goal 模板引用 ' + goals + ' 条；合并了重复句 ' + merged + ' 条');
   if (rows.length) console.log('  时间跨度 ' + fmt(rows[0].at) + ' → ' + fmt(rows[rows.length - 1].at));
   if (opts.stats) return 0;
@@ -438,6 +523,7 @@ export function workspaceMatchers(list) {
 }
 const invokedDirectly = process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url));
 if (invokedDirectly) {
-  try { process.exitCode = main(process.argv.slice(2)); }
-  catch (e) { console.error('[user-voice-log] ' + (e?.message || e)); process.exitCode = 1; }
+  main(process.argv.slice(2))
+    .then((code) => { process.exitCode = code; })
+    .catch((e) => { console.error('[user-voice-log] ' + (e?.message || e)); process.exitCode = 1; });
 }
