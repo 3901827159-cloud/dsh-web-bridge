@@ -49,6 +49,7 @@
 | 35 | **并列三列的「列级沙箱」是约定而非拦截**（2026-09-29 新登记）——provider 通路会真改文件、控制面通路只回文本；两列今天对工作区没有文件效果，且本插件**结构上**不拥有权限层 | 中 | 否 | `lib/column-context.js`、`lib/column-fs.js`、`doc/research/2026-09-26-column-sandbox-round1-thinking.md` |
 | 36 | **`ref-index` 既有红**（2026-09-29 复核：**已解决**）——登记的是「曾被记为欠账、实测已不在」这次更正本身 | 低 | 否 | `reference/README.md`、`scripts/gen-reference-index.mjs` |
 | 37 | **两条既有常红是同一条行为：网页会话丢失 → 整段重放**（2026-09-30 复核归因：**已修——根因是测试隔离缺陷，不是重放分支**；2026-09-30 晚登记）——`regression` 53/1 与 `aux-delta-compact` 4/1 的 60s 压线来自裸测试读到真实 profile 的发送间隔与基准 | 高 | 否 | `lib/index.js`（profile 落盘守卫）、`test/profile-isolation.test.mjs`、`doc/progress.md`（2026-09-30 段） |
+| 38 | **`NODE_TEST_CONTEXT` 守卫在裸跑形态的残余洞：prompt store 读写通道**（2026-10-02 登记；regression 用例本轮已补隔离）——同族于 #37 的第二条通道；且由此暴露**生产缺陷候选：真实轮重放读回首轮正本会丢后续增量（红线二形状）**，见正文 §38 | 高 | 否 | `lib/index.js`（`readSessionPrompt`、executor 重建分支）、`lib/prompt-store.js`、`test/regression.test.mjs` |
 
 > **一览表完整性（2026-09-16 修正；2026-09-26 补上闸门）**：本表此前**漏登记 #19 与 #20**（正文有、表里没有）。
 > 这两条都是可机检的登记错误，而当时没有任何闸门覆盖「正文条目 ↔ 表格条目」的一致性。
@@ -2328,3 +2329,55 @@ git stash pop                # 恢复
 而不是靠 60s 超时偶发地通过。红线（绝不静默丢上下文）上的这道防线恢复常绿。
 
 
+
+---
+
+## 38. **`NODE_TEST_CONTEXT` 守卫在裸跑形态的残余洞：prompt store 读写通道**（2026-10-02 登记）
+
+### 现象（0.19.53 提交前抽查实测）
+
+- `node test/regression.test.mjs`（**裸跑**——本机 spawnSync EPERM，逐文件裸跑是唯一可行形态）
+  稳定红一条：「网页会话丢失时用整段首轮提示词重放」60.03s 失败于 `重放带完整上下文`。
+- 断言序列里 `turns.length==3` 与两条 `fresh` 标志**全过**——重放**发生了**，但重放文本
+  **缺「第二句」**。这是内容错，不是超时错（60s 是两次 30s 发送间隔的累计，与内容无关）。
+- 根因链（实读）：
+  1. `readSessionPrompt`（`lib/index.js:72`）的隔离判据是「无 `WEBCODE_PROMPT_STORE_DIR`
+     **且**有 `NODE_TEST_CONTEXT` 时返回 null」。`node --test` 会设 `NODE_TEST_CONTEXT`，
+     **裸跑不设** ⇒ 守卫失效 ⇒ 重放优先读回真实目录的落盘正本。
+  2. 落盘正本 `~/.dsh/webcode/sessions/lost__deepseek.md` 由**测试自己首轮写入**
+     （写入端守卫同样只认 `NODE_TEST_CONTEXT`），内容只有首轮文本——
+     **增量轮刻意不落盘**（`prompt-store.js` 的 `writePromptFiles` 注释明言）。
+  3. 重放读回「只有第一句」的正本 ⇒ 断言缺「第二句」。测试用固定 sessionKey `lost`，
+     所以从第二次裸跑起**必红**。
+- 同族：#37（2026-09-30）修的是 cursor/profile 通道的同一类缺口；本条是**漏掉的
+  第二条通道**（prompt store 写 + 读回）。
+
+### 本轮处置（已做，随 0.19.53 入库）
+
+- `test/regression.test.mjs` 顶部显式 `WEBCODE_PROMPT_STORE_DIR='off'`：该文件的重放
+  断言目标就是**内存 rebuild 路径**，落盘读回是另一条（生产）行为，本文件不需要它。
+- 删除真实目录里的测试残留 `lost__deepseek.md`。
+
+### ⚠ 生产缺陷候选（更重要，本轮**不修**）
+
+`lib/index.js:3457`：
+
+```js
+const rebuildText = (m?.purpose ? null : readSessionPrompt(m.sessionKey)) ?? m.rebuild();
+```
+
+- 落盘正本 = 最近一次首轮/整段重建全文，**增量不落盘** ⇒ 真实会话在第 2 轮以后
+  丢会话（`WEB_SESSION_LOST`）时，重放读回的是**不含后续增量**的首轮文本；
+  而 `commit()` 把游标推到全部消息 ⇒ **增量在网页侧永久缺失**——
+  这正是红线二（绝不静默丢上下文）要防的形状。
+- 0.19.14 的注释**自己写明了这个失败形态**（对 purpose 轮）：「读回来重放会丢掉
+  指令本身（摘要对着错误上文产出），必须走本轮自己的 rebuild()」。purpose 轮已
+  绕开读回，**真实轮的同一形状没有绕**。
+- 测试为何没抓住：`NODE_TEST_CONTEXT` 守卫让测试环境里 `readSessionPrompt` 恒 null
+  ⇒ 护栏永远只测 fallback 分支，**生产首选分支零覆盖**。裸跑撞红反而是它第一次
+  被真实执行。
+- 修法方向（需要设计轮，未做）：重放源必须含增量——要么恒走 `m.rebuild()`，
+  要么读回后拼接 `serializeDelta` 增量段，要么增量轮也落盘。三个候选都要与
+  0.16.29「文件投递字节保真」的初衷对表（读回存在的理由就是「发出去什么与重建
+  用什么恒为同一份字节」），并配真机验证。同型断言参考
+  `test/aux-delta-compact.test.mjs`（purpose 轮不许用落盘正本代替）。

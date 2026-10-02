@@ -5,6 +5,111 @@ All notable changes to this package. Newest first.
 The canonical, in-progress record of what was changed and why lives in [doc/progress.md](../../doc/progress.md);
 this file is the package-facing release history.
 
+## 0.19.53
+
+**模型选择器收成唯一一组：所有站点的模型放一起，思考等级保持按站点声明不变。**
+
+用户原话：「帮我插件的网站选择模型他们放一起，不用就是按站点隔开，然后能不能做到
+不要空路由，就是是一个真路由，然后放在一个组下面，然后就是保持那个思考等级不变，
+先用思考等级划分不变」。
+
+### ① 单一真 provider `webcode`
+
+`providerIdsForRegistration()` 从 11 个（10 站点 + 兼容空壳）改为**只返回 `webcode`**。
+依据（实读宿主）：一个 provider 就是一组——
+`dsh-api-session-controller/lib/types/catalog.js:38`
+`{ id: provider.id, name: provider.name, models: entries }`。
+0.19.28 的「一个网站一层」与「全部放一组」在协议上只能二选一，本次按用户要求选后者。
+
+### ② 真路由，不再是空壳（含两条被推翻的旧认知）
+
+旧实现让 `webcode` 当「兼容空壳」：`listModels → []`，靠目录侧
+`group.models.length > 0` 的过滤不生成组。现在它是唯一真路由，**必须返回模型**。
+
+同轮取证推翻了本项目两条既有注释：
+
+- 宿主里**没有** `routeServed` 这个函数（`@deepseek-ai` 全树 grep **0 命中**）。
+  发消息前的真判据是 `requireModel` → `modelAvailable`
+  （`dsh-api-session-controller/lib/index.js:900` + `lib/types/catalog.js:67`），
+  要求 `listProviders().some(id)` **且** `listModels().some(model)`。
+- 因此「注册了但目录为空」只保证不抛 `NO_ADAPTER`，**不能**保证能发消息。
+  旧注释「旧会话照旧可跑、可解析」据此修正为只对前者成立。
+
+### ③ 「组内按思考等级分区」在协议上不成立（决定性取证）
+
+宿主模型行只有 `{id, name, description?, inputModalities?}`
+（`dsh-llm/lib/types/types.d.ts:304` 的 `LlmModelInfo`），**没有**
+`group` / `category` / `family` / `tag` 任何一项（宿主全树无消费方）。
+「思考等级」是模型行自带的 `reasoning`，UI 渲染成**另一条独立 pane**
+（`dsh-client-ui-model-selection/lib/client.js:899`、:1031），不是子组。
+
+⇒ 思考等级**保持现状、一行未改**：每模型各自带 `efforts`，逐站点声明不变。
+efort id 仍是网页菜单的逐字文本（「快速」「专家」「极致」…）——宿主
+`ReasoningEffortId()` 是**恒等函数**（`dsh-brand/lib/index.js:20-22`），无枚举白名单；
+唯一校验是非空 string + 组内唯一（`dsh-llm/lib/index.js:2134`）。
+
+### ④ 行名改回带站点键（合并后的正确性修复）
+
+`modelGroupEntryName` 从裸名改为 `站点键/模型名`：`chatglm/GLM-5.3` vs `z.ai/GLM-5.3`。
+
+这不是美观问题：**glm 与 z.ai 有同名模型 `glm-5.3`**。分组消失后，裸名会让同组里
+出现两行逐字相同的 `GLM-5.3`——用户既分不清也选不对。这与 `modelDisplayName`
+当初把站点键塞进名字里的原因是同一个。
+
+### ⑤ 站点 provider 不再注册（用户明确「不要旧兼容路由」）
+
+`webcode-<siteId>` 这 10 个 id 从注册表移除；`providerIdForSite` / `siteIdForProvider`
+保留为**纯函数**，仍认得这些字面值（用于诊断与报错）。
+
+**代价如实记录**：这些值曾写进每个会话的 `subagentModelSelectionPolicy`
+（真机读数 `~/.dsh/storages/session_projcache/`：kimi 94 / zai 90 / glm 67 /
+doubao 60 / deepseek 32 次…，其余各 30）。不注册 ⇒ 那批存量失效。这是用户明确
+接受的（「我不需要旧，我只要新版的」），配套动作是把 web profile 的 16 条
+`allowedModels` 改写为 `provider: webcode`，让源头不再写回旧值。
+
+### ⑥ 注册幂等
+
+参考 `dsh-codearts-auth` 的 `registerAdapterIdempotent`：cordis 重启插件 fiber 时，
+新 fiber 的 apply 与旧 fiber 的异步 dispose 会在 dsh-llm 的 directory 上赛跑，撞出
+`an adapter for provider "x" is already declared`。重复时保留现有路由并跳过本次提交
+（同一份代码，语义等价）；**非重复类失败照常抛出**——吞掉真实配置错误比重启失败更糟。
+判据只匹配「already declared / already registered」这类精确语义，不用泛词。
+
+### ⑦ 桌面端装机 + 独立数据副本
+
+- **web**：`dsh plugin --profile web add`（正常完成）。
+- **desktop**：该 profile 由 Electron 独占，CLI 报
+  `profile "desktop" is managed exclusively by the Electron application`，
+  故改为直接部署文件并同步四处声明（`package.json` / `.modules.yaml` / 已装目录）。
+- **数据目录**：`~/.dsh/webcode-edge-profile`（16380 文件 / 1.864 GB）复制为
+  `~/.dsh/webcode-edge-profile-desktop`，桌面端 `profileDir` 指向它，中继端口改
+  **8932**（避让 web 的 8931）。
+  为什么必须独立：一个 profileDir 就是一个账号（桥锁粒度）。共用会导致桥锁互斥，
+  且驱动按 profileDir 匹配命令行杀「对方浏览器」——两边互相杀，表现为随机超时。
+  副本里那份陈旧桥锁（指向已不存在的 PID）已清除，登录态与会话槽一并带过来。
+
+### 验收
+
+| 检查 | 结果 |
+| --- | --- |
+| 注册 provider id | `["webcode"]`（唯一） |
+| `listModels('webcode')` | 16 行，含全部 10 个站点 |
+| glm / z.ai 行名 | `chatglm/GLM-5.3` vs `z.ai/GLM-5.3`（可分辨） |
+| 思考等级 | glm `快速/深度/极致`（默认 极致）、kimi `标准/进阶`（默认 标准）——**不变** |
+| 桌面端 import | OK（48 模块，`node --check` 全过） |
+| 全量单测 | 120 个测试文件逐文件 exit 0 |
+| 闸门 | `gen-index --check` / `lint-comments`(246 文件 0/0) / `check-ledger`(0.19.53,120) / `check-repo-hygiene` 全 PASS |
+
+**提交前抽查补刀（0.19.53 收尾时发现并当场修）**：裸跑形态（本机唯一可行跑法）下
+`regression.test.mjs` 的「整段重放」用例稳定红——prompt store 的 `NODE_TEST_CONTEXT`
+隔离守卫在裸跑不生效，重放读回了测试自己写进真实 `~/.dsh/webcode/sessions/` 的首轮
+正本（增量轮不落盘 ⇒ 缺「第二句」）。修法：该测试文件显式 `WEBCODE_PROMPT_STORE_DIR='off'`
+（其断言目标本就是内存 rebuild 路径），并删除真实目录里的测试残留。
+**顺带暴露一个生产缺陷候选**（真实轮重放读回首轮正本会丢后续增量，红线二形状）——
+本轮不修，已登记 `doc/long-term-issues.md` #38。
+
+**能力面不变**：改的是分组形态与行名；路由、协议、思考等级、驱动器零改动。
+
 ## 0.19.51
 
 **修 DSH 0.2.0-rc.2 上升级后插件「整套消失」——根因是 peer 范围的形状，不是代码。**

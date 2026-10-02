@@ -1042,14 +1042,12 @@ export function apply(ctx, config = {}) {
   }
 
   /**
-   * provider id → 该 provider 承载的站点 id（2026-09-28 分组改造）。
+   * provider id → 该 provider 承载的站点 id（2026-09-28 分组改造；0.19.53 收成单一 provider）。
    *
-   * 三条语义，各自有判据：
-   *   · `webcode`（兼容空壳）→ 返回**全部**站点 id 的哨兵 `null`，表示
-   *     「不限定站点」：listModels 对它返回空数组（不生成组），resolveModel 对它
-   *     接受全站点的限定 id（旧会话的 `webcode` + `glm:glm-5.3` 因此照旧解析）。
-   *   · `webcode-<siteId>` → 该站点，只服务本站点的模型。
-   *   · 其它 → null（不认识的 provider 不猜站点）。
+   * 现在**只有** `webcode` 一个注册路由，它承载全部站点，因此恒返回哨兵 `null`
+   *（= 不限定站点）。`siteIdForProvider` 仍保留对 `webcode-<siteId>` 字面值的
+   * 解析能力，但那些 id **已不再注册**（见 providers.js 的说明），主机不会拿
+   * 它们来问本适配器；保留解析只为诊断与存量识别。
    */
   function siteIdOfProvider(provider) {
     if (provider === MODEL_PROVIDER_COMPAT_ID) return null;   // 哨兵：不限定
@@ -1057,11 +1055,14 @@ export function apply(ctx, config = {}) {
   }
 
   const adapter = {
-    // 组标题取这里：每站点一组的组名 = 站点短键/域（chatglm / deepseek / z.ai …）。
-    // 兼容空壳仍然是旧名字，但它 listModels 为空 ⇒ 目录侧 `models.length > 0`
-    // 的过滤会让它不生成组，用户在下拉里看不到它。
+    // 组标题：现在只有一个组，标题用插件显示名（cordis.patch.yml 的
+    // `displayName`，如 "Harness Web Bridge"）。站点的区分改由**行名**承担
+    //（`modelGroupEntryName` 的 `glm/GLM-5.3` vs `z.ai/glm-5.3`），
+    // 因为宿主模型行没有子组字段。
     providerInfo(provider) {
       const sid = siteIdOfProvider(provider);
+      // 未注册的 `webcode-<siteId>` 若仍被问到（存量/诊断路径），按站点给名——
+      // 这只影响报错文案的可读性，不代表该 provider 可用。
       if (sid) return { id: provider, name: providerGroupName(sid) };
       return { id: provider, name: cfg.displayName };
     },
@@ -1079,18 +1080,31 @@ export function apply(ctx, config = {}) {
       return webcodeImageRequestPricing({ acceptsImages });
     },
     async listModels(provider) {
-      // 兼容空壳 `webcode`：**刻意返回空数组**。目录侧 `group.models.length > 0`
-      // 的过滤据此不生成组（下拉里看不到多余项），而 routeServed('webcode')
-      // 仍为真 ⇒ 旧会话照旧能发消息。见 providers.js 的兼容空壳说明。
-      if (provider === MODEL_PROVIDER_COMPAT_ID) return [];
-      const sid = siteIdOfProvider(provider);
-      if (!sid) throw new Error('[webcode-bridge] 未知 provider: ' + provider);
+      // 0.19.53：**唯一真 provider `webcode` 承载全部站点**，因此这里返回全站点
+      // 模型（不再按 provider 过滤站点）。
+      //
+      // ⚠ 与 0.19.28–0.19.52 的关键差别：旧实现让 `webcode`（当时的空壳）返回
+      // **空数组**，靠 `group.models.length > 0` 过滤掉它不生成组。现在 `webcode`
+      // 是唯一的真路由，**它必须返回模型**，否则 `modelAvailable` 的第二道判据
+      //（`listModels().some(model)`，见 `dsh-api-session-controller/lib/types/
+      // catalog.js:67-78`）会失败 ⇒ 整个插件一个模型都选不了。
+      // provider 必须自洽：唯一真路由是 `webcode`（承载全部站点）；`webcode-<siteId>`
+      // 仍认得（存量/诊断），但**已不注册**；其它一律拒绝——宿主只校验 provider 名
+      // 非空，不会替我们比对，这条是「未知 provider 不该被当成全站点」的唯一保证。
+      let sid = null;
+      if (provider !== MODEL_PROVIDER_COMPAT_ID) {
+        const parsed = siteIdForProvider(provider);
+        if (!parsed) throw new Error('[webcode-bridge] 未知 provider: ' + provider);
+        sid = parsed;
+      }
       // 选择器下拉过滤兼容别名（deepseek-web 与 deepseek:deepseek 显示名逐字相同，
       // 照单渲染就是两行同名项）。别名本身仍可被 resolveModel 解析——历史会话与
       // OpenAI 前端的旧值依赖它，所以只过滤「展示」，不动「解析」。
       //
-      // 组内行名用**裸模型名**（GLM-5.3 / GLM-5.3-Flash）：组标题已经写着站点，
-      // 再带 `glm/` 前缀就是重复。
+      // 组内行名用**带站点键**的形态（`glm/GLM-5.3` / `z.ai/glm-5.3`）：
+      // 合并成唯一一组后，组标题不再区分站点，而宿主模型行没有子组字段，
+      // 裸名会让 glm 与 z.ai 的 `glm-5.3` 撞成两行同名项。详见
+      // providers.js 的 `modelGroupEntryName`。
       //
       // ## 多账户消歧：**真实用户名优先**（0.19.46，用户指令）
       //
@@ -1107,44 +1121,47 @@ export function apply(ctx, config = {}) {
       // **绝不造假**：读不到昵称时**逐字退回** `(账户N)` 编号（不猜、不拿槽名当昵称）。
       // 模型 id 一个字都不动（仍是 `deepseek:deepseek` / `deepseek@2:deepseek`），
       // 因此历史会话、别名表、`subAgentSite` 全部不受影响——变的只是展示名。
-      const st = getSite(sid);
       const listAccounts = configManager.get().accounts;
       /** 某槽的展示用真实用户名（读不到返回 null）。 */
-      const accountSlugFor = (slot) => {
+      const accountSlugFor = (siteId, slot) => {
         try {
-          const dir = slotProfileDir(cfg.profileDir, sid, slot, { primary: st?.mountAtRelayRoot === true });
+          const stt = getSite(siteId);
+          const dir = slotProfileDir(cfg.profileDir, siteId, slot, { primary: stt?.mountAtRelayRoot === true });
           return nameSlugForDisplay(readIdentityCache(dir)?.name);
         } catch { return null; }
       };
       return WEB_MODELS
-        .filter((m) => m.siteId === sid && !MODEL_ALIAS_IDS.has(m.id))
+        .filter((m) => !MODEL_ALIAS_IDS.has(m.id) && (sid === null || m.siteId === sid))
         .map((m) => {
+          const stt = getSite(m.siteId);
           // 条目上没有 modelId 字段，从站点模型表反查裸名（`GLM-5.3`）。
           // 查不到就退回 m.name —— 宁可显示成 `glm/glm-5.3`，也不显示空字符串。
           const modelId = m.id.includes(':') ? m.id.split(':')[1] : m.id;
-          const def = st?.models.find((x) => x.id === modelId);
-          const bare = def ? modelGroupEntryName(def) : m.name;
-          const isDefaultSlot = !m.slot || m.slot === DEFAULT_SLOT;
+          const def = stt?.models.find((x) => x.id === modelId);
+          const bare = def ? modelGroupEntryName(def, m.siteId) : m.name;
+          const slot = m.slot || DEFAULT_SLOT;
+          const isDefaultSlot = slot === DEFAULT_SLOT;
           // 单账户站点：不加任何后缀（0.14.6 逐字不变，既有断言与旧用户零位移）。
           const multiAccount = !isDefaultSlot
-            || (listAccounts || []).some((a) => a && a.siteId === sid && a.enabled !== false);
-          if (!multiAccount) return { provider, id: m.id, name: bare };
-          const slug = accountSlugFor(m.slot || DEFAULT_SLOT);
+            || (listAccounts || []).some((a) => a && a.siteId === m.siteId && a.enabled !== false);
+          if (!multiAccount) return { provider: MODEL_PROVIDER_COMPAT_ID, id: m.id, name: bare };
+          const slug = accountSlugFor(m.siteId, slot);
           // 读不到真实用户名 ⇒ 退回编号（**不造假**，也绝不显示成两个同名行）。
           return {
-            provider,
+            provider: MODEL_PROVIDER_COMPAT_ID,
             id: m.id,
-            name: slug ? bare + '-' + slug : accountLabel(bare, m.slot),
+            name: slug ? bare + '-' + slug : accountLabel(bare, slot),
           };
         });
     },
     async resolveModel(provider, model) {
       const m = resolveWebModel(model);
       if (!m) throw new Error('[webcode-bridge] 未知模型: ' + model);
-      // provider 与模型必须自洽：`webcode-glm` 不许解析出 `kimi:auto`。
-      // 兼容空壳（哨兵 null）放行全部站点。这条判据是「分组」这一层唯一的正确性
-      // 保证——宿主只校验 provider 名字非空，不会替我们比对站点。
-      const sid = siteIdOfProvider(provider);
+      // provider 与模型必须自洽。0.19.53 起唯一真路由 `webcode` 承载全部站点
+      // ⇒ 恒放行；`webcode-<siteId>` 这类**已不注册**的存量 id 若仍被解析
+      //（诊断/回放路径），则仍按站点比对——`webcode-glm` 不许解析出 `kimi:auto`。
+      // 宿主只校验 provider 名字非空，不会替我们比对，这条是唯一保证。
+      const sid = provider === MODEL_PROVIDER_COMPAT_ID ? null : siteIdForProvider(provider);
       if (sid && sid !== m.siteId) {
         throw new Error(`[webcode-bridge] 模型 ${m.id} 不属于 provider ${provider}（它属于 ${m.siteId}）`);
       }
@@ -2530,15 +2547,50 @@ export function apply(ctx, config = {}) {
       yield* finishChunks(turn, proseBlock + thinkAcc, 'stop');
     },
   };
-  // 每站点一个 provider —— 模型选择器按站点分组（2026-09-28）。
+  // 0.19.53：**只注册一个 provider `webcode`**，全部站点的模型都挂在它下面
+  //（用户指令：「放一起、不要按站点隔开」）。
   //
-  // 一个 provider 就是一组（组标题取 providerInfo().name），所以「一个网站一层」
-  // 只能靠多注册 provider 实现。列表**必须**同时含兼容空壳 `webcode`：
-  // 旧会话/默认模型/子代理白名单里存的是它，缺了它 DSH 会在发消息前抛
-  // `session/model-unavailable`。空壳的 listModels 返回空数组 ⇒ 不生成组、
-  // 下拉里看不到，但 routeServed 为真。完整理由见 providers.js 的同一段注释。
+  // 为什么不再按站点注册：一个 provider 就是一组（组标题取 providerInfo().name），
+  // 0.19.28 正是靠多注册实现「一个网站一层」；用户 2026-10-02 要求反转，且明确
+  // 「不要旧兼容路由」——`webcode-<siteId>` 这 10 个 id 因此不再注册。
+  //
+  // ⚠ **空壳语义已反转，别照旧注释理解**：旧实现让 `webcode` 返回空模型列表以
+  // 「只占位不出组」。现在它是唯一真路由，**必须返回模型**——否则宿主
+  // `modelAvailable` 的第二道判据 `listModels().some(model)`
+  //（`dsh-api-session-controller/lib/types/catalog.js:67-78`）会失败，
+  // 表现为「插件装了但一个模型都选不了」。
+  //
+  // 注册做成**幂等**（同 `dsh-codearts-auth` 的 `registerAdapterIdempotent`）：
+  // cordis 重启插件 fiber 时，新 fiber 的 apply 与旧 fiber 的异步 dispose 会在
+  // dsh-llm 的 directory 上赛跑，撞出 `adapter for provider "x" is already
+  // declared`。保留现有路由并跳过本次提交是**语义等价**的（同一份代码）；
+  // 非重复类失败照常抛出——吞掉真实配置错误比重启失败更糟。
   const providerIds = providerIdsForRegistration();
-  llm.registerAdapter(providerIds, adapter);
+  try {
+    llm.registerAdapter(providerIds, adapter);
+  } catch (error) {
+    if (!isDuplicateAdapterRegistration(error)) throw error;
+    warn(`[webcode-bridge] provider ${providerIds.map((p) => `"${p}"`).join(', ')} `
+      + '已注册（插件 fiber 重启竞态），保留现有路由并跳过本次注册');
+  }
+
+  /**
+   * `llm.registerAdapter` 抛的是不是「同名注册已存在」。
+   *
+   * 判据**必须**含文案：dsh-llm 对 adapter 重复抛的是
+   * `an adapter for provider "x" is already declared`，没有稳定错误码，且不同
+   * 版本文案可能微调。⚠ 只匹配「already declared / already registered」这类
+   * 精确语义——用泛词会把真实的配置错误一起吞掉（那比重启失败更糟）。
+   *
+   * @param {unknown} error `registerAdapter` 抛出的东西
+   * @returns {boolean}
+   */
+function isDuplicateAdapterRegistration(error) {
+  const message = error instanceof Error ? error.message
+    : (error && typeof error.message === 'string' ? error.message : '');
+  if (!message) return false;
+  return /already declared|already registered|is already (?:a|an) adapter/.test(message);
+}
 
   /** Valid minimal text chunk sequence. */
 async function* emitText(text, turn, index = 0) {

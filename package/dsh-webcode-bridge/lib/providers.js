@@ -692,36 +692,59 @@ export function modelDisplayName(st, m, slot) {
 export const MODEL_ALIAS_IDS = Object.freeze(new Set(['deepseek-web']));
 
 /**
- * 每站点一个 provider —— 模型选择器分组（2026-09-28）。
+ * **唯一注册的 provider id = `webcode`**（0.19.53，用户指令：「放一起、不要按站点隔开」）。
  *
- * ## 为什么必须这样做
+ * ## 为什么是「一个 provider 装全部站点」
  *
  * DSH 模型选择器的分组**唯一来源**是 `ctx.llm.listProviders()`：**一个 provider
- * 就是一组**，组标题取 `providerInfo(provider).name`，组 id 必须逐字等于 provider
- * id（实读 `dsh-api-session-controller/lib/index.js` 的 buildModelCatalog，
- * 2026-09-28；目录侧还有一条 `group.models.length > 0` 的过滤）。
+ * 就是一组**（实读 `dsh-api-session-controller/lib/types/catalog.js:38`
+ * `{ id: provider.id, name: provider.name, models: entries }`）。
  *
- * 此前全部站点挤在**一个** `webcode` provider 里 ⇒ 下拉只有一组，10 个站点的
- * 模型平铺在一起。用户要的是「一个网站一层」。
+ * 0.19.28 曾反其道而行——给每个站点注册一个 `webcode-<siteId>`，让下拉里出现
+ * 「一个网站一层」。2026-10-02 用户明确要求反转：站点不再各占一层，全部模型
+ * 归到**一个组**下。
  *
- * ## 兼容空壳 `webcode` 为什么必须留着（这一条不能删）
+ * ## ⚠ 目录契约**不支持**「组内再分子组」——这一条决定了行名必须带站点
  *
- * 升级前写下的选择记录里 provider 恒为 `webcode`。真机证据（`~/.dsh/settings.yaml`）：
- * `agent-default-model.provider: webcode`，以及 `subagent-model-selection.allowedModels`
- * 里 20 条 `provider: webcode`。而 DSH 在**每次发消息前**都会校验
- * `routeServed(ctx, selection.provider)`，不成立就抛
- * `session/model-unavailable: no adapter serves provider "webcode"`
- *（`dsh-api-session-controller/lib/index.js:760` 逐字实读）。
- * 也就是说：**移除 `webcode` 会让所有旧会话、默认模型、子代理白名单当场全部报错**。
+ * 宿主模型行只有 `{ id, name, description?, inputModalities? }` 五个字段
+ *（`dsh-llm/lib/types/types.d.ts:304` 的 `LlmModelInfo`），运行时还过一道
+ * 白名单重建（`dsh-llm/lib/index.js:2076-2087`）。**没有** `group` / `category`
+ * / `family` / `tag` 任何一项（宿主全树检索均无消费方）；「思考等级」是模型行
+ * 上**自带的** `reasoning`，渲染成另一条独立 pane 而非子组
+ *（`dsh-client-ui-model-selection/lib/client.js:899`、:1031）。
  *
- * 处置：仍然注册 `webcode`，但它的 `listModels` 返回**空数组**。目录侧那条
- * `models.length > 0` 的过滤会让它**不生成组**（下拉里看不到多余项），而
- * `routeServed('webcode')` 仍为真 ⇒ 旧会话照旧可跑、可解析。
- * 这是「分组」与「不砸旧会话」同时成立的唯一解。
+ * 因此合并成一组后，区分「这行属于哪个网站」**只能靠行名本身**。这不只是美观
+ * 问题：glm 与 z.ai **有同名模型**（`glm-5.3`），同组平铺下裸名 `GLM-5.3` 会
+ * 出现两次且无法分辨——那正是 `modelDisplayName` 当初把站点短键塞进名字里的
+ * 原因（见其注释）。所以组内行名回退到带站点的形态，见 `modelGroupEntryName`。
+ *
+ * ## 站点 id 不再注册（用户明确接受代价）
+ *
+ * `webcode-<siteId>` 这 10 个 id **不再注册**。它们曾经写进过每个会话的
+ * `subagentModelSelectionPolicy`（真机读数：`~/.dsh/storages/session_projcache/`
+ * 里 kimi 94 / zai 90 / glm 67 / doubao 60 次…）。
+ *
+ * ⚠ **代价必须说清，且与旧注释口径不同**：宿主里**没有** `routeServed` 这个函数
+ *（全树 0 命中）。发消息前的真判据是 `requireModel` → `modelAvailable`
+ *（`dsh-api-session-controller/lib/index.js:900` + `lib/types/catalog.js:67`），
+ * 它要求 `listProviders().some(id)` **且** `listModels().some(model)`。
+ * 所以「注册了但 listModels 为空」只保证**不抛 NO_ADAPTER**，**不能**保证继续
+ * 发消息——旧注释里「旧会话照旧可跑」那句是错的，本次一并修正。
+ *
+ * 不注册站点 id ⇒ 存量里那批 `webcode-kimi` 等值**会**失效。这是用户明确接受的
+ *（「我不需要旧，我只要新版的」），配套动作是把 profile 配置里的白名单改写为
+ * `webcode`，让源头不再写回旧值。解析侧仍保留 `siteIdForProvider()`：它是
+ * **纯函数**，用于诊断与模型归属判定——不注册不等于不认识。
  */
 export const MODEL_PROVIDER_COMPAT_ID = 'webcode';
 
-/** 站点 id → provider id。带前缀是为了不与官方/第三方 provider 撞名。 */
+/**
+ * 站点 id → 历史 provider id（`webcode-glm` 这类）。
+ *
+ * ⚠ **这些 id 已不再注册**（见 MODEL_PROVIDER_COMPAT_ID 的说明）。本函数仅供
+ * 诊断、报错文案与存量识别使用——它回答「这个字符串指的是哪个站点」，
+ * **不**承诺该 provider 仍被服务。
+ */
 export function providerIdForSite(siteId) {
   return MODEL_PROVIDER_COMPAT_ID + '-' + String(siteId);
 }
@@ -735,59 +758,58 @@ export function siteIdForProvider(providerId) {
   return SITES.some((s) => s.id === siteId) ? siteId : null;
 }
 
+/** 组名覆盖表（见 providerGroupName 注释）。值必须是用户可读的真实站点域名。 */
+const PROVIDER_GROUP_NAME_OVERRIDES = Object.freeze({ glm: 'chatglm' });
+
 /**
- * 组标题 = **`webcode-` + 站点短键/域**（用户 2026-09-28 指定，0.19.43 加前缀）。
+ * 站点在其**唯一组**里的可读键（`glm` / `z.ai` / `chatglm`…）。
  *
- * 前缀的含义：**这一组是网页桥提供的**。`webcode` 就是本插件的兼容 provider id
- * （见 MODEL_PROVIDER_COMPAT_ID），组名带同一前缀，让人一眼看出这些模型来自
- * 网页桥而不是官方 provider；也顺带避开与官方分组重名的可能。
+ * 与旧 `providerGroupName` 的唯一区别是**不再带 `webcode-` 前缀**：那个前缀的
+ * 作用是「在多组并列时标明这些组都来自网页桥」，而现在只有一组，前缀就是噪音。
  *
- * 刻意不用 `st.name`：那些是「智谱清言 (GLM)」「Kimi (月之暗面)」这类描述性名字，
- * 而用户要的是一眼看出「哪个网站」；并且 glm 与 zai 必须分得开 —— z.ai 的
- * shortKey 恰好就是它的真实域名（见 ZAI 的 shortKey 注释），语义正好吻合。
+ * GLM 走覆盖表给 `chatglm`：它的站点 id 是 `glm`，而真实域名是 chatglm.cn；
+ * z.ai 的 shortKey 本来就是域名，直接可用。
  *
- * ⚠ **为什么前缀加在这一层、而不是去改 shortKey**：`shortKey` 同时决定扁平显示名
- *（`modelDisplayName` -> `glm/glm-5.3`）、历史设置值、设置页的站点名与
- * `test/model-labels.test.mjs` 的一批断言。只有「组标题」这一处需要前缀，
- * 改 shortKey 会让上面四样一起漂移。
+ * ⚠ **为什么不动 shortKey**：那个字段同时决定模型 id 前缀、历史设置值、
+ * 设置页站点名与 `test/model-labels.test.mjs` 的一批断言。只有「组标题/
+ * 组键」这一处需要覆盖，改 shortKey 会让上面几样一起漂移。
  */
 export function providerGroupName(siteId) {
   const st = SITES.find((s) => s.id === siteId);
   if (!st) return String(siteId);
-  // 组名覆盖表：只在「站点 id 不足以当组名」时使用。
-  //
-  // 为什么 GLM 需要覆盖，而 Z.ai 不需要：z.ai 的 shortKey 本来就是它的真实
-  // 域名（见 ZAI 的 shortKey 注释），直接可用；而 GLM 站点 id 是 `glm`，用户
-  // 要的组名是 **chatglm**（它的真实域名）。
-  //
-  // 刻意**不**去改 GLM 的 shortKey：那个字段同时决定扁平显示名
-  //（modelDisplayName -> `glm/glm-5.3`），改它会让历史设置值、既有护栏
-  //（test/model-labels.test.mjs 的 `glm/glm-5.3` 断言）与设置页 optgroup
-  // 一起漂移——而这次只需要「组标题」这一处改名。
   const override = PROVIDER_GROUP_NAME_OVERRIDES[siteId];
-  return MODEL_PROVIDER_COMPAT_ID + '-' + (override || st.shortKey || st.id);
+  return override || st.shortKey || st.id;
 }
 
-/** 组名覆盖表（见 providerGroupName 注释）。值必须是用户可读的真实站点域名。 */
-const PROVIDER_GROUP_NAME_OVERRIDES = Object.freeze({ glm: 'chatglm' });
-
-/** 注册给 `llm.registerAdapter` 的 provider id 全集（各站点 + 兼容空壳）。 */
+/** 注册给 `llm.registerAdapter` 的 provider id —— **只有一个真路由**。 */
 export function providerIdsForRegistration() {
-  return [MODEL_PROVIDER_COMPAT_ID, ...SITES.map((s) => providerIdForSite(s.id))];
+  return [MODEL_PROVIDER_COMPAT_ID];
 }
 
 /**
- * 模型在**选择器组内**的显示名：裸模型名（`GLM-5.3` / `GLM-5.3-Flash`）。
+ * 模型在**选择器组内**的显示名：`站点键/裸模型名`（`glm/GLM-5.3` / `z.ai/glm-5.3`）。
  *
- * 与 `modelDisplayName`（`glm/glm-5.3`）的分工：后者是**扁平列表**时代的产物
- *（见其注释：当时没有分组，只能把站点键塞进名字里，否则分不清 glm-5.3 是
- * chatglm.cn 还是 z.ai）。现在组标题已经写着站点，行内再带一次前缀就是重复。
+ * ## 0.19.53：为什么从「裸模型名」改回带站点键
+ *
+ * 裸名（`GLM-5.3`）是 0.19.28 的产物——那时**每站点一个 provider = 一组**，
+ * 组标题已经写明站点，行内再带一次确实是重复。
+ *
+ * 2026-10-02 合并成**唯一一组**后，组标题不再区分站点，而宿主模型行
+ * **没有任何子组字段**（见 MODEL_PROVIDER_COMPAT_ID 的说明）。于是裸名会
+ * 直接撞车：**glm 与 z.ai 都有 `glm-5.3`**，同组平铺下会出现两行逐字相同的
+ * `GLM-5.3`，用户无法分辨、也无法选中想要的那一个。
+ *
+ * 所以行名退回带站点键的形态——这与 `modelDisplayName` 当初把站点键塞进名字
+ * 里的**原因完全相同**（见其注释：分不清 glm-5.3 是 chatglm.cn 还是 z.ai），
+ * 只是现在站点键用的是 `providerGroupName` 的口径（`glm` / `z.ai` / `chatglm`）。
  *
  * 注意这**只是显示名**：模型 id 仍是 `glm:glm-5.3`，别名表、历史设置值、
  * 会话游标、路由全部不动。
  */
-export function modelGroupEntryName(m) {
-  return String(m?.name ?? m?.id ?? '');
+export function modelGroupEntryName(m, siteId) {
+  const bare = String(m?.name ?? m?.id ?? '');
+  if (!siteId) return bare;
+  return providerGroupName(siteId) + '/' + bare;
 }
 
 /**

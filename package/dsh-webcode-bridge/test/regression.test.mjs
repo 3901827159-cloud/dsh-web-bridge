@@ -10,6 +10,14 @@ import { createWebControl } from '../lib/web-control.js';
 import { serializeFirstTurn, serializeDelta, parseAgentReply, findProtocolStart, recoverUnparsedCalls } from '../lib/agent-preset.js';
 import '../lib/decoder.js';
 
+// 隔离（0.19.53）：prompt store 的守卫挂在 NODE_TEST_CONTEXT 上，`node --test`
+// 会设它，但本机（spawnSync EPERM）只能逐文件裸跑——裸跑不设 ⇒ 读写都落到真实
+// `~/.dsh/webcode/sessions/`。「整段重放」那条用例用的是固定 sessionKey `lost`：
+// 首轮把它写进真实目录，重放又优先读回这份正本（0.16.29），内容不含第二条消息
+// ⇒ 断言必红。本文件的重放断言针对的就是内存 rebuild 路径，落盘正本读回是
+// 另一条（生产）行为——显式 'off' 让两条通道都只在本文件内成立。
+process.env.WEBCODE_PROMPT_STORE_DIR = 'off';
+
 test('普通回复完成、模型传递、游标提交与同长度历史改写', async () => {
   let adapter; const turns = [];
   const driver = {
@@ -21,23 +29,31 @@ test('普通回复完成、模型传递、游标提交与同长度历史改写',
   const user = text => ({ role: 'user', content: [{ type: 'text', text }] });
   const collect = async options => { const chunks = []; for await (const c of adapter.stream(options)) chunks.push(c); return chunks; };
   try {
-    // 2026-09-28 分组改造：模型目录按站点拆到多个 provider。
-    //   · 兼容空壳 `webcode` 的 listModels **必须**为空（它只在 routeServed 里
-    //     存在，用于兜住旧会话；目录侧按 models.length>0 过滤，故不生成组）；
-    //   · 站点自己的 provider 才公布模型。
-    // 这一格同时是「兼容空壳不会被当成一组显示出来」的护栏。
-    assert.deepEqual(await adapter.listModels('webcode'), [], '兼容空壳不得公布模型');
-    const models = await adapter.listModels('webcode-deepseek');
+    // 0.19.53 单一 provider：**`webcode` 就是唯一真路由，必须公布全部站点的模型**。
+    //
+    // ⚠ 语义已反转，别照旧注释理解：0.19.28–0.19.52 里 `webcode` 是「兼容空壳」
+    //（listModels 返回空、只为了兜住旧会话的 provider 名）。现在它是唯一的组，
+    // 空目录会让宿主 `modelAvailable` 的第二道判据
+    // `listModels().some(model)` 失败 ⇒ 一个模型都选不了。
+    const models = await adapter.listModels('webcode');
     const ids = models.map(m => m.id);
-    assert.ok(ids.includes('deepseek:deepseek'));
+    assert.ok(ids.includes('deepseek:deepseek'), 'webcode 必须公布 deepseek 的模型');
     // 0.19.43：glm / kimi 的 auto 已从模型表真删，公布的是网页真实档位。
     // chatgpt 没有 modelPicker 契约，auto 是那里唯一可用的条目（保持不动）。
-    for (const [pid, want] of [['webcode-glm', 'glm:glm-5.3'], ['webcode-chatgpt', 'chatgpt:auto'], ['webcode-kimi', 'kimi:k3']]) {
-      const list = await adapter.listModels(pid);
-      assert.ok(list.map(m => m.id).includes(want), `${pid} 必须公布 ${want}`);
-      // 组内行名是**裸模型名**，不带站点前缀（组标题已经写着站点）
-      for (const m of list) assert.ok(!m.name.includes('/'), `${pid} 的行名不得含站点前缀: ${m.name}`);
+    for (const want of ['glm:glm-5.3', 'chatgpt:auto', 'kimi:k3']) {
+      assert.ok(ids.includes(want), `webcode 必须公布 ${want}`);
     }
+    // 组内行名**必须带站点键**（`glm/GLM-5.3` / `z.ai/glm-5.3`）：
+    // 合并成唯一一组后，glm 与 z.ai 有同名模型 `glm-5.3`，裸名会撞成两行
+    // 逐字相同的项——用户既分不清也选不对。
+    for (const m of models) {
+      assert.ok(m.name.includes('/'), `行名必须带站点键（否则同名模型无法分辨）: ${m.name}`);
+    }
+    const glmRows = models.filter((m) => m.id.startsWith('glm:'));
+    const zaiRows = models.filter((m) => m.id.startsWith('zai:'));
+    assert.ok(glmRows.length > 0 && zaiRows.length > 0, 'glm 与 z.ai 都必须有模型行');
+    assert.notDeepEqual(glmRows.map((m) => m.name), zaiRows.map((m) => m.name),
+      'glm 与 z.ai 的行名不得逐字相同（它们有同名模型 glm-5.3）');
     const base = { sessionId: 'regression', model: 'flash', messages: [user('第一句')] };
     const chunks = await collect(base);
     assert.equal(chunks.at(-1).type, 'finish');

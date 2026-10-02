@@ -140,32 +140,33 @@ test('z.ai 的显示名用域名短键，内部路由 id 不变（历史设置�
 // 因此本文件的判据就是那三条的直接推论。
 // ---------------------------------------------------------------------------
 
-/** 期望的组名（2026-09-28 用户指定：站点短键/域）。手写对照表，见下方断言注释。 */
+/** 期望的站点键（0.19.53：不再带 `webcode-` 前缀，只有一组时它是噪音）。
+ *  手写对照表，见下方断言注释。 */
 const EXPECTED_GROUP_NAMES = Object.freeze({
-  deepseek: 'webcode-deepseek',
-  glm: 'webcode-chatglm',  // 站点 id 是 glm，但真实域名是 chatglm.cn
-  chatgpt: 'webcode-chatgpt',
-  kimi: 'webcode-kimi',
-  qwen: 'webcode-qwen',
-  doubao: 'webcode-doubao',
-  grok: 'webcode-grok',
-  claude: 'webcode-claude',
-  zai: 'webcode-z.ai',     // 短键即真实域名
-  gemini: 'webcode-gemini',
+  deepseek: 'deepseek',
+  glm: 'chatglm',  // 站点 id 是 glm，但真实域名是 chatglm.cn
+  chatgpt: 'chatgpt',
+  kimi: 'kimi',
+  qwen: 'qwen',
+  doubao: 'doubao',
+  grok: 'grok',
+  claude: 'claude',
+  zai: 'z.ai',     // 短键即真实域名
+  gemini: 'gemini',
 });
 
-test('注册表里每个站点各占一个 provider，且组名是站点短键/域', () => {
+test('注册表里只有唯一真 provider `webcode`，站点键仍可反查', () => {
   const ids = providerIdsForRegistration();
-  // 兼容空壳必须在，且必须**只有一个** —— 多注册一个不存在的 provider 会让
-  // DSH 的 prepareRoutes 抛 DUPLICATE_ADAPTER，整个插件起不来。
-  assert.equal(ids.filter((x) => x === MODEL_PROVIDER_COMPAT_ID).length, 1, '兼容空壳必须恰好一次');
+  // 0.19.53：全部站点放进一个组，站点 provider **不再注册**（用户：不要旧兼容路由）。
+  assert.deepEqual(ids, [MODEL_PROVIDER_COMPAT_ID], '必须只注册 webcode 一个 provider');
   assert.equal(new Set(ids).size, ids.length, 'provider id 不得重复（重复 = 插件无法加载）');
   for (const st of SITES) {
     const pid = providerIdForSite(st.id);
-    assert.ok(ids.includes(pid), `${st.id} 必须有自己的 provider`);
-    // 反查必须闭合：providerIdForSite -> siteIdForProvider -> 同一站点
+    // 站点 id **不注册**——它只是历史形状，服务侧不再提供
+    assert.ok(!ids.includes(pid), `${st.id} 的 provider 不应再注册`);
+    // 但仍必须**认得**：存量会话/配置里存着这些字面值，解析它们用于诊断与报错。
     assert.equal(siteIdForProvider(pid), st.id, pid + ' 反查不回原站点');
-    // 组名 = 站点短键/域。写成**显式对照表**而不是复用实现里的 shortKey||id：
+    // 站点键 = 短键/域。写成**显式对照表**而不是复用实现里的 shortKey||id：
     // 复用实现等于用实现验证实现，覆盖表改了它也跟着改，等于没护栏。
     assert.equal(providerGroupName(st.id), EXPECTED_GROUP_NAMES[st.id], st.id + ' 的组名不对');
   }
@@ -174,41 +175,38 @@ test('注册表里每个站点各占一个 provider，且组名是站点短键/�
   assert.equal(siteIdForProvider('deepseek-official'), null);
 });
 
-test('GLM 与 Z.ai 各自成组，组名可分辨（同名模型不再混在一起）', () => {
-  // 用户原话：「glm5.3 和 flash 例如这样放在 chatglm 一组内」。
-  // 而 z.ai 是**另一个网站**，必须自成一组、组名不同 —— 否则两条 glm-5.3
-  // 在选择器上看起来仍是同一个网站的重复项。
-  assert.equal(providerGroupName('glm'), 'webcode-chatglm');
-  assert.equal(providerGroupName('zai'), 'webcode-z.ai');
-  assert.notEqual(providerIdForSite('glm'), providerIdForSite('zai'));
-  // 两个站点确实各有一个 glm-5.3（同名），这正是必须分组的原因
+test('GLM 与 Z.ai 的站点键可分辨（同名模型靠行名区分）', () => {
+  // 0.19.53 反转：用户原话「放一起、不要按站点隔开」。二者不再各占一组，
+  // 但仍必须**可分辨**——z.ai 是另一个网站，两个站点都有一个 `glm-5.3`。
+  //
+  // 分组消失后，区分的责任从「组标题」转移到「行名前缀」（`modelGroupEntryName`
+  // 拼的 `chatglm/GLM-5.3` vs `z.ai/GLM-5.3`）。这里钉住键本身可分辨，
+  // 「行名真的带上了它」由 regression.test.mjs 钉住。
+  assert.equal(providerGroupName('glm'), 'chatglm');
+  assert.equal(providerGroupName('zai'), 'z.ai');
+  assert.notEqual(providerGroupName('glm'), providerGroupName('zai'));
+  // 两个站点确实各有一个 glm-5.3（同名），这正是行名必须带站点键的原因
   const g = resolveWebModel('glm:glm-5.3');
   const z = resolveWebModel('zai:glm-5.3');
-  assert.equal(g.id, z.id, '两个站点的模型 id 同名，是分组要解决的问题');
+  assert.equal(g.id, z.id, '两个站点的模型 id 同名，是行名要解决的问题');
   assert.notEqual(g.siteId, z.siteId);
 });
 
-test('组名一律带 webcode- 前缀：一眼看出这组是网页桥提供的', () => {
-  // 用户原话（2026-09-28）：「可见组名改为 wecode-xxx 的名字好区分」。
-  // 前缀就是本插件的兼容 provider id，含义是「这组模型来自网页桥」——
-  // 也让这些组不可能与官方 provider 的分组重名。
+test('站点键不再带 webcode- 前缀（只有一组时它是噪音）', () => {
+  // 0.19.53：前缀原本的作用是「在多组并列时标明这些组来自网页桥」
+  //（用户 2026-09-28 原话「可见组名改为 wecode-xxx 的名字好区分」）。
+  // 现在只有一组，前缀既不提供区分度、又会污染**行名**（`webcode-glm/GLM-5.3`）。
   for (const st of SITES) {
     const name = providerGroupName(st.id);
-    assert.ok(name.startsWith('webcode-'), `${st.id} 的组名缺前缀: ${name}`);
-    // 前缀之后必须还有内容，且不许出现双前缀（重复拼是这次改动最容易犯的错）
-    const tail = name.slice('webcode-'.length);
-    assert.ok(tail.length > 0, `${st.id} 的组名只有前缀: ${name}`);
-    assert.ok(!tail.startsWith('webcode-'), `${st.id} 的组名重复前缀: ${name}`);
+    assert.ok(!name.startsWith('webcode-'), `${st.id} 的站点键不应再带前缀: ${name}`);
+    assert.ok(name.length > 0, `${st.id} 的站点键不得为空`);
   }
 });
 
-test('旧 provider webcode 仍解析得开（否则所有历史会话当场报 session/model-unavailable）', () => {
-  // 真机证据（~/.dsh/settings.yaml）：agent-default-model.provider = webcode，
-  // 以及 subagent-model-selection.allowedModels 里 20 条 provider: webcode。
-  // DSH 在每次发消息前校验 routeServed(selection.provider)；webcode 必须仍在
-  // 注册表里。这里钉住「兼容空壳存在」，而它 listModels 为空（不生成组）由
-  // regression.test.mjs 钉住。
-  assert.ok(providerIdsForRegistration().includes('webcode'), '兼容空壳 webcode 必须在注册表里');
+test('真 provider `webcode` 承载全站点语义', () => {
+  // 存量证据（真机读数）：会话日志里 `webcode` 出现 15021 次、会话状态缓存
+  // 6093 次，是压倒性主力 —— 真 provider 必须沿用这个 id，换名会让存量全失配。
+  assert.ok(providerIdsForRegistration().includes('webcode'), '真 provider 必须是 webcode');
   // 它承载的是**全站点**语义：不限定站点，所以反查刻意返回 null（哨兵）
   assert.equal(siteIdForProvider('webcode'), null);
 });

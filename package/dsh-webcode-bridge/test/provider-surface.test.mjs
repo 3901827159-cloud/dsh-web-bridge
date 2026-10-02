@@ -36,43 +36,58 @@ const EXPECTED_SITE_IDS = [
 ];
 
 /**
- * 注册的 provider id。**11 个**：十个站点各一个 + 一个兼容空壳 `webcode`。
+ * 注册的 provider id。**只有 1 个**（0.19.53）。
  *
- * 空壳必须存在：旧设置值（默认模型、20 条子代理白名单）里存的是 `provider: webcode`，
- * 而 DSH 每次发消息前会校验存储的 provider 是否仍被服务——缺了它，旧会话一律
- * `session/model-unavailable`。它的 `listModels` 返回空数组，所以选择器里不显示成空组。
+ * 0.19.28–0.19.52 是「十个站点各一个 + 一个兼容空壳」共 11 个；2026-10-02 用户
+ * 指令反转：**全部站点放进同一个组**，且明确「不要旧兼容路由」——
+ * `webcode-<siteId>` 因此不再注册。
+ *
+ * ⚠ 真 provider 必须是 `webcode` 这个 id：它是存量里压倒性的主力（会话日志
+ * 15021 次、会话状态缓存 6093 次）。换个新 id 会让这批存量全部失配。
+ *
+ * ⚠ 与之配套的**语义反转**：旧实现里 `webcode` 是「空壳」（listModels 返回空、
+ * 靠 `group.models.length > 0` 不生成组）。现在它是唯一真路由，
+ * **listModels 必须返回模型**，否则宿主 `modelAvailable` 的第二道判据失败
+ * ⇒「插件装了但一个模型都选不了」。
  */
-const EXPECTED_PROVIDER_IDS = [
-  'webcode',
-  'webcode-deepseek', 'webcode-glm', 'webcode-chatgpt', 'webcode-kimi', 'webcode-qwen',
-  'webcode-doubao', 'webcode-grok', 'webcode-claude', 'webcode-gemini', 'webcode-zai',
-];
+const EXPECTED_PROVIDER_IDS = ['webcode'];
 
 /**
- * 每站点的分组名。
+ * 每站点的组键（0.19.53：不再带 `webcode-` 前缀）。
+ *
+ * 只有一组时那个前缀是噪音——它原本的作用是「在多组并列时标明这些组来自网页桥」。
+ * 现在站点键只用于**行名前缀**（`glm/GLM-5.3` vs `z.ai/glm-5.3`）。
  *
  * `glm → chatglm` 是 `PROVIDER_GROUP_NAME_OVERRIDES` 给出的覆盖，**不能被吞掉**：
  * GLM 的 `shortKey` 故意没改成 `chatglm`（它同时被 `modelDisplayName` 用，
- * 改了会变成 `glmglm-5.3`），组名因此必须走覆盖表。
+ * 改了会变成 `glmglm-5.3`），组键因此必须走覆盖表。
  *
- * 组名带 `webcode-` 前缀（0.19.43）：`MODEL_PROVIDER_COMPAT_ID + '-' + 短键`。
+ * `zai → z.ai` 必须保留：z.ai 与 glm **有同名模型**（`glm-5.3`），
+ * 合并成唯一一组后，行名若不带这个键就会出现两行逐字相同的 `GLM-5.3`。
  */
 const EXPECTED_GROUP_NAMES = {
-  deepseek: 'webcode-deepseek', glm: 'webcode-chatglm', chatgpt: 'webcode-chatgpt',
-  kimi: 'webcode-kimi', qwen: 'webcode-qwen', doubao: 'webcode-doubao',
-  grok: 'webcode-grok', claude: 'webcode-claude', gemini: 'webcode-gemini', zai: 'webcode-z.ai',
+  deepseek: 'deepseek', glm: 'chatglm', chatgpt: 'chatgpt',
+  kimi: 'kimi', qwen: 'qwen', doubao: 'doubao',
+  grok: 'grok', claude: 'claude', gemini: 'gemini', zai: 'z.ai',
 };
 
 test('判据 1：站点 id 与顺序逐字不变', () => {
   assert.deepEqual(SITES.map((s) => s.id), EXPECTED_SITE_IDS);
 });
 
-test('判据 2：注册的 provider id 逐字不变（含兼容空壳）', () => {
+test('判据 2：注册的 provider id 逐字不变（唯一真路由 webcode）', () => {
   assert.deepEqual(providerIdsForRegistration(), EXPECTED_PROVIDER_IDS);
   assert.ok(
     providerIdsForRegistration().includes('webcode'),
-    '兼容空壳 `webcode` 必须仍在注册表里——缺了它旧会话一律 session/model-unavailable',
+    '真 provider 必须是 `webcode`——存量里压倒性主力（会话日志 15021 次）依赖这个 id',
   );
+  // 站点 provider **不得**再注册（用户明确「不要旧兼容路由」）。
+  for (const s of SITES) {
+    assert.ok(
+      !providerIdsForRegistration().includes(providerIdForSite(s.id)),
+      `站点 provider ${providerIdForSite(s.id)} 不应再注册`,
+    );
+  }
 });
 
 test('判据 3：分组名逐字不变（GLM 的 chatglm 覆盖不能被吞掉）', () => {

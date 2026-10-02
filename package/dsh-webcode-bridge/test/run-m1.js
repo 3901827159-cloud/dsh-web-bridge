@@ -166,32 +166,29 @@ try {
   ok('provider adapter registered as route "webcode"', registered.adapterIds?.includes('webcode'));
   ok('provider NOT double-registered as configurable', registered.providers.length === 0);
   ok('adapter registered', typeof registered.adapter?.stream === 'function');
-  // 模型目录面（0.19.51 修正）。
+  // 模型目录面（0.19.53 再次反转，回到「`webcode` 就是唯一真路由」）。
   //
-  // 旧断言是 `listModels('webcode').length >= 2`，写于 v0.5.1（`git log -S` 取证：
-  // 唯一引入提交是 `f1d1ca1 chore: initial snapshot of v0.5.1 working tree`）——
-  // 那时 `webcode` 是**唯一且真实**的 provider。
+  // 这条断言的期望值**三次**变化，三次都是设计变更而非判据放水：
+  //   · v0.5.1   `listModels('webcode').length >= 2` —— 那时 `webcode` 是唯一真 provider；
+  //   · 0.19.42  改成「必须为空」—— 改为按站点分组，`webcode` 退化成兼容空壳
+  //              （空目录 ⇒ 目录侧 `models.length > 0` 过滤掉它，不生成多余组）；
+  //   · 0.19.53  **改回「必须非空」** —— 用户要求全部站点放同一组，`webcode`
+  //              重新成为唯一真路由。此时空目录不再是「不出组」，而是让宿主
+  //              `modelAvailable` 的第二道判据 `listModels().some(model)` 失败
+  //              ⇒ 插件装了却一个模型都选不了。
   //
-  // 0.19.42 起模型选择器改为**按站点分组**（`webcode-deepseek` / `webcode-glm` / …），
-  // 而 `webcode` 退化为**兼容空壳**：它仍然注册（`routeServed('webcode')` 为真，
-  // 旧会话照旧能发消息），但 `listModels` **刻意返回空数组**，好让目录侧
-  // `group.models.length > 0` 的过滤不生成多余分组。
-  //
-  // 于是这条断言从那天起就是**假的**：它期望的能力已被设计刻意移除。
-  // 同一件事 `test/regression.test.mjs:29` 早就按新口径钉住了
-  // （`assert.deepEqual(await adapter.listModels('webcode'), [], '兼容空壳不得公布模型')`），
-  // 只有本文件漏改 ⇒ `pnpm test`（CI 跑的正是它）在任何一个平台上都恒红。
-  //
-  // 这里**不是**放宽判据去迁就实现：期望值按设计更新，且同时钉住两件真事——
-  // 空壳必须为空、站点 provider 必须真的公布模型。
-  ok('compat shell `webcode` publishes no models', (await registered.adapter.listModels('webcode')).length === 0);
-  // 站点 provider 必须有模型。用 `webcode-glm` 而不是 `webcode-deepseek`：实测
-  // deepseek 站只有 1 个模型行（它没有别名档），而这条断言想钉的是「目录侧非空」。
-  // 取一个**确实多行**的站点，断言才有分辨力（GLM 实测 2 行：glm-5.3 / glm-5.3-flash）。
-  ok('site provider publishes models',
-    (await registered.adapter.listModels('webcode-glm')).length >= 2);
+  // ⚠ 这里钉的是**真实故障形状**：0.19.53 若漏改 `listModels` 让它返回空，
+  // 表现是「桥在跑、下拉里什么都没有」，比报错更难查。
+  ok('unique real provider `webcode` publishes models', (await registered.adapter.listModels('webcode')).length >= 2);
+  // 组内行名必须带站点键：glm 与 z.ai 有同名模型 `glm-5.3`，合并成一组后
+  // 裸名会撞成两行逐字相同的项。
+  const allRows = await registered.adapter.listModels('webcode');
+  ok('every model row carries its site key', allRows.every((m) => m.name.includes('/')),
+    '行名必须带站点键（否则 glm 与 z.ai 的同名模型无法分辨）');
   ok('every registered provider is answerable',
     (await Promise.all(registered.adapterIds.map((id) => registered.adapter.listModels(id)))).length === registered.adapterIds.length);
+  ok('only one provider registered', registered.adapterIds.length === 1,
+    '0.19.53 起只注册 webcode 一个 provider，实际：' + JSON.stringify(registered.adapterIds));
   ok('reasoner model resolvable', (await registered.adapter.resolveModel('webcode', 'deepseek-reasoner')).id === 'deepseek-reasoner');
   ok('unknown model rejected', await registered.adapter.resolveModel('webcode', 'nope-model').then(() => false, () => true));
   ok('same-origin routes mounted', ['/__webcode/status', '/__webcode/consent', '/__webcode/sessions', '/__webcode/history', '/__webcode/import', '/__webcode/preview', '/__webcode/settings'].every((p) => registered.routes.has(p)));
