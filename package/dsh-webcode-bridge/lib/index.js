@@ -43,6 +43,11 @@ import { webcodeImageRequestPricing } from './image-pricing.js';
 // 自动续跑的整会话累计与形态切换（0.19.3，用户指令「加整会话累计」）：
 // 判据的唯一来源是 continueFormFor；计数落盘失败静默，绝不影响回合交付。
 import { createContinueCounter, continueFormFor, DEFAULT_CONTINUE_COMPLETE_AFTER } from './continue-budget.js';
+// 错误码真源（2026-10-02）：本文件两处抛点（WEB_NO_PROGRESS / CONTEXT_WINDOW_EXCEEDED）
+// 必须走它，否则码会在 harness 边界退化成 `UNKNOWN`——而 `CONTEXT_WINDOW_EXCEEDED`
+// 正是官方 `compaction-basic` 触发「超限自动压缩」的唯一判据，丢了它等于把官方的
+// 上下文自动修复关掉（实测 137/137 丢码）。见 lib/error-codes.js 文件头。
+import { webcodeError, withWebcodeCode, WEBCODE_RETRY_POLICY } from './error-codes.js';
 // 注意（0.17.3）：这里**不再** import `tool-parser.js`。它是一层对 `parseAgentReply`
 // 的纯委托薄壳，本文件已经直接用 agent-preset 的解析器 + 自己的流式状态机，接上它
 // 只会多一跳而行为逐字不变。原先那行 import 是**死的**（全文件零调用），而
@@ -596,7 +601,7 @@ function idleTimeoutError(timeoutMs, scene) {
       + `${phaseNote}${activity}${pendingChars}）`
     : '';
   const err = new Error(`WEB_NO_PROGRESS: 网页侧超过 ${Math.round(timeoutMs / 1000)}s 没有任何新内容${hint} — 本轮已中止，可重试`);
-  err.code = 'WEB_NO_PROGRESS';
+  withWebcodeCode(err, 'WEB_NO_PROGRESS');
   err.scene = scene;
   return err;
 }
@@ -1035,7 +1040,7 @@ export function apply(ctx, config = {}) {
       + ' 已在本轮发出前拦下，网页端未被写入。'
       + ' 处理：新开一个会话（推荐），或在设置里调大该站点的窗口声明后重试。',
     );
-    err.code = 'CONTEXT_WINDOW_EXCEEDED';
+    withWebcodeCode(err, 'CONTEXT_WINDOW_EXCEEDED');
     err.budget = budget;
     warn(err.message);
     throw err;
@@ -1066,7 +1071,11 @@ export function apply(ctx, config = {}) {
       if (sid) return { id: provider, name: providerGroupName(sid) };
       return { id: provider, name: cfg.displayName };
     },
-    providerRetryPolicy() { return undefined; },
+    // 显式声明重试策略（0.19.54）：返回 `undefined` 会让宿主用官方 HTTP 默认
+    // （5 次 / 500ms 起），而本插件重试一次 = 再驱动一次浏览器。取值理由、
+    // 以及**为什么绝不能把 `CONTEXT_WINDOW_EXCEEDED` 加进 `retryableCodes`**
+    //（会因 waterfall 顺序静默顶掉官方的超限自动压缩修复），见 error-codes.js。
+    providerRetryPolicy() { return WEBCODE_RETRY_POLICY; },
     // 必须同步、无 I/O、绝不抛——每次 token meter 测量都会调到这里
     //（dsh-token-meter/lib/index.js:644 → :689 → dsh-llm/lib/index.js:1964）。
     // 旧版缺这个方法时，真实报错是
@@ -2617,10 +2626,16 @@ function inputTokensOf(turn) {
   return Number.isFinite(turn?.inputTokens) ? turn.inputTokens : estimateTokens(turn?.prompt ?? '');
 }
 
-/** 三处相同的「空回复」判定：正文、思考、图片任一非空即合法（识图轮只出图）。 */
+/** 三处相同的「空回复」判定：正文、思考、图片任一非空即合法（识图轮只出图）。
+ *
+ * 0.19.54：码从「无码」改为官方的 `EMPTY_RESPONSE`（`dsh-llm` 的
+ * `EMPTY_RESPONSE_CODE`，其文档逐字：*The attempt produced nothing durable, so retry
+ * policy treats it as safe to repeat*）——这正是本判据的语义，且它**在官方默认可重试集
+ * 里**，于是「网页偶发空回复」现在会走官方退避重试，而不是当场判死整轮。
+ * 消息文本逐字不变（`test/empty-response.test.mjs` 等按文案断言）。 */
 function assertNonEmpty(text, thinkText, images) {
   if (!String(text ?? '').trim() && !String(thinkText ?? '').trim() && !(Array.isArray(images) && images.length)) {
-    throw new Error('webcode relay: empty response from web AI');
+    throw webcodeError('webcode relay: empty response from web AI', 'EMPTY_RESPONSE');
   }
 }
 

@@ -120,7 +120,13 @@ test('接线：越界抛的是 CONTEXT_WINDOW_EXCEEDED，且文本带得出可�
   const at = src.indexOf('function assertContextBudget(');
   assert.ok(at > 0, 'index.js 应有 assertContextBudget');
   const body = src.slice(at, at + 1800);
-  assert.ok(/err\.code = 'CONTEXT_WINDOW_EXCEEDED'/.test(body), '必须带专用错误码');
+  // 0.19.54：码改走 `withWebcodeCode`（唯一真源，同时挂 `failure` 快照）。
+  // 这一条尤其关键：`CONTEXT_WINDOW_EXCEEDED` 是官方 `compaction-basic`
+  // 触发「超限自动压缩」的**唯一**判据；裸赋值会让它变成 `UNKNOWN`，
+  // 等于把官方的上下文自动修复静默关掉（实测 137/137 丢码）。
+  assert.ok(/withWebcodeCode\(err, 'CONTEXT_WINDOW_EXCEEDED'\)/.test(body), '必须经错误码真源带专用码');
+  assert.ok(!/err\.code = 'CONTEXT_WINDOW_EXCEEDED'/.test(body),
+    '不得回退成裸赋值（官方 compaction-basic 的判据会因此恒不命中）');
   // 报错要能直接回答「超了多少、下一步做什么」
   assert.ok(/token/.test(body) && /声明的上下文窗口/.test(body), '报错应含 token 与声明窗口');
   assert.ok(/新开一个会话/.test(body), '报错应给出可行动建议');

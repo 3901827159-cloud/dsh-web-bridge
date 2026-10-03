@@ -26,6 +26,11 @@ import { deriveLastRate, shouldSettleWip, shouldSettleStalledThinking, answerDom
 import { emptyWebResponseError } from './zero-progress.js';
 import { readIdentityCache, writeIdentityCache } from './account-cache.js';
 import { applyEffort } from './think-effort.js';
+// 错误码真源：本文件是抛点最多的一个（20 处）。**不要**再手写 `err.code = 'X'`
+// ——那样不带 `failure` 快照，码会在 harness 边界被归一化成 `UNKNOWN`
+//（实测 137/137；见 lib/error-codes.js 文件头与
+// doc/research/2026-10-02-dsh-official-error-and-repair.md §6）。
+import { withWebcodeCode } from './error-codes.js';
 // 0.19.18 用户准则「同一账号不能同时桥接运行」：账号级互斥锁（见 lib/bridge-lock.js）。
 import { acquireBridgeLock, releaseBridgeLock, describeBridgeLockHolder } from './bridge-lock.js';
 // 只用 ATTACH_PICK_SRC：判定主体注入浏览器执行（见 pageAttachEvidence）。
@@ -2060,7 +2065,7 @@ export function createBrowserDriver(options = {}) {
         const err = new Error(describeBridgeLockHolder(got.holder, siteId, accountKey, {
           alive: true, lockPath: got.path,
         }));
-        err.code = 'BRIDGE_ACCOUNT_BUSY';
+        withWebcodeCode(err, 'BRIDGE_ACCOUNT_BUSY');
         err.bridgeLock = got;
         warn(err.message);
         throw err;
@@ -2418,7 +2423,7 @@ export function createBrowserDriver(options = {}) {
       + ' 字符后长度不再增长（元素 ' + (kind === 'field' ? 'textarea/input' : 'contenteditable')
       + '，现场 ' + JSON.stringify(scene) + '）。这通常是网页端对超长文本的处理卡住，'
       + '请先压缩上下文再重试。');
-    err.code = 'PROMPT_WRITE_STALLED';
+    withWebcodeCode(err, 'PROMPT_WRITE_STALLED');
     err.scene = scene;
     return err;
   }
@@ -2645,7 +2650,7 @@ export function createBrowserDriver(options = {}) {
     const fi = page.locator(contract.attachSelector || "input[type='file']").first();
     if (!await fi.count()) {
       const err = new Error('ATTACH_UNAVAILABLE: 页面没有可用的文件上传入口');
-      err.code = 'ATTACH_UNAVAILABLE';
+      withWebcodeCode(err, 'ATTACH_UNAVAILABLE');
       throw err;
     }
     // 附件数上限：宿主的 attachment 服务知道真实限额（imageLimits
@@ -2688,7 +2693,7 @@ export function createBrowserDriver(options = {}) {
       const err = new Error('ATTACH_NOT_CONFIRMED: 已选择 ' + payloads.length
         + ' 个文件，但 ' + Math.round(timeoutMs / 1000) + 's 内页面上没有出现附件'
         + '（网页可能拒绝了该格式/大小，或上传入口与预览节点都已改版）');
-      err.code = 'ATTACH_NOT_CONFIRMED';
+      withWebcodeCode(err, 'ATTACH_NOT_CONFIRMED');
       // 现场挂到 err 上，由调用点原样写进读数——只 warn 到控制台等于没有读数。
       err.attachDiag = diag;
       throw err;
@@ -2723,7 +2728,7 @@ export function createBrowserDriver(options = {}) {
     const fi = page.locator(contract.attachSelector || "input[type='file']").first();
     if (!await fi.count()) {
       const err = new Error('ATTACH_UNAVAILABLE: 页面没有可用的文件上传入口');
-      err.code = 'ATTACH_UNAVAILABLE';
+      withWebcodeCode(err, 'ATTACH_UNAVAILABLE');
       throw err;
     }
     const body = String(text ?? '');
@@ -2740,7 +2745,7 @@ export function createBrowserDriver(options = {}) {
       const err = new Error('ATTACH_NOT_CONFIRMED: 已选择附件 ' + name + '，但 '
         + Math.round(timeoutMs / 1000) + 's 内页面上没有出现附件'
         + (diag?.domSnippet ? ' — 现场 DOM：' + diag.domSnippet : ''));
-      err.code = 'ATTACH_NOT_CONFIRMED';
+      withWebcodeCode(err, 'ATTACH_NOT_CONFIRMED');
       err.attachDiag = diag;
       throw err;
     }
@@ -3059,7 +3064,7 @@ export function createBrowserDriver(options = {}) {
         if (!inputReady) {
           loggedIn = false;
           const err = new Error(`NEED_LOGIN: ${site.name} 会话缺失 — 打开 Web AI 面板登录一次`);
-          err.code = 'NEED_LOGIN';
+          withWebcodeCode(err, 'NEED_LOGIN');
           throw err;
         }
       } else {
@@ -3149,14 +3154,14 @@ export function createBrowserDriver(options = {}) {
           if (!inputReady) {
             loggedIn = false;
             const err = new Error(`NEED_LOGIN:${site.name} 会话缺失 — 打开 Web AI 面板登录一次`);
-            err.code = 'NEED_LOGIN';
+            withWebcodeCode(err, 'NEED_LOGIN');
             throw err;
           }
           const reason = challenge
             ? `导航回既有会话时被风控验证页拦截（${challenge}）`
             : '网页会话已不可达（已删除或过期）';
           const err = new Error(`WEB_SESSION_LOST: ${reason} — 需要整段重建`);
-          err.code = 'WEB_SESSION_LOST';
+          withWebcodeCode(err, 'WEB_SESSION_LOST');
           err.navReason = challenge ? 'challenge-page' : 'conversation-gone';
           err.challenge = challenge;
           throw err;
@@ -3503,7 +3508,7 @@ export function createBrowserDriver(options = {}) {
       const echoed = await readComposer(input);
       if (typeof echoed === 'string' && echoed.length < String(message).length - 8) {
         const err = new Error(`PROMPT_TRUNCATED: 网页输入框只接收了 ${echoed.length}/${String(message).length} 字符（网页端长度上限）— 请缩短上下文或先压缩历史再重试`);
-        err.code = 'PROMPT_TRUNCATED';
+        withWebcodeCode(err, 'PROMPT_TRUNCATED');
         // accepted/total 供 executor 的自动压缩重试取数（0.16.11）：真机 0a62dbb8
         // 整轮差 11 个字符就作废——这种轮次必须能按已接受长度自动压缩重试一次。
         err.accepted = echoed.length;
@@ -3629,7 +3634,7 @@ export function createBrowserDriver(options = {}) {
       if (!sent) {
         const err = new Error('SEND_NOT_CONFIRMED: 正文已写入输入框，但按站点契约发出后网页没有收下'
           + '（输入框未清空、地址栏也未切到会话）——附件在场时发送键可能变了或被禁用');
-        err.code = 'SEND_NOT_CONFIRMED';
+        withWebcodeCode(err, 'SEND_NOT_CONFIRMED');
         throw err;
       }
       log('send confirmed (composer cleared / navigated) url=' + page.url());
@@ -3662,7 +3667,7 @@ export function createBrowserDriver(options = {}) {
             + '消息**未被网页受理**（站点在验证通过前不会发出请求）。'
             + '处理：在弹出的浏览器窗口里手动完成验证后重试本轮。'
             + '（这不是解码器问题，也不是「网页没回传」——wire 上零帧是验证闸门造成的）');
-          err.code = 'WEB_CAPTCHA_REQUIRED';
+          withWebcodeCode(err, 'WEB_CAPTCHA_REQUIRED');
           err.captcha = gate;
           warn('captcha gate hit: ' + JSON.stringify(gate) + ' site=' + siteId);
           throw err;
@@ -3708,7 +3713,7 @@ export function createBrowserDriver(options = {}) {
         // 请求体一旦改形（如 model_type 消失）就会静默放行。
         if (!requestMetadata) {
           const err = new Error('MODEL_UI_CHANGED: 未捕获到本轮 /chat/completion 请求体，无法核验网页实际模式');
-          err.code = 'MODEL_UI_CHANGED';
+          withWebcodeCode(err, 'MODEL_UI_CHANGED');
           throw err;
         }
         const expect = contract.expectedRequestMetadata(model, { ui: selection?.ui, wantThink: selection?.wantThink });
@@ -3723,7 +3728,7 @@ export function createBrowserDriver(options = {}) {
         });
         if (bad) {
           const err = new Error(`MODEL_UI_CHANGED: 网页实际 ${bad[0]}=${JSON.stringify(requestMetadata[bad[0]])}，所选模式期望 ${JSON.stringify(bad[1])}`);
-          err.code = 'MODEL_UI_CHANGED';
+          withWebcodeCode(err, 'MODEL_UI_CHANGED');
           throw err;
         }
       }
@@ -3732,7 +3737,7 @@ export function createBrowserDriver(options = {}) {
         // 抛出，让上层退避后重试，而不是和无从下手的不完整流混在一起。
         if (result.reason === 'rate_limited') {
           const err = new Error(`RATE_LIMITED: ${site.name} 网页端限流（${result.hint || '消息发送过于频繁，请稍后重试'}）— 将退避后重试`);
-          err.code = 'RATE_LIMITED';
+          withWebcodeCode(err, 'RATE_LIMITED');
           throw err;
         }
         // 带上流首段原文：整流零响应帧时，「网页 200 包错误 JSON（风控/审核）」
@@ -3954,7 +3959,7 @@ export function createBrowserDriver(options = {}) {
         'WEB_SESSION_LOST: 会话槽' + (nav.reason === 'no-stored-session' ? '为空' : '存的会话无法导航回去')
         + `（site=${siteId}，${nav.reason}） — 需要整段重建`,
       );
-      err.code = 'WEB_SESSION_LOST';
+      withWebcodeCode(err, 'WEB_SESSION_LOST');
       err.navReason = nav.reason;
       err.siteId = siteId;
       err.hasStoredSession = Boolean(existing?.webSessionId);
@@ -4024,7 +4029,7 @@ export function createBrowserDriver(options = {}) {
     if (model.siteId !== siteId) throw new Error(`MODEL_SITE_MISMATCH: 模型 ${model.id} 属于站点${model.siteId}，当前驱动为 ${siteId}`);
     if (model.vision && !hasImages) {
       const err = new Error('VISION_REQUIRES_IMAGE: 识图模式必须附带至少一张图片');
-      err.code = 'VISION_REQUIRES_IMAGE';
+      withWebcodeCode(err, 'VISION_REQUIRES_IMAGE');
       throw err;
     }
     // 未真机校准的站点用「网页当前模型」入口:不做任何模型 UI 操作,
@@ -4075,7 +4080,7 @@ export function createBrowserDriver(options = {}) {
       selectedModel = null;
       const detail = result.options?.length ? ' — 弹层可选：' + result.options.join('、') : '';
       const err = new Error(`MODEL_UNAVAILABLE: 未能切换到 ${result.requested}（${result.reason}）${detail}`);
-      err.code = 'MODEL_UNAVAILABLE';
+      withWebcodeCode(err, 'MODEL_UNAVAILABLE');
       throw err;
     }
     selectedModel = model.id;
@@ -4180,7 +4185,7 @@ export function createBrowserDriver(options = {}) {
         selectedModel = null;
         const diag = await composerSnippet();
         const err = new Error('MODEL_UI_CHANGED: 新版网页未找到「深度思考」开关' + (diag ? ' — 输入框附近可点项：' + diag : ''));
-        err.code = 'MODEL_UI_CHANGED';
+        withWebcodeCode(err, 'MODEL_UI_CHANGED');
         throw err;
       }
       selectedModel = model.id;
@@ -4236,7 +4241,7 @@ export function createBrowserDriver(options = {}) {
       const diag = await composerSnippet();
       if (model.vision && hasImages) { selectedModel = model.id; return { strict: false, ui: 'classic', fallback: 'image-attachment' }; }
       const err = new Error('MODEL_UI_CHANGED: 未找到模型选择器' + (diag ? ' — 输入框附近可点项：' + diag : ''));
-      err.code = 'MODEL_UI_CHANGED';
+      withWebcodeCode(err, 'MODEL_UI_CHANGED');
       throw err;
     }
     await trigger.click();
@@ -4623,7 +4628,7 @@ export function createBrowserDriver(options = {}) {
   function throwIfTransitioning() {
     if (busy || transitioning) {
       const err = new Error('driver busy with a web turn — window switch refused, retry after the turn settles');
-      err.code = 'DRIVER_BUSY';
+      withWebcodeCode(err, 'DRIVER_BUSY');
       throw err;
     }
   }
@@ -4695,7 +4700,7 @@ export function createBrowserDriver(options = {}) {
           cfg.storageState = null;
           // 消息保持短（控制面透传时截断到 200 字符，可操作的那句必须在前面）。
           const err = new Error('cookie 无法解密：Edge 128+ 用 app-bound 加密（v20）把密钥绑定到 Edge 应用身份，复制 profile 读不出任何 cookie。请改用该站点的「登录」按钮——弹出的真实 Edge 窗口里登录一次即可，登录态会持久保存在桥自己的 profile 里。');
-          err.code = 'COOKIE_IMPORT_UNDECRYPTABLE';
+          withWebcodeCode(err, 'COOKIE_IMPORT_UNDECRYPTABLE');
           throw err;
         }
         cfg.storageState.cookieCount = cookieCount;

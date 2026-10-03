@@ -19,6 +19,9 @@ import https from 'node:https';
 import zlib from 'node:zlib';
 import { Readable } from 'node:stream';
 import { isPrivateHost } from './loopback.js';
+// 错误码真源（2026-10-02）：本文件三处抛点（ZSTD/ENCODING/SSRF）走它，
+// 避免码在 harness 边界被归一化成 `UNKNOWN`。见 lib/error-codes.js 文件头。
+import { withWebcodeCode } from './error-codes.js';
 
 const MAX_HEADER_BYTES = Number(process.env.WEBCODE_MAX_HEADER_BYTES) || 1 << 20; // 1MB
 const REDIRECT_STATUS = new Set([301, 302, 303, 307, 308]);
@@ -55,11 +58,11 @@ function decompressorFor(encoding) {
   if (enc === 'zstd' || enc === 'x-zstd') {
     if (typeof zlib.createZstdDecompress === 'function') return zlib.createZstdDecompress();
     const err = new Error('upstream sent zstd but this Node cannot decompress it');
-    err.code = 'ZSTD_UNSUPPORTED';
+    withWebcodeCode(err, 'ZSTD_UNSUPPORTED');
     throw err;
   }
   const err = new Error('upstream sent unsupported content-encoding: ' + enc);
-  err.code = 'ENCODING_UNSUPPORTED';
+  withWebcodeCode(err, 'ENCODING_UNSUPPORTED');
   throw err;
 }
 
@@ -108,7 +111,7 @@ function pairsOf(rawHeaders) {
 function ssrfError(parsed) {
   const err = new Error('upstream redirect refused: redirect target is a private/loopback host ('
     + parsed.hostname + ')');
-  err.code = 'SSRF_REDIRECT_BLOCKED';
+  withWebcodeCode(err, 'SSRF_REDIRECT_BLOCKED');
   err.host = parsed.hostname;
   return err;
 }

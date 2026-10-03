@@ -5,6 +5,97 @@ All notable changes to this package. Newest first.
 The canonical, in-progress record of what was changed and why lives in [doc/progress.md](../../doc/progress.md);
 this file is the package-facing release history.
 
+## 0.19.54
+
+**错误码不再被 harness 吞掉：官方的自动重试与超限自动压缩修复终于对本插件生效。**
+
+### 修的是什么（真实缺陷）
+
+DSH 的 `HarnessError.code` 是**唯一**的机器路由判据
+（`dsh-llm/lib/types/error.d.ts:13` 逐字：*route on this, never by parsing `message`*），
+而它的归一化**只认自己那一份类身份**：
+
+```js
+// dsh-llm/lib/types/adapter-failure.js:104-107
+function harnessErrorCode(error) {
+    return error instanceof HarnessError ? error.code : 'UNKNOWN';
+}
+```
+
+本插件此前给普通 `Error` 挂 `.code`（**24 处**），于是**全部退化成 `UNKNOWN`**。
+
+**284 份真实会话全量实测**（`node scripts/scan-error-codes.mjs`）：
+
+```
+终止失败 171 条；code=UNKNOWN 137 条（80.1%）
+  137 条全部归因本插件   ← 137/137，存活率 0.0%
+  官方 provider 丢码 0 条
+```
+
+**同码对照**：`CONTEXT_WINDOW_EXCEEDED` 两边都在用——官方适配器的原样保留，
+本插件的落盘成 `UNKNOWN`。同一个码名、同一个语义、同一个 harness，只差异常类型。
+
+**后果（三件事，全都静默不报错）**：
+
+1. 官方自动重试（`dsh-llm-retry`）**从未生效**——`retryableCodes` 恒不命中；
+2. `CONTEXT_WINDOW_EXCEEDED` 的**超限自动压缩修复从未触发**
+   （`compaction-basic:862` 的判据恒不命中，等于把官方的上下文自动修复关掉）；
+3. UI 一律显示 `UNKNOWN` 徽章（`dsh-client-ui-chat/lib/client.js:1302-1305`）。
+
+### 怎么修的
+
+新增 `lib/error-codes.js` 作为**错误码真源**：
+
+- `webcodeError(message, code, extra)` / `withWebcodeCode(err, code)` —— **不可分割地**
+  同时写 `code` 与一个**自洽的** `failure` 快照（`Object.freeze({message, code})`）。
+  官方 `ownFailureSnapshot` 的采信条件正是 `failure.code === error.code`；
+  两者不一致仍会退化成 `UNKNOWN`（已实测），故把它做成一步。
+- **为什么不用官方推荐的 `new LlmError(...)`**：`@deepseek-ai/dsh-llm` **不在本仓库
+  工作区**（实测 `ERR_MODULE_NOT_FOUND`），静态 import 会让全部测试文件加载失败；
+  且桌面版把宿主打进 `app.asar`，插件解析到的 `dsh-llm` 与宿主内部那份**可能不是同一
+  模块实例** ⇒ `instanceof` 跨副本不成立。官方实现自己就为这件事留了口子
+  （`adapter-failure.js:17-21` 逐字 *Cross-package copies preserve own data but not
+  class identity*），自洽快照走的就是这条路——**零新依赖、同步可用**。
+- **24 处抛点全部改走真源**，另把两处「空回复」的无码错误对齐成官方
+  **`EMPTY_RESPONSE`**（`dsh-llm` 的 `EMPTY_RESPONSE_CODE`，其文档逐字：
+  *The attempt produced nothing durable, so retry policy treats it as safe to repeat*）
+  ——它**在官方默认可重试集里**，于是「网页偶发空回复」现在会走官方退避重试，
+  而不是当场判死整轮。
+- **`providerRetryPolicy` 从 `undefined` 改为显式策略**（`WEBCODE_RETRY_POLICY`）：
+  `maxRetries: 1`、`initialDelayMs: 2000`。返回 `undefined` 会用官方 **HTTP** 默认
+  （5 次 / 500ms 起），而本插件**重试一次 = 再驱动一次浏览器**，代价完全不同。
+
+### 刻意不做（避免「顺手对齐」引入行为变更）
+
+- **`CONTEXT_WINDOW_EXCEEDED` 绝不进 `retryableCodes`**：`dsh-base/cordis.patch.yml` 里
+  `llm-retry`（:91）注册在 `compaction-basic`（:341）**之前**，waterfall 按注册顺序调用
+  ⇒ `llm-retry` 一旦命中就**不再 `next()`**（`dsh-llm-retry/lib/index.js:160`）。
+  把它放进可重试集，超限请求会被**原样重发** N 次，而**官方的压缩修复永远不会跑**。
+- **`RATE_LIMITED` 不改名成官方 `RATE_LIMIT`**：官方退避 500ms 起，而本站限流滑窗以
+  **十秒**计；改名后每次重试都是一次真实浏览器投递。
+- **`NEED_LOGIN` 不映射到 `AUTH`**：官方 UI 会把 `AUTH` 替换成「API 密钥无效」，
+  而这里该做的是「打开网页登录一次」——映射会把用户引向错误的排查方向。
+- **自建重试未删**（`RATE_LIMITED` 的 10s 下限退避、`PROMPT_TRUNCATED` 的一次性压缩重试）：
+  需先观察官方 `llm-retry` 真的接住，再决定删哪一段。
+
+### 验证
+
+| 验证 | 读数 |
+| --- | --- |
+| 端到端（真实 `adapter.stream()` → 真实官方 `normalizeLlmFailure`） | `{"code":"EMPTY_RESPONSE"}`（修前 `UNKNOWN`）✅ |
+| 反向变异：删掉 `failure` 快照 | 护栏 **3 条红** ✅ |
+| 反向变异：把 `CONTEXT_WINDOW_EXCEEDED` 混进 `retryableCodes` | 护栏 **1 条红** ✅ |
+| 全量单测 | **121 个测试文件逐文件 exit 0**（含新增 `test/error-codes.test.mjs` 10/10）✅ |
+| 闸门 | `lint-comments` / `check-ledger` / `repo-hygiene` / `long-term-issues` / `plugin-contract` / `gen-index --check` 全 PASS；`ci-local --fast` **10/10** ✅ |
+
+⚠ **基线数字不会因此改变**（仍是 137/137）：历史会话的 `UNKNOWN` 是**既成事实**，
+不会被追溯修复。本版声称的是「**机制已接通**」，不是「丢码率已下降」——
+后者要等新会话产生后再跑 `scripts/scan-error-codes.mjs` 才能声称。
+
+**能力面不变**：只改错误分类与重试策略，不改任何站点协议、模型目录或提示词。
+完整机制与官方对位见
+[`doc/research/2026-10-02-dsh-official-error-and-repair.md`](../../doc/research/2026-10-02-dsh-official-error-and-repair.md)。
+
 ## 0.19.53
 
 **模型选择器收成唯一一组：所有站点的模型放一起，思考等级保持按站点声明不变。**

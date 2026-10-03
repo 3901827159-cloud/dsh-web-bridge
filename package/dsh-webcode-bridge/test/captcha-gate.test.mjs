@@ -80,7 +80,12 @@ test('③ 检查必须发生在「发送已确认」之后（否则会盖掉真�
 test('④ 错误码与文案：指向真因、给出可行动处置、并否掉两个误导方向', () => {
   const at = DRIVER.indexOf('WEB_CAPTCHA_REQUIRED');
   const seg = DRIVER.slice(at, at + 900);
-  assert.match(seg, /err\.code\s*=\s*'WEB_CAPTCHA_REQUIRED'/, '必须挂上稳定的错误码');
+  // 0.19.54：码改走 `withWebcodeCode`（唯一真源，同时挂 `failure` 快照）。
+  // 裸 `err.code = '…'` 不带快照 ⇒ 码在 harness 边界被归一化成 `UNKNOWN`，
+  // 实测 137/137。故这里**同时**断言新形状与否定旧形状。
+  assert.match(seg, /withWebcodeCode\(err,\s*'WEB_CAPTCHA_REQUIRED'\)/, '必须经错误码真源挂码');
+  assert.ok(!/err\.code\s*=\s*'WEB_CAPTCHA_REQUIRED'/.test(seg),
+    '不得回退成裸赋值（那样码会被 harness 归一化成 UNKNOWN）');
   assert.match(seg, /手动完成验证/, '文案必须给出可行动处置（手动完成验证后重试）');
   assert.match(seg, /未被网页受理/, '文案必须说明「消息未被受理」这一事实');
   assert.ok(/不是解码器问题|解码器/.test(seg),

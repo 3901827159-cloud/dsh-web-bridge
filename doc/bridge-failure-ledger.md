@@ -1,5 +1,28 @@
 # 桥接失败台账（错误码 × 已做适配 × 残留风险）
 
+> ⚠️ **先读这一条（2026-10-02 新增）**：本表里的错误码是**本插件自己的视角**。
+> 在 **harness 侧**，它们**全部已经退化成 `UNKNOWN`** —— 因为本插件给普通
+> `Error` 挂 `.code`，而官方只认 `HarnessError` 实例
+> （`dsh-llm/lib/types/adapter-failure.js:104-107`）。
+> 实测：284 份会话里归因本插件的 **137/137** 条 error finishes 全是
+> `code:"UNKNOWN"`（官方 provider 丢码 **0** 条）。后果是官方的**自动重试**
+> （`llm-retry`）与**超限自动压缩修复**（`compaction-basic`）**对本插件从未生效，
+> 且不报错**。同码对照：`CONTEXT_WINDOW_EXCEEDED` 在官方适配器里活下来、
+> 在本插件里变成 `UNKNOWN`。
+>
+> ⇒ **读下表时请记住**：那些码只在本插件内部（`CURSOR_INVALIDATING_CODES`
+> 判据、自建退避、UI 文案）有效；**对 harness 而言它们不存在**。
+> 机制、证据与修法见
+> [`research/2026-10-02-dsh-official-error-and-repair.md`](research/2026-10-02-dsh-official-error-and-repair.md)。
+> 基线可复现：`node scripts/scan-error-codes.mjs`。
+>
+> ✅ **同轮已修（0.19.54）**：新增 [`lib/error-codes.js`](../package/dsh-webcode-bridge/lib/error-codes.js)
+> 作为错误码真源（`webcodeError` / `withWebcodeCode` 同时写 `code` 与自洽 `failure` 快照），
+> **24 处抛点全部改走它**，空回复对齐官方 `EMPTY_RESPONSE`，`providerRetryPolicy` 从
+> `undefined` 改为显式策略。端到端（真实 `adapter.stream()` → 真实官方归一化）与
+> **反向变异**（删快照 ⇒ 3 条红；把 `CONTEXT_WINDOW_EXCEEDED` 混进可重试集 ⇒ 1 条红）均已验证。
+> ⚠ 下表的历史码**仍然有效**（本插件内部判据未变），但现在它们**也能活着到 harness 了**。
+
 生成时间：2026-09-14。依据：`doc/long-term-issues.md`（13 条 + 第 14 条）、`PLAN.md` 的 0.14.x 各节，
 以及本轮对 `session-698700ea` / `session-c710ef6e` 两份会话日志的**离线**分析。
 

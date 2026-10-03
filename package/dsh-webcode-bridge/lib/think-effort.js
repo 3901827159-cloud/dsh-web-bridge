@@ -57,6 +57,11 @@
 // 用户选了「深度」而网页还停在「快速」，那就是一次静默降级——思考质量变差，而界面上看不
 // 出任何异常。抛错（`THINK_EFFORT_UI_CHANGED`）比这诚实：它带站点、目标、可选项、当前读数。
 
+// 错误码真源（2026-10-02）：本文件三处抛点（THINK_EFFORT_UNKNOWN / _UI_CHANGED /
+// _UNAVAILABLE）走它，避免码在 harness 边界被归一化成 `UNKNOWN`。
+// 见 lib/error-codes.js 文件头与 doc/research/2026-10-02-dsh-official-error-and-repair.md §6。
+import { withWebcodeCode } from './error-codes.js';
+
 /** 控件形态。`popup` = 点开弹层再点档位；`toggle` = 单一开关按 aria-pressed 读状态。 */
 export const EFFORT_CONTROL_KINDS = Object.freeze(['popup', 'toggle']);
 
@@ -628,7 +633,8 @@ export async function applyEffort(page, { siteId, target } = {}) {
   };
   const fail = (code, msg, extra = {}) => {
     const err = new Error(code + ': ' + msg);
-    err.code = code;
+    // 码走真源（`code` 是运行期变量，故用 withWebcodeCode 而非字面量构造器）。
+    withWebcodeCode(err, code);
     err.siteId = siteId;
     err.target = target;
     Object.assign(err, extra);
@@ -997,7 +1003,7 @@ export function planEffort({ siteId, target } = {}) {
   // 运行期可以直接按前缀分类（本仓库的报错纪律：码要能被机读，不能只在 message 里讲故事）。
   const fail = (msg) => {
     const err = new Error('THINK_EFFORT_UNKNOWN: ' + msg);
-    err.code = 'THINK_EFFORT_UNKNOWN';
+    withWebcodeCode(err, 'THINK_EFFORT_UNKNOWN');
     throw err;
   };
   if (!def) fail(`站点 ${siteId} 未声明思考等级（think-effort.js 没有它的读数）`);

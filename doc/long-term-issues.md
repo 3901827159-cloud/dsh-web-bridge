@@ -50,6 +50,7 @@
 | 36 | **`ref-index` 既有红**（2026-09-29 复核：**已解决**）——登记的是「曾被记为欠账、实测已不在」这次更正本身 | 低 | 否 | `reference/README.md`、`scripts/gen-reference-index.mjs` |
 | 37 | **两条既有常红是同一条行为：网页会话丢失 → 整段重放**（2026-09-30 复核归因：**已修——根因是测试隔离缺陷，不是重放分支**；2026-09-30 晚登记）——`regression` 53/1 与 `aux-delta-compact` 4/1 的 60s 压线来自裸测试读到真实 profile 的发送间隔与基准 | 高 | 否 | `lib/index.js`（profile 落盘守卫）、`test/profile-isolation.test.mjs`、`doc/progress.md`（2026-09-30 段） |
 | 38 | **`NODE_TEST_CONTEXT` 守卫在裸跑形态的残余洞：prompt store 读写通道**（2026-10-02 登记；regression 用例本轮已补隔离）——同族于 #37 的第二条通道；且由此暴露**生产缺陷候选：真实轮重放读回首轮正本会丢后续增量（红线二形状）**，见正文 §38 | 高 | 否 | `lib/index.js`（`readSessionPrompt`、executor 重建分支）、`lib/prompt-store.js`、`test/regression.test.mjs` |
+| 39 | **错误码在 harness 边界全部退化成 `UNKNOWN`**（2026-10-02 登记；**同轮已修，0.19.54**）——本插件给普通 `Error` 挂 `.code`，而官方 `normalizeLlmFailure` 只认 `instanceof HarnessError`；实测 284 份会话里归因本插件的 **137/137** 条 error finishes 全是 `code:"UNKNOWN"`（官方 provider 丢码 0 条）。后果：官方 `llm-retry` 自动重试与 `compaction-basic` 超限自动压缩修复**对本插件从未生效且不报错**；UI 一律显示 `UNKNOWN`。另含 `RATE_LIMITED` ≠ 官方 `RATE_LIMIT` 的码名不符 | 高 | 否 | `lib/error-codes.js`（新增，错误码真源）、`lib/index.js`、`lib/browser-driver.js`、`lib/think-effort.js`、`lib/upstream.js`、`lib/zero-progress.js`、`test/error-codes.test.mjs`、`scripts/scan-error-codes.mjs`、`doc/research/2026-10-02-dsh-official-error-and-repair.md` || 40 | **并发会话的「一组一行」在官方会话清单里做不到**（2026-10-03 登记）——用户要「明显的一行是3个重叠标签页形状一行区分与普通会话」；真会话会各自成行，而官方清单条目是 **shell 私有代码**（`SessionNodeItem`），插件只能**装饰既有行**（4 个槽），不能新增行、不能分组。本轮已在**左栏面板行**上用「三个重叠标签页」图标表达「这是会话组」，清单内部分组未做 | 低 | 否 | `lib/client.cjs`（`ConcurrentPanelIcon`）、`doc/progress.md`（2026-10-03） |
 
 > **一览表完整性（2026-09-16 修正；2026-09-26 补上闸门）**：本表此前**漏登记 #19 与 #20**（正文有、表里没有）。
 > 这两条都是可机检的登记错误，而当时没有任何闸门覆盖「正文条目 ↔ 表格条目」的一致性。
@@ -2381,3 +2382,154 @@ const rebuildText = (m?.purpose ? null : readSessionPrompt(m.sessionKey)) ?? m.r
   0.16.29「文件投递字节保真」的初衷对表（读回存在的理由就是「发出去什么与重建
   用什么恒为同一份字节」），并配真机验证。同型断言参考
   `test/aux-delta-compact.test.mjs`（purpose 轮不许用落盘正本代替）。
+
+## 39. **错误码在 harness 边界全部退化成 `UNKNOWN`**（2026-10-02 登记，**同轮已修 0.19.54**）
+
+**完整机制、官方对位与证据见**
+[`research/2026-10-02-dsh-official-error-and-repair.md`](research/2026-10-02-dsh-official-error-and-repair.md)。
+本节记「缺陷是什么 / 怎么修的 / 为什么这么修」。
+
+### 修复（0.19.54，同轮实施）
+
+新增 [`lib/error-codes.js`](../package/dsh-webcode-bridge/lib/error-codes.js) 作为**错误码真源**：
+
+- `webcodeError(message, code, extra)` / `withWebcodeCode(err, code)` —— **不可分割地**
+  同时写 `code` 与一个**自洽的** `failure` 快照（`Object.freeze({message, code})`）。
+  官方 `ownFailureSnapshot` 的采信条件正是 `failure.code === error.code`，
+  两者不一致仍会退化成 `UNKNOWN`（已实测），故把它做成一步、调用方没有机会只改一半。
+- **为什么不用 `new LlmError(...)`**（官方推荐路径）：`@deepseek-ai/dsh-llm`
+  **不在本仓库工作区**（实测 `ERR_MODULE_NOT_FOUND`），静态 import 会让全部测试文件
+  加载失败；且桌面版把宿主打进 `app.asar`，插件解析到的 `dsh-llm` 与宿主内部那份
+  **可能不是同一模块实例** ⇒ `instanceof` 跨副本不成立。官方实现自己就为这件事
+  留了口子（`adapter-failure.js:17-21` 逐字注释 *Cross-package copies preserve own
+  data but not class identity*），自洽快照走的就是这条路，**零新依赖、同步可用**。
+- **24 处抛点全部改走真源**（`browser-driver.js` 22 / `index.js` 2 / `think-effort.js` 1 /
+  `upstream.js` 3），另把两处「空回复」的**无码**错误对齐成官方的 `EMPTY_RESPONSE`
+  （`lib/index.js` 的 `assertNonEmpty`、`lib/zero-progress.js` 的 `emptyWebResponseError`）
+  ——该码在官方默认可重试集里，其文档逐字写着「没有产出任何耐久内容，重试安全」。
+
+**`providerRetryPolicy` 从 `undefined` 改为显式策略**（`WEBCODE_RETRY_POLICY`）：
+`maxRetries: 1`、`initialDelayMs: 2000`。理由：返回 `undefined` 会用官方 **HTTP** 默认
+（5 次 / 500ms 起），而本插件**重试一次 = 再驱动一次浏览器**，代价完全不同。
+
+⚠ **`CONTEXT_WINDOW_EXCEEDED` 刻意不进 `retryableCodes`**（`test/error-codes.test.mjs` ④ 钉死）：
+`dsh-base/cordis.patch.yml` 里 `llm-retry`（:91）注册在 `compaction-basic`（:341）**之前**，
+waterfall 按注册顺序调用 ⇒ `llm-retry` 一旦命中就**不再 `next()`**
+（`dsh-llm-retry/lib/index.js:160`）。把它放进可重试集，超限请求会被**原样重发** N 次，
+而**官方的压缩修复永远不会跑**——静默毁掉它。
+
+### 验证（反向变异 + 端到端）
+
+- **端到端**：走**真实** `adapter.stream()` 抛错 → 交给**真实**官方
+  `normalizeLlmFailure`，读数 `{"message":"webcode relay: empty response from web AI",
+  "code":"EMPTY_RESPONSE"}`（修复前是 `"code":"UNKNOWN"`）。
+- **反向变异**（改坏了必须变红）：删掉 `failure` 快照 ⇒ 护栏 **3 条红**；
+  把 `CONTEXT_WINDOW_EXCEEDED` 混进 `retryableCodes` ⇒ **1 条红**。逐字还原后 10/10 绿。
+- **全量**：121 个测试文件逐文件 exit 0（含新增 `test/error-codes.test.mjs` 10/10）。
+- **三个既有护栏初版变红**（`captcha-gate` / `context-budget` / `glm-conversation`）：
+  它们是**结构断言停在旧形态**（钉 `err.code = 'X'`）。已改为「断言
+  `withWebcodeCode(err, 'X')` **且否定**裸赋值」——判据**收紧**而非放宽。
+- **基线可复现**：`node scripts/scan-error-codes.mjs` 输出「本插件错误码存活率」。
+  ⚠ **该读数要等新会话产生后才变**（历史会话的 `UNKNOWN` 是既成事实，不会被追溯修复），
+  故本次**未**声称基线数字已改善——**只声称机制已接通**（端到端 + 变异验证）。
+
+### 刻意没做（下一轮的候选）
+
+- **码名未对齐官方**：`RATE_LIMITED` 仍是自定名（官方是 `RATE_LIMIT`）。理由写在
+  `error-codes.js`：官方退避 500ms 起，而本站限流滑窗以**十秒**计，改过去会让每次重试
+  都变成一次真实浏览器投递。`NEED_LOGIN` 同理不映射到 `AUTH`（会让 UI 显示
+  「API 密钥无效」，把人引向错误的排查方向）。
+- **自建重试未删**：`RATE_LIMITED` 的 10s 下限退避与 `PROMPT_TRUNCATED` 的一次性压缩
+  重试都保留。契约要求「不要自己写退避循环」，但**在观察官方 `llm-retry` 真接住之前
+  不能删**——那会变成「两条都没有」。
+- **未把 `WEB_SESSION_LOST` 的整段重建搬到 `agent/request-error` 扩展点**（结构性改动，
+  需单独设计轮）。
+
+### 原始缺陷记录（保留，供对照）
+
+DSH 的 `HarnessError.code` 是**唯一**的机器路由判据
+（`dsh-llm/lib/types/error.d.ts:13` 逐字 *route on this, never by parsing `message`*）。
+而它的归一化只对 `instanceof HarnessError` 保留码
+（`dsh-llm/lib/types/adapter-failure.js:104-107`）：
+
+```js
+/** Trust only Harness-owned codes; third-party SDK codes are not our taxonomy. */
+function harnessErrorCode(error) {
+    return error instanceof HarnessError ? error.code : 'UNKNOWN';
+}
+```
+
+本插件**从不 import `dsh-llm`**、**从不构造 `LlmError`**，而是给普通 `Error`
+挂 `.code`（**24 处**，分布在 `browser-driver.js` / `index.js` / `think-effort.js` /
+`upstream.js`）⇒ 全部退化成 `UNKNOWN`。
+
+**实测（2026-10-02，284 份会话全量扫描，`node scripts/scan-error-codes.mjs`）**：
+
+```
+终止失败合计 171；code=UNKNOWN 137（80.1%）
+  137 条全部归因本插件   ← 137/137，存活率 0.0%
+  官方 provider 丢码 0 条  ← 不是 DSH 的问题，是本插件单方面的接口错配
+```
+
+**同码对照（最干净的一组证据）**：`CONTEXT_WINDOW_EXCEEDED` 两边都在用，
+本插件的落盘成 `UNKNOWN`、官方适配器的**原样保留**——
+同一个码名、同一个语义、同一个 harness，只差异常类型。
+
+一条真实会话的原始 JSONL 是决定性证据：消息里写着 `WEB_NO_PROGRESS`，
+而 `code` 字段是 `UNKNOWN`：
+
+```json
+{"type":"turn/end","seq":278,"data":{"turn":1,"reason":{"kind":"error","error":{
+  "message":"WEB_NO_PROGRESS: 网页侧超过 120s 没有任何新内容…","code":"UNKNOWN"}}}}
+```
+
+### 影响
+
+1. **官方自动重试从未生效**：`DEFAULT_RETRYABLE_CODES` 只有
+   `[EMPTY_RESPONSE, RATE_LIMIT, SERVER, TIMEOUT, TRANSPORT]`，本插件没有任何码能进
+   ⇒ `llm-retry` 的 `retryableCodes.includes(failure.code)` 恒为假 ⇒ 直接放弃。
+2. **官方超限自动压缩修复从未触发**：`compaction-basic` 的订阅判据是
+   `failure.code !== CONTEXT_WINDOW_EXCEEDED_CODE`。本插件**确实设了**这个码
+   （`lib/index.js:1038`），但到那里已经变成 `UNKNOWN` ⇒ 不匹配 ⇒ 不压缩。
+   ⚠ 而 `dsh-base` **已经挂载了** `compaction-basic` / `tool-result-pruner` /
+   `image-offload`（`dsh-base/cordis.patch.yml:341,418,427`）——**机制在，只是接不上**。
+3. **UI 一律显示 `UNKNOWN`**：`dsh-client-ui-chat/lib/client.js:1302-1305` 把
+   `node.code` 渲染成 `<code>` 徽章；`failureMessage()`（`:1219-1224`）只对
+   `AUTH` / `QUOTA` / `ACCOUNT_QUOTA` / `ACCOUNT_SIGNED_OUT` / `ACCOUNT_SIGN_IN_REQUIRED`
+   做特殊文案，其余原样显示消息 ⇒ 用户看到的是「失败 + 文案 + `UNKNOWN`」。
+4. **静默性**：以上三件事**都不会报错**。没有任何日志、没有任何提示，
+   只是「本该发生的自动修复没有发生」。
+
+### 为什么现在不修
+
+- **这是行为变更，不是 bug 修复**：让码活下来之后，官方 `llm-retry` 会开始
+  **真的重试**，而网页桥的一次重发代价是「再驱动一次浏览器、再等网页吐一轮」，
+  **远高于 HTTP 重试**。当前自建的两套重试（`RATE_LIMITED` 站点退避
+  `max(发送间隔,10s)×次数`、`WEB_SESSION_LOST` 整段重建）与官方
+  `localDelay` 的指数+抖动**语义不同**，切换会改变实际等待时长。
+- **码名还没对齐**：`RATE_LIMITED`（本插件）≠ `RATE_LIMIT`（官方默认可重试集）。
+  只修异常类型而不改名，`RATE_LIMITED` 仍不会被重试。两步必须一起设计。
+- **`NEED_LOGIN` / `MODEL_UI_CHANGED` 该映射到哪仍未定**：映射到 `AUTH` 会让 UI 显示
+  「API 密钥无效」，而用户真正要做的是「打开网页登录一次」——**可能比保留自定名更糟**。
+  需要先定「这个码要驱动什么行为」，再决定码名。
+- 本轮任务是**研究并记录**（用户原话是「需要先学习和记录文档」），不是实施。
+
+### 若要修，从哪下手
+
+**顺序不能颠倒**（先删自建重试 = 两条都没有）：
+
+1. **让码活下来**（收益最大、风险最低）。两条路：
+   - 用 `LlmError`：需 `import { LlmError } from '@deepseek-ai/dsh-llm'`，
+     并确认它作为 peer 还是 dependency（官方适配器都是 peer）。
+   - **零新依赖的逃生口**：挂一个**自洽**的 `failure` 快照
+     （`err.failure = {message, code}` **且** `err.code === code`）——
+     已实测可通过 `ownFailureSnapshot` 校验。⚠ 两者不一致仍会退化成 `UNKNOWN`。
+2. **码名对齐官方词汇表**：`RATE_LIMITED` → `RATE_LIMIT`；
+   `empty response from web AI` → `EMPTY_RESPONSE`（官方就是为这个场景定义的码）；
+   `WEB_NO_PROGRESS` 是否改报 `TIMEOUT` 待定（进默认重试集 vs 语义精确性）。
+3. **观察官方 `llm-retry` 是否真的接住**，再决定自建重试删哪一段。
+4. （可选，需单独设计轮）把 `WEB_SESSION_LOST` 的整段重建搬到官方
+   `agent/request-error` 扩展点上。
+
+**验收判据（唯一可证伪的）**：`node scripts/scan-error-codes.mjs` 的
+「本插件错误码存活率」从 **0.0%** 上升。改前改后各跑一次对照。

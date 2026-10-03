@@ -28,6 +28,11 @@
 // 这与本项目的既有分层一致：`metrics.js`、`accounts.js`、`wait-stats.js`、`bench.js`
 // 都是「判据抽成纯函数 + 独立护栏文件」的写法。
 
+// 错误码真源（0.19.54）：本文件返回的「全空回复」错误必须带官方 `EMPTY_RESPONSE` 码，
+// 否则它会像此前一样在 harness 边界退化成 `UNKNOWN` 而**永不被重试**。
+// 见 lib/error-codes.js 文件头与 doc/research/2026-10-02-dsh-official-error-and-repair.md §6。
+import { webcodeError } from './error-codes.js';
+
 /**
  * 本轮收尾分支判定。
  *
@@ -51,8 +56,7 @@
  * @param {{out?: string, thinkAcc?: string, withheld?: number, imageCount?: number}} v 本轮现场
  * @returns {'thinking-only'|'protocol-withheld'|'has-content'} 收尾分支
  */
-export function zeroProgressDecision(v) {
-  const out = String(v?.out ?? '');
+export function zeroProgressDecision(v) {  const out = String(v?.out ?? '');
   const think = String(v?.thinkAcc ?? '');
   const withheld = Number(v?.withheld ?? 0);
   const images = Number(v?.imageCount ?? 0);
@@ -86,6 +90,10 @@ export function zeroProgressDecision(v) {
  * @param {{text?: string, thinking?: string, images?: Array}} result 驱动单轮结果
  * @param {{lastEndReason?: string, rawHead?: string, rawTail?: string}} [scene] 收束现场
  * @returns {Error|null} 全空时返回带现场的 Error；否则 null（思考-only 交回上层处理）
+ *
+ * ⚠ 0.19.54：返回的 Error 带**官方的** `EMPTY_RESPONSE` 码（不再是裸 Error）。
+ * 该码在官方默认可重试集里，且其文档明示「没有产出任何耐久内容，重试安全」
+ * ——正是本判据的语义。消息文本逐字不变（`test/zero-progress-scene.test.mjs` 按文案断言）。
  */
 export function emptyWebResponseError(result, scene = {}) {
   const text = String(result?.text ?? '').trim();
@@ -100,5 +108,5 @@ export function emptyWebResponseError(result, scene = {}) {
   const tail = tailRaw && tailRaw !== String(scene?.rawHead || '').slice(0, 200)
     ? ' | 流尾段: ' + tailRaw
     : '';
-  return new Error('empty response from web AI' + (bits.length ? `（${bits.join('，')}）` : '') + head + tail);
+  return webcodeError('empty response from web AI' + (bits.length ? `（${bits.join('，')}）` : '') + head + tail, 'EMPTY_RESPONSE');
 }

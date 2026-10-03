@@ -177,7 +177,13 @@ test('接线：sendTurn 走 conversationNav 三态，且 unsupported 必须抛�
   const unsupportedAt = src.indexOf("if (nav.state === 'unsupported')");
   assert.ok(unsupportedAt > 0, 'unsupported 必须被显式处理');
   const unsupportedBody = src.slice(unsupportedAt, unsupportedAt + 1200);
-  assert.ok(/err\.code = 'WEB_SESSION_LOST'/.test(unsupportedBody), 'unsupported 必须抛 WEB_SESSION_LOST');
+  // 0.19.54：码改走 `withWebcodeCode`（唯一真源，同时挂 `failure` 快照）。
+  // 裸赋值不带快照 ⇒ 码在 harness 边界变成 `UNKNOWN`，而 `WEB_SESSION_LOST`
+  // 正是上层「作废游标 + 整段重建」的判据（lib/index.js 的 CURSOR_INVALIDATING_CODES）。
+  assert.ok(/withWebcodeCode\(err,\s*'WEB_SESSION_LOST'\)/.test(unsupportedBody),
+    'unsupported 必须经错误码真源抛 WEB_SESSION_LOST');
+  assert.ok(!/err\.code\s*=\s*'WEB_SESSION_LOST'/.test(unsupportedBody),
+    '不得回退成裸赋值（码会被 harness 归一化成 UNKNOWN）');
   // 关键：不得再有「默默开新会话」的老路径
   assert.ok(!/navigate = root\.origin \+ '\/a\/chat\/s\/'/.test(src),
     'DeepSeek 专用地址拼接不得残留在驱动里（已收口到 providers）');
