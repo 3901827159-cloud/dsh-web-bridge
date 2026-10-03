@@ -5,6 +5,31 @@ All notable changes to this package. Newest first.
 The canonical, in-progress record of what was changed and why lives in [doc/progress.md](../../doc/progress.md);
 this file is the package-facing release history.
 
+## 0.19.58
+
+**品牌图标按用户微调稿定稿：黑色 + 旋转 90° + 浅蓝副影 + 白底圆角（修 0.19.57 做错的部分）。**
+
+### 用户要的是什么（原话，逐字）
+
+> 「我让你看："…iconoir_bridge-3d.png"按照我的更改那样改你眼瞎吗？？？？？？改好了！！！
+> 我是经过微调的！{…appicon-forge 配置…}」
+
+0.19.57 拿到了图却自选了蓝青渐变配色、也没做旋转——这次按用户的 appicon-forge 稿逐项还原：
+`iconColor` 黑 `#000000`、`iconRotation` **90°**、`iconShadow` 浅蓝 `#65b3fc`（offset −2,+3）、
+白底圆角 77 + `#D1D1D1` 描边、`iconSize 149` 的占画比。形状仍是 Iconoir `bridge-3d`
+官方逐字几何（Luca Burgio，MIT）。
+
+### 改了什么
+
+- **界面内品牌标记**（左栏行 / 右栏 tab / guide 图标 / 设置页品牌位）：官方几何 +
+  内层 `<g rotate(90 12 12)>`；彩色位 = 黑本体 + 浅蓝副影，线稿位 = `currentColor`
+  **不描影**（与官方图标并排时描影显脏）。
+- **`icon.svg`**（插件管理页）：白底圆角 77 + `#D1D1D1` 描边 + 黑色图标 + 旋转 90° +
+  浅蓝副影，保留 Iconoir 作者与 MIT 声明。
+- **核对**：用包的 playwright 真渲染三版成 PNG，与用户给的图肉眼比对（落点算术吻合）。
+- **护栏升级**：除官方几何外，追加用户定稿的旋转/配色/底板判据（0.19.57 的蓝青渐变
+  不得复活），三条新判据逐条反向验证。
+
 ## 0.19.57
 
 **品牌形象换成 Iconoir `bridge-3d`（用户指定；作者 Luca Burgio，MIT 许可）——三处同一官方几何，逐字路径不自改。**

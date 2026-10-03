@@ -2023,35 +2023,39 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * **dwb 品牌标记**（0.19.39 引入；0.19.56 按 icon.svg 同构重绘；
-     * **0.19.57 换 Iconoir `bridge-3d`** —— 用户指定的插件形象）。
+     * **dwb 品牌标记**（0.19.39 引入；0.19.56 改同构；**0.19.57 换 Iconoir
+     * `bridge-3d`；0.19.58 按用户微调稿定稿** —— 黑色 + 旋转 90° + 浅蓝副影）。
      *
      * 用户原话（0.19.57）：「名称 bridge-3d 作者 Luca Burgio 许可 MIT 集合下，
      * https://github.com/iconoir-icons/iconoir，请你查看本地图片
-     * iconoir_bridge-3d.png 进行使用替换本地全部形象，彩色随官方色调你来绘制，
-     * 主要注意每个需要图标大小/颜色需要参考对应官方图标」。
+     * iconoir_bridge-3d.png 进行使用替换本地全部形象」。
      *
-     * ## 几何：Iconoir `bridge-3d` regular 的**逐字路径**
+     * ⚠ **0.19.58 的教训**：0.19.57 我拿到图却没照图改——自选了蓝青渐变配色，
+     * 而用户的稿子（appicon-forge 微调导出）恰恰是**黑色 + 旋转 90°**。
+     * 品牌形象**以用户微调后的稿子为准**，不是以「我觉得好看」为准。
      *
-     * 官方 SVG（unpkg `iconoir` npm 包 / GitHub 仓库 `icons/regular/bridge-3d.svg`，
-     * 作者 Luca Burgio，MIT）：
-     *   · `M18 4L21 4`            —— 右上短竖线（起点的「上探」）
-     *   · `M10 20C10 20 16.5 17.5 12 12C7.5 6.5 14 4 14 4` —— S 形桥体
-     *   · `M3 20H6`               —— 左下短竖线（终点的「落地」）
-     *   · 两个实心圆点 (14,4) 与 (10,20)（r=1，fill+stroke currentColor）
-     * 本组件**不改一个坐标**——品牌形象必须与官方原样一致，自改等于又造一次
-     * 「绘制错误」。viewBox 24 / stroke-width 1.5 / round 端点也都是官方值。
+     * ## 几何：Iconoir `bridge-3d` regular 的逐字路径 + 整体旋转 90°
      *
-     * ## 颜色与刻度：位置决定形态（用户 0.19.56 立的规则）
+     * 官方 SVG（unpkg `iconoir` npm 包，MIT，作者 Luca Burgio）5 条元素：
+     *   · `M18 4L21 4`   —— 短竖线 · `M3 20H6` —— 短竖线
+     *   · S 形桥体 `M10 20C10 20 16.5 17.5 12 12C7.5 6.5 14 4 14 4`
+     *   · 两个实心圆点 (14,4) 与 (10,20)（r=1）
+     * 路径坐标**一个不改**，整体套 `rotate(90 12 12)` —— 用户稿的
+     * `iconRotation: 90` 就是它。旋转后落点（1024 画布实测）：左上端点
+     * ≈(313,462)、右下端点 ≈(711,562)、两条竖线在各自端点外侧，
+     * 与 iconoir_bridge-3d.png 逐点吻合。
      *
-     *   · 本组件（DwbMark）：**currentColor 线稿**——左栏行、右栏 tab 标题、guide
-     *     图标都在官方图标的颜色体系里（明暗主题/选中态由宿主继承），即「不能
-     *     彩色的地方用正确黑色矢量图」；线稿刻度（fill:none / stroke 1.5 /
-     *     round）与 Iconoir 及官方 panel 行图标同源，并排时光学粗细一致；
-     *   · `DwbMarkColor`（见下）：**彩色版**，只用在设置页顶部品牌位（「能彩色
-     *     的地方」），配色取桥的既有品牌蓝青双色渐变。
+     * ## 颜色按位置分（用户 0.19.56 立的规则，0.19.58 按稿定稿）
      *
-     * 两份必须**逐坐标同构**（只差颜色），改任何一个都要同步另一个。
+     *   · 线稿位 `DwbMark`（左栏行 / 右栏 tab 标题 / guide 图标）：**currentColor
+     *     不描影**。这些位置与官方图标并排，描影会显脏；currentColor 让明暗主题与
+     *     选中态由宿主继承（浅色主题下即用户稿的 `#000000`）。
+     *   · 彩色位 `DwbMarkColor`（设置页品牌位）：**黑色 `#000000` + 浅蓝副影
+     *     `#65b3fc`**——逐字取自用户稿的 `iconColor: #000000ff` 与
+     *     `iconShadow: [[-2,3,1,0,#65b3fcff]]`（offsetX −2 / offsetY +3 /
+     *     blur 1），**不另造配色**。
+     *
+     * 两份共用同一组路径与同一个 `rotate`，只差颜色——漂移在结构上不可能。
      *
      * @param {{size?: number}} props 宿主给的图标呈现（与官方 IconProps 同形）
      */
@@ -2060,44 +2064,44 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * dwb 品牌标记的**彩色**版（0.19.57）：Iconoir `bridge-3d` 几何 + 桥的品牌蓝青。
+     * dwb 品牌标记的**彩色**版（0.19.58）：用户微调稿的定稿实现。
      *
-     * 「彩色随官方色调」的落点：Iconoir 官方是单色图标集（currentColor），没有
-     * 官方彩色变体可抄，因此彩色版沿用本插件 icon.svg 时代已确立的品牌色系
-     * （蓝 `#7CB7FF→#145AF3` / 青 `#45D9E7→#0E9AA8`）——色调是**本项目自己的
-     * 官方色调**，形状是 Iconoir 官方几何。S 形桥体从左下（青，本地侧）流向右上
-     * （蓝，网页侧），两个端点圆点各随所在端，两条短竖线取所在端的浅色。
+     * 与线稿版的唯一差别是**颜色与副影**（形状、路径、旋转、刻度逐项相同）：
+     * 黑色本体 + 浅蓝副影。副影只在彩色位画——线稿位要跟官方图标并排，
+     * 带描影会显脏。`props.size` 由宿主给（设置页 20px），必须读而不是写死。
      *
-     * 渐变 id 带 `dwb-` 前缀：SVG 渐变 id 在**整个文档**里唯一，两张实例若都用
-     * 裸 id 会互相抢（先渲染者的渐变赢，后者的颜色错）。
+     * 描影用**同一组几何内联画两遍**（副影在下、本体在上）而不是
+     * `filter: drop-shadow` 或 `<use href>`：`feDropShadow` 需要独立滤镜通道，
+     * 部分宿主渲染路径上不生效；`<use>` 跨节点引用同文档 id 在 React 重渲染时
+     * 依赖「被引用节点已挂载」的时序。两次调用同一个纯函数是三者里唯一没有
+     * 运行时依赖的。副影坐标按用户稿的 (−2,+3) 与 24 viewBox 等比换算，取
+     * (−0.5, +0.75)。
      *
      * @param {{size?: number, monochrome?: boolean}} props
      */
     function DwbMarkColor(props) {
       const size = Number(props?.size) || 16;
       const mono = props?.monochrome === true;
-      // 官方正刻度：stroke 1.5 / round 端点 / 圆点 r=1 实心。
+      // 官方正刻度：stroke 1.5 / round 端点 / 圆点 r=1 实心（不改）。
       const sw = 1.5;
+      // 官方几何 × 5 条元素 + 整体旋转 90°（用户稿 iconRotation: 90）。
+      // ⚠ 旋转写在**内层 <g>** 上，外层 SVG 的 width/height 不动 —— 写在 svg
+      // 上会让整个盒子跟着转 90°，在 flex 行里把行高撑歪。
+      const art = (c) => h('g', { transform: 'rotate(90 12 12)' },
+        h('path', { d: 'M18 4L21 4', stroke: c, strokeWidth: sw, strokeLinecap: 'round', strokeLinejoin: 'round' }),
+        h('circle', { cx: 10, cy: 20, r: 1, fill: c, stroke: c, strokeLinecap: 'round', strokeLinejoin: 'round' }),
+        h('circle', { cx: 14, cy: 4, r: 1, fill: c, stroke: c, strokeLinecap: 'round', strokeLinejoin: 'round' }),
+        h('path', { d: 'M10 20C10 20 16.5 17.5 12 12C7.5 6.5 14 4 14 4', stroke: c, strokeWidth: sw, strokeLinecap: 'round', strokeLinejoin: 'round' }),
+        h('path', { d: 'M3 20H6', stroke: c, strokeWidth: sw, strokeLinecap: 'round', strokeLinejoin: 'round' }));
       return h('svg', {
         viewBox: '0 0 24 24', width: size, height: size,
         fill: 'none', 'aria-hidden': 'true', focusable: 'false',
       },
-        // 以下 5 条路径全部逐字取自 iconoir `bridge-3d` regular（MIT, Luca Burgio）。
-        // 右上短竖线（网页侧）
-        h('path', { d: 'M18 4L21 4', stroke: mono ? 'currentColor' : '#7CB7FF', strokeWidth: sw, strokeLinecap: 'round', strokeLinejoin: 'round' }),
-        // 终点圆点（左下，本地侧）
-        h('circle', { cx: 10, cy: 20, r: 1, fill: mono ? 'currentColor' : '#45D9E7', stroke: mono ? 'currentColor' : '#45D9E7', strokeLinecap: 'round', strokeLinejoin: 'round' }),
-        // 起点圆点（右上，网页侧）
-        h('circle', { cx: 14, cy: 4, r: 1, fill: mono ? 'currentColor' : '#7CB7FF', stroke: mono ? 'currentColor' : '#7CB7FF', strokeLinecap: 'round', strokeLinejoin: 'round' }),
-        // S 形桥体：本地（左下，青）→ 网页（右上，蓝）
-        h('path', { d: 'M10 20C10 20 16.5 17.5 12 12C7.5 6.5 14 4 14 4', stroke: mono ? 'currentColor' : 'url(#dwb-s)', strokeWidth: sw, strokeLinecap: 'round', strokeLinejoin: 'round' }),
-        // 左下短竖线（本地侧）
-        h('path', { d: 'M3 20H6', stroke: mono ? 'currentColor' : '#45D9E7', strokeWidth: sw, strokeLinecap: 'round', strokeLinejoin: 'round' }),
-        // 渐变只在彩色模式输出；沿桥体走向（右上蓝 → 左下青）
-        !mono ? h('defs', null,
-          h('linearGradient', { id: 'dwb-s', x1: 14, y1: 4, x2: 10, y2: 20, gradientUnits: 'userSpaceOnUse' },
-            h('stop', { stopColor: '#7CB7FF' }),
-            h('stop', { offset: 1, stopColor: '#45D9E7' }))) : null);
+        // 浅蓝副影（用户稿 iconShadow #65b3fc，offset −2,+3）：只在彩色位。
+        // 线稿位与官方图标并排，描影会显脏，因此 mono 下这一层不输出。
+        !mono ? h('g', { opacity: 0.55, transform: 'translate(-0.5 0.75)' }, art('#65b3fc')) : null,
+        // 本体：线稿位 currentColor，彩色位黑色（用户稿 iconColor #000000）。
+        art(mono ? 'currentColor' : '#000000'));
     }
 
     /**
