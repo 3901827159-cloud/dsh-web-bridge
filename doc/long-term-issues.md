@@ -52,6 +52,7 @@
 | 38 | **`NODE_TEST_CONTEXT` 守卫在裸跑形态的残余洞：prompt store 读写通道**（2026-10-02 登记；regression 用例本轮已补隔离）——同族于 #37 的第二条通道；且由此暴露**生产缺陷候选：真实轮重放读回首轮正本会丢后续增量（红线二形状）**，见正文 §38 | 高 | 否 | `lib/index.js`（`readSessionPrompt`、executor 重建分支）、`lib/prompt-store.js`、`test/regression.test.mjs` |
 | 39 | **错误码在 harness 边界全部退化成 `UNKNOWN`**（2026-10-02 登记；**同轮已修，0.19.54**）——本插件给普通 `Error` 挂 `.code`，而官方 `normalizeLlmFailure` 只认 `instanceof HarnessError`；实测 284 份会话里归因本插件的 **137/137** 条 error finishes 全是 `code:"UNKNOWN"`（官方 provider 丢码 0 条）。后果：官方 `llm-retry` 自动重试与 `compaction-basic` 超限自动压缩修复**对本插件从未生效且不报错**；UI 一律显示 `UNKNOWN`。另含 `RATE_LIMITED` ≠ 官方 `RATE_LIMIT` 的码名不符 | 高 | 否 | `lib/error-codes.js`（新增，错误码真源）、`lib/index.js`、`lib/browser-driver.js`、`lib/think-effort.js`、`lib/upstream.js`、`lib/zero-progress.js`、`test/error-codes.test.mjs`、`scripts/scan-error-codes.mjs`、`doc/research/2026-10-02-dsh-official-error-and-repair.md` || 40 | **并发会话的「一组一行」在官方会话清单里做不到**（2026-10-03 登记）——用户要「明显的一行是3个重叠标签页形状一行区分与普通会话」；真会话会各自成行，而官方清单条目是 **shell 私有代码**（`SessionNodeItem`），插件只能**装饰既有行**（4 个槽），不能新增行、不能分组。本轮已在**左栏面板行**上用「三个重叠标签页」图标表达「这是会话组」，清单内部分组未做 | 低 | 否 | `lib/client.cjs`（`ConcurrentPanelIcon`）、`doc/progress.md`（2026-10-03） |
 | 40 | **并发会话的「一组一行」在官方会话清单里做不到**（2026-10-03 登记）——用户要「明显的一行是3个重叠标签页形状一行区分与普通会话」；真会话会各自成行，而官方清单条目是 **shell 私有代码**（`SessionNodeItem`），插件只能**装饰既有行**（4 个槽），不能新增行、不能分组。本轮已在**左栏面板行**上用「三个重叠标签页」图标表达「这是会话组」，清单内部分组未做 | 低 | 否 | `lib/client.cjs`（`ConcurrentPanelIcon`）、`doc/progress.md`（2026-10-03） |
+| 41 | **CI 在 `main` 上长期恒红（2026-09-26 起）**（2026-10-03 登记，**同轮已修**）——每条都是**判据/环境**问题、与产品行为无关：① `site-prompt-transport.test.mjs` 把 profile 建在**被 gitignore 的** `.tmp/` 下，干净 clone 里不存在 ⇒ `ENOENT ...\.tmp\siteprompt-cp-XXXXXX`（④/⑥a/⑥b/session-import 四条一起红）；② `column-fs.test.mjs` 拿**未规范化**的 `columnRootOf()` 去比**已规范化**的写入返回值，在「临时目录带 8.3 短名」的机器（CI `C:\Users\RUNNER~1\…`）必然为假；③ `pre-deliver-window.test.mjs` ①b 用「两轮墙钟之差」量间隔，而 `end-to-start` 基准下该差值恒 = gap − 上一轮稳态收尾（CI 实测 `4302 vs 1514`） | 中 | 否 | `test/site-prompt-transport.test.mjs`、`test/column-fs.test.mjs`、`test/pre-deliver-window.test.mjs`、`doc/progress.md`（2026-10-03） |
 
 > **一览表完整性（2026-09-16 修正；2026-09-26 补上闸门）**：本表此前**漏登记 #19 与 #20**（正文有、表里没有）。
 > 这两条都是可机检的登记错误，而当时没有任何闸门覆盖「正文条目 ↔ 表格条目」的一致性。
@@ -2570,3 +2571,50 @@ function harnessErrorCode(error) {
    能够查看！」存在张力，须由用户拍板，不能替用户决定；
 3. 另一条路是给清单行加装饰（第一行显示「+2」、hover 展开），但它不改变「占三行」这个事实。
 
+
+## 41. **CI 在 `main` 上长期恒红**（2026-09-26 起；2026-10-03 登记，**同轮已修**）
+
+### 现象
+
+`CI / test (windows-latest, node 22|24)` 自 2026-09-26 的 `chore(release): 0.19.27` 之后**每轮都红**，
+且每次失败的是**同一组**用例。最近一次绿是 `36244903186 chore(release): 0.19.27 对外文案英文化`。
+
+### 三条都是**判据/环境**问题，不是产品行为
+
+1. **profile 建在被 gitignore 的目录里**（`site-prompt-transport.test.mjs`）。
+   它把 profile 建在 `package/dsh-webcode-bridge/.tmp/` 下，而 `.tmp/` 在 `.gitignore` 里、
+   **干净 clone 根本不存在** ⇒ `mkdtempSync` 直接
+   `ENOENT: ...\.tmp\siteprompt-cp-XXXXXX`，把 ④ / ⑥a / ⑥b / session-import 四条一起判红。
+   开发机上一直绿，只是因为包目录里恰好堆着历史 `.tmp/**`。
+2. **拿两种规范化程度的路径互比**（`column-fs.test.mjs`）。
+   断言是 `isPathUnder(writeColumnArtifact(...), columnRootOf(...))`：左边是**规范化后**的路径
+   （`canonicalWithMissingTail` 会解析符号链接、把 Windows 的 8.3 短名展开成长名），右边只做词法拼接。
+   CI 的临时目录是 `C:\Users\RUNNER~1\AppData\Local\Temp`（带 8.3 短名）⇒ 必然为假；
+   本机 temp 没有短名 ⇒ 不复现。**这条只在 CI 红、本机永远绿**，最难自己发现。
+3. **量了一个与问题无关的量**（`pre-deliver-window.test.mjs` ①b）。
+   它用「两轮**整轮墙钟**之差」证明「发送间隔真的生效」，但默认基准 `end-to-start` 是从上一轮
+   **生成结束**起算的，而「生成结束 → 本轮提交」之间还夹着驱动的稳态收尾（实测约 1.2s），
+   那段时间先吃掉一部分间隔 ⇒ 墙钟之差 ≈ gap − 1.2s，**且差多少取决于机器**。
+   CI 实测 `4302ms vs 1514ms`（差 2788 < 断言的 3000）。
+
+### 修法（三步各一处，产品代码零改动）
+
+1. 先 `fs.mkdirSync(tmpRoot, { recursive: true })` 建父目录——保留「profile 落在包内 `.tmp`」的原语义，
+   只补上缺的前置条件（**不**改用 `os.tmpdir()`，免得把语义一起改掉）。
+2. 两边都先 `canonicalWithMissingTail()` 再比。`columnRootOf()` 的契约本来就只做词法拼接，产品无需改。
+3. ①b 改用 `send-to-send` 基准 + **两次投递的时刻差**（`driver.calls`）：`send-to-send` 从上一轮
+   **发出**起算（`rememberSend` 就在投递前一刻），所以 `calls[1] − calls[0] ≥ gap` 恒成立、
+   与机器快慢无关；gap=0 时该差值只剩驱动自身耗时。基准语义本身由 `test/send-gap-basis.test.mjs` 钉住。
+
+### 反向验证（三条都做了，证明判据不是空转）
+
+- ① 还原旧写法 + 把 `.tmp` 挪走 ⇒ **3 红**，报错逐字与 CI 日志相同；
+- ② 还原「未规范化比较」+ 把 `TEMP` 指到 8.3 短名目录 ⇒ 精确复现那条红（另用真实短名探针亦复现）；
+- ③ 把 large 轮次的 `gapMs` 改成 0（= 间隔没生效）⇒ ①b **1 红**；
+- 全量：121 个测试文件逐文件 exit 0；三条修好后逐字还原，各自回到绿。
+
+### 为什么值得单列成一条
+
+「假红的闸门比没有闸门更坏」是本仓库写进 `doc/comment-style.md` 的立场，而这次红的是**全量单测**
+这一步——它对任何人都恒红，于是所有人都学会了忽略它。修它不是在「让 CI 变绿」，
+而是**把这一步的信号重新接通**。

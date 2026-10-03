@@ -140,7 +140,14 @@ async function withControlPlane({ config = {}, driver }, fn) {
     get: () => null,
   };
   const { apply } = await import(pathToFileURL(path.join(LIB, 'index.js')).href);
-  const profileDir = fs.mkdtempSync(path.join(pkg, '.tmp', 'siteprompt-cp-'));
+  // `.tmp/` 是 **gitignore** 的，干净 clone 里根本不存在 ⇒ 旧写法 `mkdtempSync(join(pkg,'.tmp',…))`
+  // 在 CI 上直接 `ENOENT`，把本文件四条用例（④ / ⑥a / ⑥b / session-import）一起判红
+  //（实测：还原成旧写法 + 把 `.tmp` 挪走 ⇒ 3 红，报错逐字与 CI 日志相同）。
+  // 本机之所以一直绿：开发目录里恰好有一堆历史 `.tmp/**`。这里先建父目录——
+  // 保留「profile 落在包内 .tmp」这个原有语义（不改用 os.tmpdir()），只补上缺的前置条件。
+  const tmpRoot = path.join(pkg, '.tmp');
+  fs.mkdirSync(tmpRoot, { recursive: true });
+  const profileDir = fs.mkdtempSync(path.join(tmpRoot, 'siteprompt-cp-'));
   fs.writeFileSync(path.join(profileDir, 'webcode-consent.json'), JSON.stringify({ accepted: true }), 'utf8');
   const disposer = apply(ctx, { port: 0, host: '127.0.0.1', requireConsent: false, driver, profileDir, ...config });
   const server = http.createServer((req, res) => {

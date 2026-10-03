@@ -87,9 +87,14 @@ test('围栏：根自身算「在根下」，但兄弟目录与父目录不算',
 test('围栏：文件名过白名单（`../` 与分隔符都进不来）', () => {
   const ws = tmpWorkspace();
   try {
-    // 攻击性文件名：净化后必须仍落在本列目录内，绝不逃逸。
+    // ⚠ 比较的两边必须是**同一种东西**：`writeColumnArtifact()` 返回的是**规范化后**
+    // 的路径（`canonicalWithMissingTail`，会解析符号链接并把 Windows 的 8.3 短名
+    // 展开成长名），而 `columnRootOf()` 只做词法拼接。拿后者直接比前者，在
+    // 「临时目录带 8.3 短名」的机器上必然为假——CI（windows-latest）的
+    // `C:\Users\RUNNER~1\AppData\Local\Temp` 正是这种，本机不是，所以这条只在 CI 红。
+    // 现在两边都先规范化再比。
+    const root = canonicalWithMissingTail(columnRootOf(ws, CTX));
     const w = writeColumnArtifact(ws, CTX, '../../../ESCAPED.md', 'x');
-    const root = columnRootOf(ws, CTX);
     assert.ok(isPathUnder(w, root), '恶意文件名净化后仍必须落在本列目录内');
     assert.ok(!fs.existsSync(path.join(path.resolve(ws), 'ESCAPED.md')), '不得逸出到工作区根');
     // 分隔符与编码形态同样进不来。
