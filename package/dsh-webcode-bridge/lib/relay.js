@@ -3,7 +3,7 @@
 // One HTTP server on 127.0.0.1:
 //   POST /v1/chat/completions, GET /v1/models   OpenAI-compatible front
 //   GET  /bridge/status                         diagnostics (driver + consent)
-//   POST /bridge/consent                        risk-gate opt-in (per session)
+//   POST /bridge/consent                        compatibility no-op (consent is on)
 //   POST /bridge/login                          open the one-time login window
 //   anything else                               delegated to onHttp fallback
 //
@@ -28,7 +28,9 @@ import { estimateTokens } from './metrics.js';
  * 而同一个网页会话只有一个输入框，同一账号并发写入必然互相踩。relay 因此做四件事：
  *   1. **按账号分派**（同账号排队，不同账号真并发），并发数与两次发出之间的最小间隔
  *      由 `maxConcurrentLanes` / `minSendIntervalMs` 控制；
- *   2. 同意闸（`requireConsent`：用户没在设置页授权就不接受任何请求）；
+ *   2. 同意闸（`requireConsent`）。⚠ 0.19.59 起它是**恒开**的：`consent` 是常量 true，
+ *      设置界面里那个开关已按用户要求整框删除（见下方 `let consent` 的演变记录）。
+ *      这段判据仍在（三条控制面闸门读它），但再也不可能为假；
  *   3. 把驱动吐出的增量转发成 SSE 给调用方；
  *   4. 队列超时（`queueTimeoutMs`）与请求超时（`requestTimeoutMs`）各自兜底。
  *
@@ -76,24 +78,33 @@ export function createRelay(options = {}) {
   let httpServer = null;
   let started = false;
   let startError = null;
-  // 0.19.31（用户 2026-09-27：「连接自动化设为默认开启」）：首次运行即为**开**。
-  // 仍是「可关」的：只有显式关过（落盘记录里 `accepted === false`）才回落成关，
-  // 因此下面的 loadConsent 只在记录里**确实写了布尔值**时才覆盖本默认值。
-  // 这条默认只影响「从未做过选择」的机器；已有记录的行为逐字不变。
-  let consent = true;      // default-on; an explicit stored choice still wins
+  // 0.19.59（用户 2026-10-03 指令）：「启用网页自动化」那一框从设置界面里**整卡删除**，
+  // 用户的原话是「都不显示，就是去除那一框，内部都是默认全开启」。因此 consent 从此
+  // 是一个**常量 true**。
+  //
+  // 演变记录（三代，别把这一代读成前两代）：
+  //   · 0.14.x：默认**关**，用户必须在设置里勾一次（一次性的风险门）；
+  //   · 0.19.31：改成默认**开**，但落盘记录里的 `accepted === false` 仍能把它关回去；
+  //   · 0.19.59（本代）：**恒开**。读取落盘的那一整段删掉——界面已无开关，
+  //     若仍读落盘值，一台以前关过的机器会永远静默不工作，而用户在界面上
+  //     找不到任何原因（没有任何开关可点）。那正是用户要避免的状态。
+  //
+  // 仍保留 `consent` 字段与 `setConsent()` 入口，是**兼容**需要：控制面
+  //（web-control 的 `POST consent` 与三处闸门）、OpenAI 前端的 `/bridge/consent`、
+  // 以及 `status().consent` 的既有读者都读它。它们从此恒真——判据仍然成立，
+  // 只是再也不可能为假。
+  let consent = true;
   let lastError = '';
   let metrics = null;
 
-  function loadConsent() {
-    if (!cfg.consentStorePath) return;
-    try {
-      const raw = JSON.parse(fs.readFileSync(cfg.consentStorePath, 'utf8'));
-      // 只有记录里**明确写了布尔值**才覆盖默认开启：文件损坏/字段缺失/旧格式
-      // 都保持默认（旧写法 `raw?.accepted === true` 会把「没写」判成「关」）。
-      if (typeof raw?.accepted === 'boolean') consent = raw.accepted;
-    } catch { /* first run or unreadable store */ }
-  }
-
+  /**
+   * 把「开关恒开」这件事落盘（0.19.59）。
+   *
+   * 不再有 `loadConsent()`：没有读者就没有写的理由——**除了**一件：profile 里可能
+   * 留着旧版本写下的 `{accepted:false}`，那是运维/排障时会读到的一份陈旧事实。
+   * 因此每次 `setConsent()` 都把 true 写回去，让文件与运行态一致，
+   * 而不是留一个「文件说关、实际在跑」的矛盾。
+   */
   function saveConsent() {
     if (!cfg.consentStorePath) return;
     try {
@@ -371,15 +382,23 @@ export function createRelay(options = {}) {
     });
   }
 
-  function setConsent(accepted) {
-    consent = accepted === true;
+  /**
+   * 兼容入口（0.19.59）：开关恒开，因此它只做一件事——把这份事实落盘，
+   * 让外部工具读到的记录与运行态一致。
+   *
+   * 传入的 `accepted` **被刻意忽略**（旧行为是 `consent = accepted === true`）：
+   * 界面已经没有开关，允许 API 把它关掉，等于制造一台「关不掉、也开不回来」的机器。
+   * 调用方仍然拿得到 `consent: true` 的答复（web-control 的 `POST consent` 回的是
+   * `relay.status().consent`，不是它自己收到的那个值）。
+   */
+  function setConsent() {
+    consent = true;
     saveConsent();
-    log('consent set to', consent);
+    log('consent is permanently on (0.19.59); request ignored');
   }
 
   function start() {
     if (started) return status();
-    loadConsent();
     httpServer = new HttpServer((req, res) => {
       // No permissive CORS: the server is loopback-only and consumed by local
       // tools and same-host pages. A wildcard here would let any public
@@ -419,7 +438,9 @@ export function createRelay(options = {}) {
     if (httpServer) { try { httpServer.close(); } catch {} }
     httpServer = null;
     started = false;
-    consent = false;
+    // 0.19.59：`consent = false` 那一行随「恒开」一并删除。旧写法让 `stop()` 之后
+    // 的读数变成「未启用」，而那是**停机状态**，不是用户的开关被关掉——两者
+    // 在界面与排障里是不同的事，混成一个字段只会误导。
     log('stopped');
   }
 

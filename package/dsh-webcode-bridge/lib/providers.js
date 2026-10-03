@@ -184,7 +184,10 @@ const GLM_CONTEXT_WINDOW = 1_000_000;
 export const DEEPSEEK = withEffort(siteModuleFor('deepseek'));
 
 export const GLM = withEffort({
-  id: 'glm', name: '智谱清言 (GLM)', origin: 'https://chatglm.cn',
+  // 站点显示名 = **网站原名**（2026-10-03 用户指令：「全部统一成网站原名」，例：豆包 → Doubao）。
+  // 括号里的译名/厂商名是注解不是名字，一律去掉。**只改展示**：模型 id、分组名
+  // （`providerGroupName` 走 shortKey/覆盖表）、短键、选择器契约都不受影响。
+  id: 'glm', name: 'GLM', origin: 'https://chatglm.cn',
   // sdata.chatglm.cn 是埋点上报域：跨域被拒不影响功能，但会在控制台刷
   // 一片 CORS 错误（真机 52 条）。纳入同源转发后干净且仍能上报。
   staticOrigins: ['https://sdata.chatglm.cn', 'https://at.alicdn.com', 'https://o.alicdn.com', 'https://lf3-data.volccdn.com', 'https://res.wx.qq.com'],
@@ -283,7 +286,7 @@ export const GLM = withEffort({
 });
 
 export const CHATGPT = withEffort({
-  id: 'chatgpt', name: 'ChatGPT 网页版', origin: 'https://chatgpt.com',
+  id: 'chatgpt', name: 'ChatGPT', origin: 'https://chatgpt.com',
   completionPaths: ['/backend-api/conversation'],
   input: '#prompt-textarea, textarea[data-id], textarea',
   attachSelector: "input[type='file']",
@@ -301,7 +304,7 @@ export const CHATGPT = withEffort({
 export const KIMI = withEffort({
   // 2026-09-11 实测：kimi.moonshot.cn 已只剩 302 → https://www.kimi.com/，
   // 镜像按旧域名取页会拿到空跳转壳，右侧栏打不开。改用真实站点。
-  id: 'kimi', name: 'Kimi (月之暗面)', origin: 'https://www.kimi.com',
+  id: 'kimi', name: 'Kimi', origin: 'https://www.kimi.com',
   staticOrigins: ['https://statics.moonshot.cn'],
   // 真实流端点带动态会话 id：/api/chat/{id}/completion/stream（Kimi-Free-API 同构），子串匹配。
   // 2026-09-21 真机 CDP 确证：kimi 网页已从旧 SSE **全面迁移到 Connect-RPC**——
@@ -341,6 +344,15 @@ export const KIMI = withEffort({
   loginProbe: {
     bad: 'button:has-text("登录"), a:has-text("登录"), button:has-text("Sign in"), a:has-text("Sign in")',
   },
+  // 真实昵称/头像（2026-10-03 真机取证，证据
+  // `test-mock/out/account-identity-live-kimi-2026-10-03T17-17-55.json`）：
+  //   · 昵称 `span.user-name` = "TYZ0712"（此前靠通用 `[class*="user-name"]` 恰好命中，
+  //     现在**显式声明**，不再依赖「类名里恰好含 user-name」这个巧合）；
+  //   · 头像 `img.user-avatar`，src 落在 `avatar.moonshot.cn`（score 18，全页最高）。
+  accountProbe: {
+    name: ['span.user-name'],
+    avatar: ['img.user-avatar', 'img[src*="avatar.moonshot.cn"]'],
+  },
   // 模型选择契约 —— 真机 dump（2026-09-13，test-mock/out/model-dropdown-kimi-*.json）：
   //   触发  <div class="model-name"><span class="current-effort">进阶</span></div>
   //   弹层  <button role="menuitemradio" class="model-item[ checked]">
@@ -379,7 +391,7 @@ export const KIMI = withEffort({
 });
 
 export const QWEN = withEffort({
-  id: 'qwen', name: '通义千问 (Qwen)', origin: 'https://chat.qwen.ai',
+  id: 'qwen', name: 'Qwen', origin: 'https://chat.qwen.ai',
   staticOrigins: ['https://g.alicdn.com', 'https://img.alicdn.com', 'https://assets.alicdn.com'],
   // 浏览器端为 OpenAI 兼容 SSE。2026-09-12 真机：流端点已迁到
   // /api/v2/chat/completions（v2 + completions，含 /api/chat 的旧串不再命中），
@@ -406,7 +418,7 @@ export const QWEN = withEffort({
 });
 
 export const DOUBAO = withEffort({
-  id: 'doubao', name: '豆包', origin: 'https://www.doubao.com',
+  id: 'doubao', name: 'Doubao', origin: 'https://www.doubao.com',
   completionPaths: ['/samantha/chat/completion'],
   // 2026-09-13 真机校准：豆包输入框是 tiptap/ProseMirror 的 contenteditable
   // （div.tiptap.ProseMirror），不是 textarea。旧选择器只有 textarea，驱动侧
@@ -419,6 +431,26 @@ export const DOUBAO = withEffort({
   loginProbe: {
     bad: 'button:has-text("登录"), a:has-text("登录"), button:has-text("Sign in"), a:has-text("Sign in")',
     ok: '[class*="avatar"], .user-avatar, img[class*="avatar"]',
+  },
+  // 真实昵称/头像（2026-10-03 真机取证，证据
+  // `test-mock/out/account-identity-live-doubao-2026-10-03T17-17-55.json`）。
+  //
+  // 豆包的用户区在**侧栏左下角**，是一行「36×36 圆头像 + 昵称」：
+  //   · 头像 `<img class="rounded-full object-cover select-none mr-8 h-36 w-36"
+  //           src="https://p26-passport.byteacctimg.com/img/user-avatar/…">`
+  //           —— 落点是**账号头像 CDN**（`passport.byteacctimg.com/img/user-avatar`），
+  //           不是站点自己的素材域，因此这条既能锚定账号头像、又不会误抓站点图标；
+  //   · 昵称是头像**右侧那个兄弟** `<span class="min-w-0 overflow-hidden text-left …">`
+  //     （真机读数里它的文本就是该账号的昵称）。
+  //
+  // ⚠ 两个都**不含**「user / avatar / nickname」任何语义词，所以通用猜测一律读不到
+  //（这正是用户报的「豆包没用上真实账户名」的真因）；必须显式声明。
+  // ⚠ 昵称那条用的是 Tailwind 工具类组合，属于「次优但有真机读数」的选择器——
+  // 若豆包改版后读不到，先重跑 `node test-mock/probe-account-identity-live.mjs doubao`
+  // 取新读数再改，**不要凭印象换一个**（本项目纪律：选择器必须来自真机读数）。
+  accountProbe: {
+    name: ['span.min-w-0.overflow-hidden.text-left'],
+    avatar: ['img[src*="passport.byteacctimg.com/img/user-avatar"]', 'img.rounded-full.object-cover.select-none'],
   },
   // 模式选择契约 —— 真机 dump（2026-09-13，test-mock/out/doubao-mode-*.json）：
   //   豆包的「对话 / 工作」是常驻在输入框附近的**分段控件**（不是弹层）：
@@ -453,7 +485,7 @@ export const DOUBAO = withEffort({
 });
 
 export const GROK = withEffort({
-  id: 'grok', name: 'Grok (xAI)', origin: 'https://grok.com',
+  id: 'grok', name: 'Grok', origin: 'https://grok.com',
   completionPaths: ['/rest/app-chat/conversations/new'],
   input: 'textarea[aria-label], textarea',
   attachSelector: "input[type='file']",
@@ -469,7 +501,7 @@ export const GROK = withEffort({
 });
 
 export const CLAUDE = withEffort({
-  id: 'claude', name: 'Claude (Anthropic)', origin: 'https://claude.ai',
+  id: 'claude', name: 'Claude', origin: 'https://claude.ai',
   completionPaths: ['/api/append_message'],
   input: 'div[contenteditable="true"], textarea',
   attachSelector: "input[type='file']",
@@ -637,7 +669,7 @@ export const ZAI = withEffort({
 
 // Gemini 的 RPC 流不是稳定契约 — 用 DOM 终态抓取兜底（decoder: 'dom'）。
 export const GEMINI = withEffort({
-  id: 'gemini', name: 'Gemini (Google)', origin: 'https://gemini.google.com',
+  id: 'gemini', name: 'Gemini', origin: 'https://gemini.google.com',
   completionPaths: [],
   input: 'div.ql-editor[contenteditable="true"], div.ql-editor, rich-textarea textarea, textarea, div[contenteditable="true"]',
   attachSelector: "input[type='file']",

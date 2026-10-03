@@ -266,7 +266,16 @@ window.__ModuleLoader__.load({
 
     const MODEL_NAMES = { deepseek: 'DeepSeek' };
     // 站点显示名 + 多站点模型目录（打开时从 /__webcode/models 拉取）
-    const SITE_NAMES = { deepseek: 'DeepSeek', glm: '智谱清言', chatgpt: 'ChatGPT', kimi: 'Kimi', qwen: '通义千问', doubao: '豆包', grok: 'Grok', claude: 'Claude', gemini: 'Gemini', zai: 'Z.ai' };
+    //
+    // **值必须逐字等于 `lib/providers.js` 各站点声明的 `name`**（2026-10-03 用户指令：
+    // 「全部统一成网站原名」——例：豆包 → Doubao）。此前这里是中文译名（`豆包` /
+    // `智谱清言` / `通义千问`），而服务端那份带括号注解（`DeepSeek 网页版` /
+    // `智谱清言 (GLM)`），于是**同一个站点在右栏与设置页是两个名字**；用户报的
+    // 「右侧网页界面单个账户（豆包）不显示原来网站名称」正是这一处。
+    //
+    // 这是**展示层**的表：它只决定标签页标题、工具条、目录卡片与设置页 tab 的
+    // 文字。站点 id（`doubao`）、模型 id（`doubao:chat`）、分组名（`z.ai`）一律不动。
+    const SITE_NAMES = { deepseek: 'DeepSeek', glm: 'GLM', chatgpt: 'ChatGPT', kimi: 'Kimi', qwen: 'Qwen', doubao: 'Doubao', grok: 'Grok', claude: 'Claude', gemini: 'Gemini', zai: 'Z.ai' };
     const siteName = sid => SITE_NAMES[sid] || sid;
     /**
      * 毫秒时间戳 → `<input type="datetime-local">` 要的**本地时间**字符串。
@@ -1584,12 +1593,12 @@ window.__ModuleLoader__.load({
                   value: siteId,
                   onChange: e => setSiteId(e.target.value),
                 },
-                  h('option', { value: 'deepseek' }, 'DeepSeek (网页基线)'),
-                  h('option', { value: 'glm' }, '智谱清言 (GLM-4)'),
-                  h('option', { value: 'kimi' }, 'Kimi (Moonshot)'),
-                  h('option', { value: 'qwen' }, '通义千问 (Qwen)'),
-                  h('option', { value: 'doubao' }, '豆包 (Doubao)'),
-                  h('option', { value: 'zai' }, 'Z.ai (海外)'))),
+                  h('option', { value: 'deepseek' }, 'DeepSeek'),
+                  h('option', { value: 'glm' }, 'GLM'),
+                  h('option', { value: 'kimi' }, 'Kimi'),
+                  h('option', { value: 'qwen' }, 'Qwen'),
+                  h('option', { value: 'doubao' }, 'Doubao'),
+                  h('option', { value: 'zai' }, 'Z.ai'))),
               h('label', { className: 'hwb-form-field' },
                 h('span', { className: 'hwb-field-label' }, '所属项目 (Project ID)'),
                 h('input', {
@@ -1815,12 +1824,12 @@ window.__ModuleLoader__.load({
                 value: siteId,
                 onChange: e => { markDirty(); setSiteId(e.target.value); },
               },
-                h('option', { value: 'deepseek' }, 'DeepSeek (网页基线)'),
-                h('option', { value: 'glm' }, '智谱清言 (GLM)'),
-                h('option', { value: 'kimi' }, 'Kimi (Connect-RPC)'),
-                h('option', { value: 'qwen' }, '通义千问 (Qwen)'),
-                h('option', { value: 'doubao' }, '豆包 (Doubao)'),
-                h('option', { value: 'zai' }, 'Z.ai (海外)'))),
+                h('option', { value: 'deepseek' }, 'DeepSeek'),
+                h('option', { value: 'glm' }, 'GLM'),
+                h('option', { value: 'kimi' }, 'Kimi'),
+                h('option', { value: 'qwen' }, 'Qwen'),
+                h('option', { value: 'doubao' }, 'Doubao'),
+                h('option', { value: 'zai' }, 'Z.ai'))),
             h('div', { className: 'hwb-notion-prop-row' },
               h('span', { className: 'hwb-prop-name' }, '项目归属'),
               h('span', { className: 'hwb-chip' }, task.projectId || 'default')),
@@ -2200,6 +2209,18 @@ window.__ModuleLoader__.load({
        * 在同一次挂载内驱动 sites 从空到有，把这个跳变钉死。
        */
       const [picked, setPicked] = React.useState(null);
+      /**
+       * 正在等待二次确认的账户（0.19.59，「删除」按钮）。
+       *
+       * 与 `picked` 一样，这个 hook 必须写在下面那句提前 `return` **之前**——
+       * 写在之后会让「sites 到达」那一次渲染比首屏多一个 hook，真实 React 会硬错误
+       *（"Rendered more hooks than during the previous render"），整块设置栏目
+       * 变成空占位。护栏见 `test/hooks-order.test.mjs`。
+       *
+       * 值是 accountKey（不是 siteId）：一次只确认一个账户，且**必须是正在点的那一行**——
+       * 用 siteId 会让同站点的两个账户共用一份确认态。
+       */
+      const [confirming, setConfirming] = React.useState(null);
       // windows 由服务端按 accountKey 索引（0.14.7）；旧后端按 siteId，
       // 而默认槽的 accountKey 就是 siteId，因此两种形态在默认槽上等价。
       const refreshWins = () => api('window').then(w => setWinSites(w?.windows || {})).catch(() => {});
@@ -2272,6 +2293,45 @@ window.__ModuleLoader__.load({
         else setResult(sid, { ok: true, text: isOpen ? '独立窗口已收起，回到无头运行' : '独立窗口已打开（与桥共用登录态）' });
         setBusySite(null);
         await refreshWins();
+        await onRefresh?.();
+      }
+      /**
+       * 删除该账户的数据（0.19.59，用户 2026-10-03 指令）。
+       *
+       * 用户原话：「每个设置界面的网站分页，每个账户除了『更换账户 检测 导入本机登录态
+       * 独立窗口』外增加一个按钮：『删除』作用是：删除这个账户数据」。
+       *
+       * 为什么是**服务端一条动作**而不是前端拼几个请求：删什么、删到什么程度只有
+       * 服务端说得清（槽目录由 `accounts.slotProfileDir` 决定，会话记录的键形状由
+       * 驱动决定）。面板自己拼，迟早与真正落盘的那一份分叉——本项目记过多次。
+       *
+       * 为什么确认放在**行内**（`confirming` 状态 + 两颗按钮）而不是 `window.confirm`：
+       * 本文件已记明 alert/confirm 是**阻塞式**浏览器模态（弹出期间主线程停住，
+       * 5s 轮询的下一拍与所有在途 fetch 回调都被卡住），而官方 harness 的反馈形态
+       * 一律是页面内联文案。因此第一次点「删除」只把按钮换成「确认删除 / 取消」，
+       * 第二次点「确认删除」才真的删——误点代价从「删掉一个账号」降到「多点一下」。
+       *
+       * 顺序上是**先删数据、再摘槽位**（服务端保证）：数据删不掉时槽位保持原样、
+       * 本行仍在，于是那条失败原因**看得见**；反过来先摘槽位，行会消失，用户就
+       * 再也读不到「为什么没删干净」。
+       */
+      async function removeAccount(s) {
+        setConfirming(null);
+        setBusySite(s.accountKey); setResult(s.accountKey, null);
+        const r = await apiSoft('account-remove', { ...siteSlot(s.accountKey) }, 60000);
+        if (!r.ok) setResult(s.accountKey, { ok: false, text: '删除失败：' + r.error });
+        else {
+          // 被删掉的账户如果正是「本会话选中的那个」，选中态必须一起清掉——
+          // 留着会把「已选中」指向一个已经不存在的槽（下一次连接就报未知账户）。
+          if (picked === s.accountKey) setPicked(null);
+          setResult(s.accountKey, {
+            ok: true,
+            text: r.data?.slotRemoved
+              ? '已删除该账户：槽设置、本机 profile 与会话记录都已清掉'
+              : '已清空该账户的本机数据（默认槽保留，不会从列表里消失）',
+          });
+        }
+        setBusySite(null);
         await onRefresh?.();
       }
       if (!list.length) return h('p', { className: 'hwb-hint' }, '站点状态加载中…（中继未启动时不可用）');
@@ -2375,7 +2435,28 @@ window.__ModuleLoader__.load({
                 disabled: busySite !== null,
                 title: '在独立窗口中打开该站点真实网页（可登录、可聊天，与桥共用登录态）',
                 onClick: () => toggleWindow(s.accountKey),
-              }, '独立窗口'))),
+              }, '独立窗口'),
+              // 「删除」（0.19.59，用户 2026-10-03 指令）：删掉这个账户在本机的
+              // 全部数据。它是**破坏性**动作，因此排在四个常规动作之后（最右侧、
+              // 离手最远），并且要**两次点击**才生效（见 removeAccount 的注释：
+              // 确认走行内两颗按钮，不用阻塞式 window.confirm）。
+              confirming === s.accountKey
+                ? [
+                  h('button', {
+                    key: 'confirm-del', className: 'danger', disabled: busySite !== null,
+                    title: '确认删除该账户在本机的登录态、网页会话记录与身份缓存（不可撤销）',
+                    onClick: () => removeAccount(s),
+                  }, '确认删除'),
+                  h('button', {
+                    key: 'cancel-del', disabled: busySite !== null,
+                    onClick: () => setConfirming(null),
+                  }, '取消'),
+                ]
+                : h('button', {
+                  className: 'danger', disabled: busySite !== null,
+                  title: '删除该账户在本机的登录态、网页会话记录与身份缓存（不可撤销）',
+                  onClick: () => setConfirming(s.accountKey),
+                }, '删除'))),
           results[s.accountKey] && h('p', {
             className: 'hwb-hint indent ' + (results[s.accountKey].ok ? 'ok' : results[s.accountKey].tone === 'idle' ? '' : 'bad'),
             role: 'status',
@@ -3281,7 +3362,9 @@ window.__ModuleLoader__.load({
       const driver = status?.driver;
       const build = status?.build;
       const sites = driver?.sites;
-      const consent = relay?.consent === true;
+      // 0.19.59：`consent`（网页自动化启用态）的本地读取随「连接」整卡删除。
+      // 开关本身已经**恒开**（服务端 relay 恒返回 true，见 lib/relay.js），
+      // 界面不再有任何入口，因此这里也不再需要那份读数。
       const metrics = relay?.metrics;
       const currentModelName = m => models?.find(x => x.id === m)?.name || MODEL_NAMES[m] || m;
       // 「深度思考」三态开关仅对 DeepSeek 站点有意义——判据是**当前看的是哪个站点
@@ -3686,32 +3769,25 @@ window.__ModuleLoader__.load({
               promptTransportNotice && h('span', { className: 'hwb-hint' }, promptTransportNotice))),
           h('p', { className: 'hwb-hint indent' }, '当前生效：' + (attachStatus?.transportLine || '读数加载中…'))),
 
-        !settingsTab && h('div', { className: 'hwb-card' },
-          h('h3', { className: 'hwb-group first' }, '连接'),
-          h('div', { className: 'hwb-row' }, h('span', { className: 'hwb-row-label' }, '网页服务'),
-            h('div', { className: 'hwb-row-main' }, h('span', null, relay?.running ? '中继已连接' : '未启动'))),
-          // 主线落点只读行（0.16.38）：模型配置搬到站点页后，全局页必须仍能回答
-          //「默认会落到哪个站点」。点它直接跳到对应站点 tab。
-          h('div', { className: 'hwb-row' }, h('span', { className: 'hwb-row-label' }, '主线落点'),
-            h('div', { className: 'hwb-row-main' },
-              h('span', { className: 'hwb-hint' }, defaultModel ? defaultModel + ' · ' + currentModelName(defaultModel) : '（未设置）'),
-              (() => {
-                const sid = String(defaultModel || '').split(':')[0];
-                return sid && SITE_NAMES[sid]
-                  ? h('button', { type: 'button', onClick: () => setSettingsTab(sid) }, '去配置 ' + siteName(sid))
-                  : null;
-              })())),
-          h('div', { className: 'hwb-row' },
-            h('label', { className: 'hwb-consent' },
-              h('input', {
-                type: 'checkbox', checked: consent, disabled: pending,
-                onChange: e => action('consent', { accepted: e.target.checked }),
-              }),
-              h('span', null, '启用网页自动化')),
-            h('span', { className: 'hwb-hint' },
-              consent
-                ? (relay?.consentPersistent ? '已启用（本机永久保存）' : '已启用（仅本次运行）')
-                : '未启用'))),
+        // ---- 全局页：「连接」整卡**已删除**（0.19.59，用户 2026-10-03 指令）------
+        //
+        // 用户原话：「设置界面，给『连接 / 网页服务 / 中继已连接 / 主线落点 /
+        // deepseek:deepseek · deepseek/deepseek / 去配置 DeepSeek / 启用网页自动化 /
+        // 已启用（本机永久保存）』都不显示，就是去除那一框，内部都是默认全开启」。
+        //
+        // 因此这一框里三样东西一并消失：
+        //   · 「网页服务：中继已连接」——进程内中继起没起来是**运行读数**，
+        //     不是用户要配的东西；它属于排障面板，不属于设置页；
+        //   · 「主线落点 + 去配置 X」——主线落点仍是 `defaultModel`，而它的配置
+        //     入口本来就在站点页（0.16.38 起模型的配置全在站点页），上面那条
+        //     站点 tab 条就是唯一的跳转入口，这里再放一颗按钮是重复入口；
+        //   · 「启用网页自动化」勾选框——按用户指令改为**恒开**（服务端 `consent`
+        //     恒为 true，且忽略落盘记录里的 `accepted:false`，见 lib/relay.js）。
+        //     界面不再提供关闭入口，因此留一个只有「开」一个状态的勾选框毫无意义。
+        //
+        // ⚠ 这条删除**改变了产品姿态**：网页自动化从「用户可关的风险门」变成
+        //「默认且不可关」。它是用户明确要求的，不是顺手删的；安全姿态记录见
+        // doc/security-review.md 与 doc/settings-copy.md 的对应条目。
 
         !settingsTab && h('div', { className: 'hwb-card' },
           h('h3', { className: 'hwb-group first' }, '速度与等待'),
@@ -4390,18 +4466,38 @@ window.__ModuleLoader__.load({
              * ……其余所有已登录网站的用户名和头像一样触发缓存更新字段」——即卡片上那行
              * 字与左端那颗图都必须是他在站点网页里看到的昵称/头像，而不是站点名 + 矢量图。
              *
-             * 为什么只对**单账号**站点取真实头像/昵称当卡片主身份：一个站点两个账号时，
-             * 卡片只能写下一个名字、画一颗头像，挑谁都是撒谎（另一个账号的用户从此在
-             * 卡片上消失）。此时卡片仍是站点身份，而**每个账号行各自显示自己的真实
-             * 昵称与头像**（见 items 的 acctName/acctIcon），真实值一个都没丢。
+             * ## 多账号站点怎么画（0.19.59，用户 2026-10-03 指令）
              *
-             * 为什么回落是与改动前逐字一致的 `siteName(sid)` + 站点矢量图：没抓到身份时
+             * 旧实现只在**单账号**站点取真实身份当卡片主身份，多账号一律回落成
+             * 「站点名 + 站点矢量图」。用户判定那条规则让展示**在站点之间不同步**：
+             *   > 豆包和kimi——一个账户的那种展示不错，但是deepseek和z.ai两个账户的就不行
+             * 他给的取舍是「第一个按照原来的那样，2/3/4 你自己适配」，于是新规则是：
+             *
+             *   · **第 1 个账户**当卡片主身份（真实昵称 + 真实头像），与单账号站点同一套；
+             *   · 其余账户在头像右下角**叠层**显示（最多 3 颗，超出的折成 `+N`）——
+             *     一个账户都不丢，卡片也不会因为账号多而变形；
+             *   · 每一行的真实昵称/头像仍各自在下拉里（`acctName`/`acctIcon`）。
+             *
+             * 回落仍是与改动前逐字一致的 `siteName(sid)` + 站点矢量图：没抓到身份时
              * （刚重启、缓存为空、该站点本就未登录）必须长得和旧版一样——宁可显示站点名，
              * 也不拿槽名（`deepseek (账户2)`）冒充用户名（本文件「不造假」纪律）。
              */
-            const primary = accounts.length === 1 ? accounts[0] : null;
+            const primary = accounts[0] || null;
+            const others = accounts.slice(1);
             const title = (primary && primary.accountName) || siteName(sid);
             const primaryAvatar = (primary && primary.avatarUrl) || null;
+            // 叠层里最多画几颗。3 是「一眼看得出有几个号、又不把 56px 胶囊撑变形」的
+            // 取中；它只影响**显示**，不参与任何读数或选路。
+            const STACK_MAX = 3;
+            const stacked = others.slice(0, STACK_MAX);
+            const stackRest = others.length - stacked.length;
+            // 昵称优先级：**抓到的真实昵称** → 桥生成的槽名。卡片主身份与叠层
+            // 缩略图的 tooltip 共用它（下拉每一行也走同一个函数，见下面 Menu 的 items）。
+            // ⚠ 必须定义在 `main` **之前**：叠层在构造 `main` 时就会调用它，
+            // 写成 `const acctName = …` 放在后面会命中 TDZ（`Cannot access
+            // 'acctName' before initialization`）——那是「看着没问题、一渲染就白屏」
+            // 的典型形态（本文件记过多次：结构性错误在静态阅读时最难看见）。
+            const acctName = (a) => a.accountName || a.displayName || siteName(sid);
             // 主区：官方 `Button variant:'ghost'`——与「新建终端」同一个原语。
             // 自己写 <button> 会丢掉 ghost 的配色、按下态与焦点环，而「排版一样」
             // 最容易露馅的正是这些细节。
@@ -4409,16 +4505,48 @@ window.__ModuleLoader__.load({
               variant: 'ghost', className: 'hwb-site-main',
               onClick: () => open(sid, ''),
             },
-              h('span', { className: 'hwb-catalog-ico' + (hasBrandVector(sid) ? ' official' : '') },
-                // 真实头像优先；与下拉里的 acctIcon 同一纪律——跨域 CDN 拒热链时
-                // 藏掉 img 露出后面的矢量标记，**不造假**。
-                primaryAvatar
-                  ? h('img', {
-                    className: 'hwb-catalog-img', src: primaryAvatar, alt: '', loading: 'lazy',
-                    onError: (e) => { try { e.currentTarget.style.display = 'none'; } catch { /* 忽略 */ } },
-                  })
-                  : null,
-                h(SiteGlyph, { sid, size: 26 })),
+              // `.hwb-catalog-face` 是**固定 26px 的身份盒**：主头像与站点矢量标记
+              // 在这个盒子里**重叠**（头像绝对定位盖住标记），因此「有头像」与
+              //「回落标记」两种情况占的宽度逐像素相同，标题起始位置不会跳动；
+              // 叠层缩略图挂在它的右下角，不参与排版（绝对定位）。
+              //
+              // 重叠而不是并排：旧实现把 `<img>` 与 `SiteGlyph` 并排放在 flex 行里，
+              // 于是**抓到头像时两个图标同时出现**（头像 + 站点矢量并排），
+              // 而 onError 那条「藏掉 img 露出后面的标记」的承诺在并排布局下不成立
+              //（藏掉头像后标记本来就在旁边，不需要「露出」）。这正是用户报的
+              //「各站点账户图像展示方法不同步」的可见来源之一。
+              h('span', { className: 'hwb-catalog-face' },
+                h('span', { className: 'hwb-catalog-ico' + (hasBrandVector(sid) ? ' official' : '') },
+                  // 真实头像优先；与下拉里的 acctIcon 同一纪律——跨域 CDN 拒热链时
+                  // 藏掉 img 露出下面的矢量标记，**不造假**。
+                  primaryAvatar
+                    ? h('img', {
+                      className: 'hwb-catalog-img', src: primaryAvatar, alt: '', loading: 'lazy',
+                      onError: (e) => { try { e.currentTarget.style.display = 'none'; } catch { /* 忽略 */ } },
+                    })
+                    : null,
+                  h(SiteGlyph, { sid, size: 26 })),
+                others.length
+                  ? h('span', {
+                    className: 'hwb-catalog-stack',
+                    // 叠层是**纯装饰**：账户数与每个账户的身份都有可读落点
+                    //（说明行 + 下拉各行），因此不进可访问树，避免读屏念出一串无名图。
+                    'aria-hidden': 'true',
+                  },
+                    ...stacked.map(a => h('span', {
+                      key: a.accountKey || a.siteId,
+                      className: 'hwb-catalog-stack-item',
+                      title: acctName(a),
+                    }, a.avatarUrl
+                      ? h('img', {
+                        className: 'hwb-catalog-stack-img', src: a.avatarUrl, alt: '', loading: 'lazy',
+                        onError: (e) => { try { e.currentTarget.style.display = 'none'; } catch { /* 忽略 */ } },
+                      })
+                      : h(SiteGlyph, { sid, size: 10 }))),
+                    stackRest > 0
+                      ? h('span', { className: 'hwb-catalog-stack-rest' }, '+' + stackRest)
+                      : null)
+                  : null),
               h('span', { className: 'hwb-site-text' },
                 h('span', { className: 'hwb-site-title' }, title),
                 // 说明行**只在多账号时出现**：官方 `TerminalGuide` 也是
@@ -4441,9 +4569,8 @@ window.__ModuleLoader__.load({
                 onError: (e) => { try { e.currentTarget.style.display = 'none'; } catch { /* 忽略 */ } },
               });
             };
-            // 昵称优先级：**抓到的真实昵称** → 桥生成的槽名。这一行是本轮要求的
-            // 「抓真实值 + 抓不到回落槽名」在界面上的唯一落点。
-            const acctName = (a) => a.accountName || a.displayName || siteName(sid);
+            // 昵称取值已在上面（叠层要先用到它）定义，这里不再重复一份——
+            // 两处各写一份正是本项目记过多次的「口径漂移」形状。
             return h('div', { className: 'hwb-site-card', key: sid },
               main,
               // 右端触发器 + 官方 `Menu`：与 `TerminalGuide` 逐字同构。
@@ -5036,6 +5163,12 @@ window.__ModuleLoader__.load({
         ".hwb-site-name{font-size:13px;line-height:20px;color:var(--dsw-alias-label-primary,inherit);max-width:100%;overflow-wrap:anywhere}",
         ".hwb-row-actions{display:inline-flex;align-items:center;gap:6px;margin-left:auto;flex-wrap:wrap}",
         ".hwb-row-actions button{height:28px;line-height:26px;padding:0 12px;font-size:12px;border-radius:14px}",
+        // 破坏性动作（目前的唯一一处是账户行的「删除」，0.19.59）：只把**文字颜色**
+        // 换成错误态 token，几何与其余四颗按钮逐像素相同——破坏性不该靠「更大更红
+        // 的块」表达（那会抢走正常动作的注意力），而该靠位置（排在最右）+ 二次确认
+        // + 一行 hover 说明共同承担。token 走官方语义名，不自己写色值。
+        ".hwb-row-actions button.danger{color:var(--dsw-alias-state-error-primary,#93443e)}",
+        ".hwb-row-actions button.danger:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover,#8881)}",
         ".hwb-dot{width:8px;height:8px;border-radius:50%;flex:none;display:inline-block;background:var(--dsw-alias-label-tertiary,#9aa0a6)}",
         ".hwb-dot.ok{background:var(--dsw-alias-state-success-primary,#2e7d32)}",
         ".hwb-dot.bad{background:var(--dsw-alias-state-error-primary,#93443e)}",
@@ -5295,10 +5428,24 @@ window.__ModuleLoader__.load({
         // 在**同一列宽**里对齐——两种来源混排时，列宽不齐比图标不精致更显眼。
         ".hwb-acct-img{width:16px;height:16px;border-radius:50%;object-fit:cover;flex:none}",
         ".hwb-acct-glyph{display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;flex:none}",
-        // 卡片左端那颗真实头像（0.19.47）：26px 与 `SiteGlyph` 同尺寸、同圆框，
-        // 于是「真实头像」与「站点矢量标记」在同一个槽位里逐像素重合——抓不到头像
-        // 时回落到矢量图，卡片宽度与标题起始位置不会跳动。
-        ".hwb-catalog-img{width:26px;height:26px;border-radius:50%;object-fit:cover;flex:none}",
+        // 卡片左端的**身份盒**（0.19.59）：主头像与站点矢量标记在同一个 26px 圆槽里
+        // **重合**（头像绝对定位盖住标记），于是「抓到头像」与「回落标记」两种情况
+        // 占宽逐像素相同——卡片宽度与标题起始位置不会因为身份读没读到而跳动。
+        //
+        // 0.19.47 的注释曾声称这个重合已经成立，但当时两者是**并排**放在 flex 行里的
+        //（`<img>` + `SiteGlyph` 各一份），抓到头像时两个图标会同时画出来；注释描述的是
+        // 意图而不是实现（本仓库记过多次的同一形状）。本条的 `position:absolute` 才让
+        // 那句承诺成立，`onError` 藏掉 img 也才真的「露出下面的标记」。
+        ".hwb-catalog-face{position:relative;display:inline-flex;align-items:center;justify-content:center;flex:none;width:26px;height:26px}",
+        ".hwb-catalog-ico{position:relative;width:26px;height:26px}",
+        ".hwb-catalog-img{position:absolute;inset:0;width:26px;height:26px;border-radius:50%;object-fit:cover}",
+        // 其余账户的叠层缩略图（0.19.59）：绝对定位在身份盒右下角，**不参与排版**，
+        // 因此账号多少都不会改变胶囊高度与标题位置。14px 一颗、互相压 5px；
+        // 超出上限的账户折成 `+N` 一颗，账户数一个不丢（说明行仍写着总数）。
+        ".hwb-catalog-stack{position:absolute;right:-3px;bottom:-3px;display:inline-flex;align-items:center}",
+        ".hwb-catalog-stack-item,.hwb-catalog-stack-rest{box-sizing:border-box;width:14px;height:14px;border-radius:50%;overflow:hidden;flex:none;display:inline-flex;align-items:center;justify-content:center;background:var(--dsw-alias-bg-layer-1,#fff);box-shadow:0 0 0 1px var(--dsw-alias-border-l3,#8885);font-size:9px;line-height:1;color:var(--dsw-alias-label-secondary,inherit)}",
+        ".hwb-catalog-stack-item+.hwb-catalog-stack-item,.hwb-catalog-stack-rest{margin-left:-5px}",
+        ".hwb-catalog-stack-img{display:block;width:14px;height:14px;border-radius:50%;object-fit:cover}",
         // `.hwb-site-login`（0.19.0 单账号站的「登录」按钮）随本轮统一成下拉而删除：
         // 它的落点已被下拉底部的「新账号」承担，留着就是没有挂点的死规则。
         // ---- 站点下拉菜单样式：**随 SiteMenu 一起删除**（0.16.35）------------

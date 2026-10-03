@@ -30,7 +30,11 @@
 
 /** DeepSeek 的站点声明（`providers.js` 会经 `withEffort` 摊平思考等级后冻结）。 */
 export const deepseekSite = {
-  id: 'deepseek', name: 'DeepSeek 网页版', origin: 'https://chat.deepseek.com',
+  // 站点显示名 = **网站自己的原名**（2026-10-03 用户指令：「全部统一成网站原名」）。
+  // 它曾被写成「DeepSeek 网页版」——那是「这是一个网页版」的说明，不是站点的名字；
+  // 用户看到的就是这一处（`displayName` 也由它派生，于是账户行会显示
+  // 「DeepSeek 网页版 (账户2)」）。**只改展示，模型 id / 分组名 / 短键一律不动**。
+  id: 'deepseek', name: 'DeepSeek', origin: 'https://chat.deepseek.com',
   // **必须挂在中继根上，不能用自己的子域**（真机 2026-09-13）：DeepSeek 前端
   // 会校验宿主名，`http://deepseek.localhost:8931/` 触发
   // `Unknown hostname: deepseek.localhost`，`#root` 永远 0 个子节点——右栏整页

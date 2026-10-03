@@ -397,6 +397,73 @@ test('POST account-add：「新账号」必须由服务端分配下一个空槽�
   assert.equal(bad.ok, false, '未知站点必须报错');
 });
 
+test('POST account-remove：「删除」必须删数据→再摘槽位，且默认槽只清文件不连坐兄弟槽', async () => {
+  // 用户指令（0.19.59）：「每个设置界面的网站分页，每个账户……增加一个按钮：『删除』
+  // 作用是：删除这个账户数据」。这条把「删什么」钉成可执行的——面板只发 {siteId, slot}，
+  // 路径与键形状全在服务端算。
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'webcode-acct-rm-'));
+  // 账户 2 的槽目录（叶子，整目录可删）
+  const slot2 = path.join(root, 'sites', 'glm', '2');
+  fs.mkdirSync(slot2, { recursive: true });
+  fs.writeFileSync(path.join(slot2, 'webcode-login-state.json'), '{}', 'utf8');
+  // 默认槽目录 + 它的**兄弟槽** #3：默认槽删除绝不允许连坐删掉它
+  const defDir = path.join(root, 'sites', 'glm');
+  const slot3 = path.join(defDir, '3');
+  fs.mkdirSync(slot3, { recursive: true });
+  fs.writeFileSync(path.join(defDir, '3', 'webcode-login-state.json'), '{}', 'utf8');
+  for (const f of ['webcode-login-state.json', 'webcode-account-identity.json', 'webcode-sessions-glm.json']) {
+    fs.writeFileSync(path.join(defDir, f), '{}', 'utf8');
+  }
+  let saved = null;
+  const forgets = [];
+  const control = createWebControl({
+    driver: { status: () => ({}) },
+    relay: {
+      status: () => ({}),
+      config: { accountForget: async (k) => { forgets.push(k); return { ok: true }; } },
+    },
+    config: { profileDir: root }, host: {}, logger,
+    presetInfo: () => null,
+    settingsStore: {
+      get: () => ({
+        accounts: [{ siteId: 'glm', slot: '2', enabled: true }, { siteId: 'glm', slot: '3', enabled: true }],
+        sendGapMsBySlot: { 'glm#2': 5000, glm: 1000 },
+        defaultModelBySite: { glm: 'glm@2:glm-5.3' },
+      }),
+      set: (v) => { saved = v; return v; },
+    },
+  });
+
+  // ── 非默认槽：整目录删 + 摘槽位 + 清两处悬空引用 ──────────────────────
+  const r = await call(control, 'POST', '/__webcode/account-remove', { siteId: 'glm', slot: '2' });
+  const body = JSON.parse(r.text);
+  assert.equal(body.ok, true, '删除必须成功：' + r.text.slice(0, 200));
+  assert.equal(body.slotRemoved, true, '非默认槽必须从设置里摘掉');
+  assert.ok(!fs.existsSync(slot2), '账户 2 的 profile 目录必须被整目录删除');
+  assert.deepEqual(forgets, ['glm#2'],
+    '必须先按 accountKey 关掉**该账号自己**的浏览器（按站点判会牵连另一个账号）');
+  assert.deepEqual(saved.accounts.map((a) => a.slot), ['3'], '只摘被删的那个槽，其它槽原样保留');
+  assert.equal(saved.sendGapMsBySlot['glm#2'], undefined, '槽级发送间隔覆盖必须随账号一起清掉');
+  assert.equal(saved.sendGapMsBySlot.glm, 1000, '别的槽的间隔覆盖不得被牵连');
+  assert.equal(saved.defaultModelBySite.glm, undefined,
+    '指向已删槽的站点默认模型必须清掉——留着会在下一次解析时把账号悄悄复活');
+
+  // ── 默认槽：只清属于它的文件，目录与兄弟槽都不许动 ────────────────────
+  const r2 = await call(control, 'POST', '/__webcode/account-remove', { siteId: 'glm', slot: '' });
+  const b2 = JSON.parse(r2.text);
+  assert.equal(b2.ok, true, '默认槽删除必须成功：' + r2.text.slice(0, 200));
+  assert.equal(b2.slotRemoved, false, '默认槽是隐式存在的，摘不掉槽位，只能清数据');
+  assert.ok(fs.existsSync(defDir), '默认槽目录不得被删除（它可能住着 settings/consent）');
+  assert.ok(fs.existsSync(slot3), '兄弟槽目录绝不能被连坐删除（账户 3 的数据不是这次要删的）');
+  assert.ok(!fs.existsSync(path.join(defDir, 'webcode-login-state.json')), '默认槽登录态缓存必须清掉');
+  assert.ok(!fs.existsSync(path.join(defDir, 'webcode-account-identity.json')), '默认槽身份缓存必须清掉');
+  assert.ok(!fs.existsSync(path.join(defDir, 'webcode-sessions-glm.json')), '默认槽网页会话记录必须清掉');
+
+  // 未知站点必须明确失败：不然「删了一个不存在的站点」会静默成功。
+  const bad = JSON.parse((await call(control, 'POST', '/__webcode/account-remove', { siteId: 'nope' })).text);
+  assert.equal(bad.ok, false, '未知站点必须报错');
+});
+
 test('POST account-identity：读不到驱动时如实失败，绝不返回伪造昵称', async () => {
   // 用户口径是「抓真实值 + 抓不到回落槽名」。这条钉住「抓不到」那半边：
   // 服务端必须说「没有」，而不是编一个名字——界面靠这个 null 回落成槽名。
@@ -409,6 +476,48 @@ test('POST account-identity：读不到驱动时如实失败，绝不返回伪�
   const body = JSON.parse((await call(control, 'POST', '/__webcode/account-identity', { siteId: 'glm' })).text);
   assert.equal(body.ok, false, '没有驱动时必须明确失败');
   assert.equal(body.name, undefined, '失败时不得给出任何名字（伪造昵称比没有昵称更糟）');
+});
+
+test('POST account-identity：debug 取证通道是**opt-in**，常规轮询一行开销都不多花', async () => {
+  // 背景（0.19.60）：为了给「真实昵称/头像」的**选择器**取真机证据，同一次读取多回一份
+  // 页面候选节点。风险有两个，都在这里钉住：
+  //   ① 常规路径（右栏每 8s 一次轮询）**不得**多扫一遍全页 DOM —— 判据是「驱动收到的
+  //      opts 必须是 undefined」+「响应里没有 candidates 字段」；
+  //   ② 候选必须能原样透出来（否则取证通道等于装饰）。
+  const calls = [];
+  const fakeDriver = {
+    readAccountIdentity: async (opts) => {
+      calls.push(opts);
+      return {
+        name: 'RSYHN', avatarUrl: 'https://cdn.example.test/a.png', basis: 'site-probe', capturedAt: null,
+        candidates: {
+          url: 'https://chatglm.cn/', title: '智谱清言', loginHints: [],
+          nameCandidates: [{ selectorHint: 'p.sidebar-user-name', text: 'RSYHN', score: 8 }],
+          avatarCandidates: [{ selectorHint: 'img.avatar', src: 'https://cdn.example.test/a.png', score: 9 }],
+          notes: [],
+        },
+      };
+    },
+  };
+  const control = createWebControl({
+    driver: { status: () => ({}) },
+    relay: { status: () => ({}), config: { siteConnect: () => fakeDriver } },
+    config: {}, host: {}, logger,
+    presetInfo: () => null,
+    settingsStore: { get: () => ({}), set: (v) => v },
+  });
+
+  const plain = JSON.parse((await call(control, 'POST', '/__webcode/account-identity', { siteId: 'glm' })).text);
+  assert.equal(plain.ok, true, '常规读取必须成功：' + JSON.stringify(plain).slice(0, 200));
+  assert.deepEqual(calls[0], undefined, '常规读取不得向驱动传 opts（默认路径一字未改）');
+  assert.equal(plain.candidates, undefined, '常规读取不得回传候选（否则每次轮询都白扫一遍 DOM）');
+  assert.equal(plain.name, 'RSYHN', '常规读取仍必须给真实昵称');
+
+  const dbg = JSON.parse((await call(control, 'POST', '/__webcode/account-identity', { siteId: 'glm', debug: true })).text);
+  assert.deepEqual(calls[1], { debug: true }, 'debug:true 必须原样下发到驱动');
+  assert.equal(dbg.candidates.nameCandidates[0].selectorHint, 'p.sidebar-user-name',
+    '取证通道必须把候选原样透出——否则选择器取证无从下手');
+  assert.equal(dbg.name, 'RSYHN', '取证通道不得丢掉身份读数本身');
 });
 
 test('GET settings：两个站点级字典永远回对象，不回 undefined', async () => {

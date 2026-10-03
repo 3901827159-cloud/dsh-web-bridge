@@ -53,6 +53,8 @@
 | 39 | **错误码在 harness 边界全部退化成 `UNKNOWN`**（2026-10-02 登记；**同轮已修，0.19.54**）——本插件给普通 `Error` 挂 `.code`，而官方 `normalizeLlmFailure` 只认 `instanceof HarnessError`；实测 284 份会话里归因本插件的 **137/137** 条 error finishes 全是 `code:"UNKNOWN"`（官方 provider 丢码 0 条）。后果：官方 `llm-retry` 自动重试与 `compaction-basic` 超限自动压缩修复**对本插件从未生效且不报错**；UI 一律显示 `UNKNOWN`。另含 `RATE_LIMITED` ≠ 官方 `RATE_LIMIT` 的码名不符 | 高 | 否 | `lib/error-codes.js`（新增，错误码真源）、`lib/index.js`、`lib/browser-driver.js`、`lib/think-effort.js`、`lib/upstream.js`、`lib/zero-progress.js`、`test/error-codes.test.mjs`、`scripts/scan-error-codes.mjs`、`doc/research/2026-10-02-dsh-official-error-and-repair.md` || 40 | **并发会话的「一组一行」在官方会话清单里做不到**（2026-10-03 登记）——用户要「明显的一行是3个重叠标签页形状一行区分与普通会话」；真会话会各自成行，而官方清单条目是 **shell 私有代码**（`SessionNodeItem`），插件只能**装饰既有行**（4 个槽），不能新增行、不能分组。本轮已在**左栏面板行**上用「三个重叠标签页」图标表达「这是会话组」，清单内部分组未做 | 低 | 否 | `lib/client.cjs`（`ConcurrentPanelIcon`）、`doc/progress.md`（2026-10-03） |
 | 40 | **并发会话的「一组一行」在官方会话清单里做不到**（2026-10-03 登记）——用户要「明显的一行是3个重叠标签页形状一行区分与普通会话」；真会话会各自成行，而官方清单条目是 **shell 私有代码**（`SessionNodeItem`），插件只能**装饰既有行**（4 个槽），不能新增行、不能分组。本轮已在**左栏面板行**上用「三个重叠标签页」图标表达「这是会话组」，清单内部分组未做 | 低 | 否 | `lib/client.cjs`（`ConcurrentPanelIcon`）、`doc/progress.md`（2026-10-03） |
 | 41 | **CI 在 `main` 上长期恒红（2026-09-26 起）**（2026-10-03 登记，**同轮已修**）——每条都是**判据/环境**问题、与产品行为无关：① `site-prompt-transport.test.mjs` 把 profile 建在**被 gitignore 的** `.tmp/` 下，干净 clone 里不存在 ⇒ `ENOENT ...\.tmp\siteprompt-cp-XXXXXX`（④/⑥a/⑥b/session-import 四条一起红）；② `column-fs.test.mjs` 拿**未规范化**的 `columnRootOf()` 去比**已规范化**的写入返回值，在「临时目录带 8.3 短名」的机器（CI `C:\Users\RUNNER~1\…`）必然为假；③ `pre-deliver-window.test.mjs` ①b 用「两轮墙钟之差」量间隔，而 `end-to-start` 基准下该差值恒 = gap − 上一轮稳态收尾（CI 实测 `4302 vs 1514`）；④ `column-fs.test.mjs` 另一条用例用 `new URL(import.meta.url).pathname.slice(1)` 拼源码路径，在 POSIX 上把 `/home/…` 削成 `home/…`（相对路径）⇒ ubuntu 腿 `ENOENT: open 'home/runner/…'`；⑤ `site-mount.test.mjs` 那条「白名单内 + 存在」的断言用 `path.join(os.homedir(),'.dsh')`，而 CI runner 上**没装 DSH** ⇒ 先撞「目录不存在」（两条腿都红）。修完前三条推上去 CI 又红，才暴露出④⑤——被前三条的噪声盖住了 | 中 | 否 | `test/site-prompt-transport.test.mjs`、`test/column-fs.test.mjs`、`test/pre-deliver-window.test.mjs`、`test/site-mount.test.mjs`、`doc/progress.md`（2026-10-03） |
+| 43 | **deepseek 与 z.ai 的账号昵称在驱动页面上读不到**（2026-10-03 登记，本轮**不修**）——deepseek 昵称候选 **0 条**（账号区不可见；但头像照样读到，因为读取不判可见性）；z.ai 头像候选 `rect.x = -12`（侧栏在视口外，同为折叠态）且是 Svelte 哈希类名。两站**没有昵称节点的真机读数 ⇒ 不声明选择器**；出路见正文（展开侧栏后取证 / 改成以头像为锚的结构感知读取） | 中 | 否 | `lib/providers.js`（`accountProbe`）、`lib/browser-driver.js`（`readAccountIdentity`）、`test-mock/probe-account-identity-live.mjs`、`lib/account-candidates.js` |
+| 42 | **「网页桥接」设置分区的导航图标不可自定义**（2026-10-03 登记）——用户报「仍然是默认齿轮」；真因在**官方壳**里：`settings.section` 的注册契约只有 `id/order/label`（**没有 icon**），导航字形由官方 `dsh-client-ui-settings-general` 的 `navIcon(id)` **硬编码**（只认 `account` / `models` / `agent-presets` / `plugins` / `archived-sessions`，其余一律回落齿轮）。插件侧**结构上无解**，除非改官方包或占用一个 shipped id | 低 | 否 | `lib/client.cjs`（`settings.section` 注册处）、官方 `@deepseek-ai/dsh-client-ui-settings-general/lib/client.js`（`navIcon`）、`doc/progress.md`（2026-10-03） |
 
 > **一览表完整性（2026-09-16 修正；2026-09-26 补上闸门）**：本表此前**漏登记 #19 与 #20**（正文有、表里没有）。
 > 这两条都是可机检的登记错误，而当时没有任何闸门覆盖「正文条目 ↔ 表格条目」的一致性。
@@ -2639,3 +2641,93 @@ function harnessErrorCode(error) {
 「假红的闸门比没有闸门更坏」是本仓库写进 `doc/comment-style.md` 的立场，而这次红的是**全量单测**
 这一步——它对任何人都恒红，于是所有人都学会了忽略它。修它不是在「让 CI 变绿」，
 而是**把这一步的信号重新接通**。
+
+## 42. **「网页桥接」设置分区的导航图标不可自定义**（2026-10-03 登记，本轮**不修**）
+
+### 现象（用户原话）
+
+用户 2026-10-03：「设置界面左侧：『账号与余额 / 通用设置 / 模型 / 内置插件 / Agent 预设 /
+通知 / Jet Hub / 网页桥接 / 壁纸引擎』栏目中，**没有设置好网页桥接的图标，仍然是默认齿轮**」。
+
+### 真因：字形表在官方壳里，且注册契约里没有 icon
+
+取证（本机 app.asar 内 `@deepseek-ai/dsh-client-ui-settings-general/lib/client.js`）：
+
+```
+/** Nav glyph by section id; unknown ids fall back to the settings gear. */
+function navIcon(id) {
+  if (id === "account") ...
+  if (id === "models") ...
+  if (id === "agent-presets") ...
+  if (id === "plugins") ...
+  if (id === "archived-sessions") ...
+  return <IconSettingsOutlineMedium/>;   // ← 其余一律齿轮
+}
+...
+children: [navIcon(row.id), <span>{row.label}</span>]
+```
+
+也就是：导航行的图标**只由 `id` 决定**，而 `id` 是我们注册分区时给的字符串（本插件给的是
+`webcode`）。同时 `settings.section` 的**注册契约**只有三个字段：
+
+| 字段 | 类型 | 必需 |
+| --- | --- | --- |
+| `id` | string | 是 |
+| `order` | number | 否 |
+| `label` | string \| (() => string) | 否 |
+
+（由本机 client Slot 检查器现读：`Slots/listSubTree(root: "settings.section")`。）
+
+因此插件**没有任何合法途径**给这个分区挂图标。注意：**这不是本插件漏做**——
+`general`（通用设置）、`notifications`（通知）、`jet-hub`、`wallpaper-engine` 这些 id
+同样不在那张表里，它们**也**是齿轮。
+
+### 为什么不在本轮「想办法」修
+
+- 改官方包（`app.asar` 里的 `client.js`）会在下一次 DSH 更新后被整体覆盖，
+  且属于修改宿主，不在本插件的产品边界内（本插件只增加路由与界面插槽）；
+- 占用一个 shipped 的 id（如 `plugins`）会**替换**官方那一个分区，代价远大于一个图标；
+- 在客户端半用 DOM/CSS 观察把那一颗齿轮换成 dwb 标记属于**非官方补丁**：
+  它依赖官方壳的类名与渲染时序，DSH 一改版就会静默失效或错位——本仓库对
+  「静默失效」的立场是宁可如实不做。
+
+### 若官方以后支持，从哪下手
+
+1. 先查 `settings.section` 的注册契约是否新增了 `icon`（官方包与 Slot 检查器都能现读）；
+2. 若新增，在 `lib/client.cjs` 的 `settings.section` 注册处补 `icon: DwbMark`
+   （标记组件已存在，就是右栏 guide 与标签标题在用的那一个）；
+3. 补一条 `test/client-render.test.mjs` 断言，把「分区注册带图标」钉住。
+
+## 43. **deepseek 与 z.ai 的账号昵称在驱动页面上读不到**（2026-10-03 登记，本轮**不修**）
+
+### 真机读数（证据文件在 `test-mock/out/`）
+
+同一批活页面取证（`node test-mock/probe-account-identity-live.mjs`）：
+
+| 站点 | 昵称读数 | 昵称候选 | 头像读数 | 头像候选 |
+| --- | --- | --- | --- | --- |
+| deepseek | null | **0 条** | 有（`static.deepseek.com/user-avatar/…`） | **0 条** |
+| zai | null | 1 条（`span.svelte-rfjy4c` = "API"） | 有（`avatars.githubusercontent.com/…`） | 3 条（最优那条 `rect.x = -12`） |
+
+### 两条**不同**的成因（不要合成一条）
+
+- **deepseek**：语义子树里没有任何合格叶子 ⇒ 账号区存在但**不可见/未展开**
+  （`getBoundingClientRect` 为 0 或侧栏折叠）。注意 `readAccountIdentity` 的 `srcOf`
+  **不判可见性**，所以它照样读到了头像 URL —— 这解释了「头像有、昵称没有」的不对称。
+- **z.ai**：侧面证据是**负坐标**（`rect.x = -12`，侧栏在视口外）⇒ 同样是折叠态；
+  且它是 Svelte 生成的哈希类名（`svelte-*`），选择器天然脆。
+
+### 为什么本轮不修
+
+本站纪律是「**没有真机读数不许编选择器**」。这两站此刻**读不到昵称节点本身**
+（不是「读到了但选错」），凭印象补一个 CSS 等于把猜测写进真源。两条可行出路（择一，都要先有读数）：
+
+1. **先让账号区可见**再取证：探针按站点加一个「展开侧栏」的只读前置动作（当前探针严格只读、不点击，
+   所以这条要先改纪律边界并取证「点这一下确实只是展开」）；
+2. **把读取改成结构感知**：以**头像为锚**（头像总是读得到），读它所在那一行的文本作为昵称——
+   这要把 `accountProbe` 从「一串 CSS」升级成「锚 + 取文本策略」，属于契约变更，需要单独的护栏与反例。
+
+### 边界
+
+本条目**只**覆盖 deepseek 与 z.ai。glm（`p.sidebar-user-name`）、kimi（`span.user-name`）、
+doubao（`span.min-w-0.overflow-hidden.text-left`）三站已有真机读数并已声明 `accountProbe`。

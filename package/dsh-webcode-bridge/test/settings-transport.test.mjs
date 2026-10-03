@@ -461,8 +461,11 @@ test('⑧ 附件探针与「最近一次实际投递」不得出现在用户界�
   const client = fs.readFileSync(path.join(LIB, 'client.cjs'), 'utf8');
   const start = client.indexOf("'提示词投递'");
   assert.ok(start > 0, '找不到「提示词投递」卡 —— 本测试的分区锚点失效，先修解析');
-  const end = client.indexOf("'连接'", start);
-  assert.ok(end > start, '找不到「连接」卡（提示词投递卡的下一个锚点），先修解析');
+  // 下一个锚点（0.19.59）：原来是「连接」卡，该卡已按用户要求整块删除，
+  // 因此改用紧跟在投递卡之后的「速度与等待」——锚点必须真的存在，否则本用例的
+  // 分区会静默变成「从投递卡到文件末尾」，那会让下面的反向断言失去意义。
+  const end = client.indexOf("'速度与等待'", start);
+  assert.ok(end > start, '找不到「速度与等待」卡（提示词投递卡的下一个锚点），先修解析');
   const card = client.slice(start, end);
   const visible = card.split('\n').filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
   for (const banned of ['附件探针', '最近一次实际投递', 'runAttachProbe', 'probeBusy', 'probeResult']) {

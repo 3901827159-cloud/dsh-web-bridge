@@ -231,7 +231,7 @@ pre.preset {
         <select id="defaultModel">
           ${models.map((m) => `<option value="${m.id}">${m.name}${m.experimental ? '（实验）' : ''}</option>`).join('\n          ')}
         </select>
-        <div class="hint">新建会话时默认启用的模型。支持 DeepSeek、GLM、Z.ai、豆包、Kimi、通义千问等。</div>
+        <div class="hint">新建会话时默认启用的模型。支持 DeepSeek、GLM、Z.ai、Doubao、Kimi、Qwen 等。</div>
       </div>
       <div class="form-row">
         <label for="thinkMode">深度思考</label>
@@ -259,7 +259,7 @@ pre.preset {
         <div class="hint">汇总各大模型官方训练模板、原生标签/JSON 结构与网页端调用教学规范。</div>
         <div class="native-spec-box">
           <details class="native-spec-card">
-            <summary>智谱清言 (GLM) & Z.ai <span class="native-spec-tag">XML 标签 / JSON 代码块</span></summary>
+            <summary>GLM & Z.ai <span class="native-spec-tag">XML 标签 / JSON 代码块</span></summary>
             <div class="native-spec-desc">
               <b>官方 Chat Template：</b><code>&lt;tool_call&gt;{name}&lt;arg_key&gt;{k}&lt;/arg_key&gt;&lt;arg_value&gt;{v}&lt;/arg_value&gt;&lt;/tool_call&gt;</code><br>
               <b>网页避拦截推荐：</b>使用 <code>\`\`\`json {"mcp_action":"call","name":"...","arguments":{...}} \`\`\`</code> 代码块（避免被网页内置沙箱抢夺）。<br>
@@ -275,7 +275,7 @@ pre.preset {
           </details>
 
           <details class="native-spec-card">
-            <summary>豆包 (Doubao) <span class="native-spec-tag">Doubao-Seed 2.0 / &lt;seed:tool_call&gt;</span></summary>
+            <summary>Doubao <span class="native-spec-tag">Doubao-Seed 2.0 / &lt;seed:tool_call&gt;</span></summary>
             <div class="native-spec-desc">
               <b>官方训练规范：</b><code>&lt;seed:tool_call&gt;{"name":"...","arguments":{...}}&lt;/seed:tool_call&gt;</code> 或标准 <code>&lt;tool_call&gt;</code><br>
               <b>首轮教学提示词：</b>
@@ -288,7 +288,7 @@ pre.preset {
           </details>
 
           <details class="native-spec-card">
-            <summary>月之暗面 (Kimi) <span class="native-spec-tag">Kimi-K2 / Connect-RPC 流式</span></summary>
+            <summary>Kimi <span class="native-spec-tag">Kimi-K2 / Connect-RPC 流式</span></summary>
             <div class="native-spec-desc">
               <b>官方规范：</b><code>&lt;tool_call&gt;\n{"name":"...","arguments":{...}}\n&lt;/tool_call&gt;</code><br>
               <b>网页传输特征：</b>Connect-RPC 二进制流（<code>[flags(1)][len(4BE)][json]</code>），正文与思考分流。<br>
@@ -302,7 +302,7 @@ pre.preset {
           </details>
 
           <details class="native-spec-card">
-            <summary>通义千问 (Qwen) <span class="native-spec-tag">ChatML # Tools / &lt;tool_call&gt;</span></summary>
+            <summary>Qwen <span class="native-spec-tag">ChatML # Tools / &lt;tool_call&gt;</span></summary>
             <div class="native-spec-desc">
               <b>官方 ChatML 规范：</b><code>&lt;|im_start|&gt;assistant&lt;tool_call&gt;...&lt;/tool_call&gt;&lt;|im_end|&gt;</code><br>
               <b>首轮教学提示词：</b>

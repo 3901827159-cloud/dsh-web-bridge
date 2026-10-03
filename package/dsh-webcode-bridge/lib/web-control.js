@@ -17,7 +17,7 @@
 //   • Responses never echo tokens; errors are fixed-text; bodies are bounded.
 
 import { listAllModels, resolveWebModel, SITES, getSite } from './providers.js';
-import { DEFAULT_SLOT, normalizeSlot, formatAccountKey, parseAccountKey, normalizeAccounts } from './accounts.js';
+import { DEFAULT_SLOT, normalizeSlot, formatAccountKey, parseAccountKey, normalizeAccounts, slotProfileDir, parseModelId } from './accounts.js';
 import { buildPromptVariants, buildSitePromptRows } from './prompt-variants.js';
 // 站点提示词文件的**唯一路径来源**（0.16.38）：设置页要「指向本地提示词文件」，
 // 路径就必须与真正落盘/读回用的是同一个函数——前端自己拼路径，迟早与落盘分叉。
@@ -1193,6 +1193,122 @@ export function createWebControl(deps = {}) {
       log(`account-add: ${siteId} → 槽 ${slot}（${accountKey}）`);
       return { ok: true, siteId, slot, accountKey };
     },
+    /**
+     * 「删除」账户（0.19.59，用户 2026-10-03 指令）。
+     *
+     * 用户原话：「每个设置界面的网站分页，每个账户除了『更换账户 检测 导入本机登录态
+     * 独立窗口』外增加一个按钮：『删除』作用是：删除这个账户数据」。
+     *
+     * ## 为什么是服务端一条动作
+     *
+     * 「删什么」只有这里的三处真源说得清：槽目录由 `accounts.slotProfileDir` 决定，
+     * 会话记录的键形状由驱动决定（`sessionId::accountKey`），槽位合法性由
+     * `accounts.normalizeSlot` 决定。面板自己拼路径与键 = 第二套规则 = 迟早分叉
+     *（本项目记过多次）。因此面板只发 `{siteId, slot}`，其余全在这里定。
+     *
+     * ## 顺序：先关浏览器 → 再删数据 → 最后摘槽位
+     *
+     *   · **先关**：Windows 上被浏览器占着的 profile 目录删不干净（EBUSY/EPERM），
+     *     而「删了一半」比「没删」难查得多。关的是**该账号自己**的浏览器上下文
+     *     （`relay.config.accountForget`，由 lib/index.js 接到驱动实例上），
+     *     不是别的账号的；
+     *   · **再删数据**：删失败就**原样返回失败**，槽位设置一个字不动——
+     *     于是失败原因留在面板那一行里，看得见（先摘槽位的话行会消失，
+     *     用户就再也读不到为什么没删干净）；
+     *   · **最后摘槽位**：从 `accounts` 里移掉这一条、并清掉指向它的两处悬空引用
+     *     （槽级发送间隔 `sendGapMsBySlot[accountKey]`、站点默认模型
+     *      `defaultModelBySite[siteId]` 若正指向 `siteId@slot:`）。
+     *
+     * ## 默认槽：只清数据，不摘槽位（刻意的）
+     *
+     * 默认槽**隐式存在**（`slotsForSite` 总会补上它），因此「删除默认账户」= 清空它的
+     * 本机数据。它的目录还**可能是共享的**：deepseek 的默认槽直接挂在 profileDir 根上
+     *（里面还有 settings/consent 与别的站点目录），其余站点的默认槽是
+     * `sites/<siteId>`——而 `sites/<siteId>/<slot>` 这些**兄弟目录里住着该站点的
+     * 账户 2、账户 3**。所以默认槽这一路**绝不 rm -rf 任何目录**，只删属于它的文件；
+     * 非默认槽的目录是叶子（`sites/<siteId>/<slot>`），才整目录删。
+     */
+    'POST account-remove': async (body) => {
+      if (!settingsStore) return { ok: false, error: 'settings store unavailable' };
+      const siteId = String(body?.siteId ?? '').trim();
+      const st = getSite(siteId);
+      if (!st) return { ok: false, error: 'unknown site: ' + siteId };
+      const slot = normalizeSlot(body?.slot);
+      if (!slot) return { ok: false, error: '账号槽槽名非法' };
+      const accountKey = formatAccountKey(siteId, slot);
+      const isDefault = slot === DEFAULT_SLOT;
+      // ── ① 关掉该账号自己的浏览器（窗口/无头上下文），失败不阻断：
+      // 没开过的账号本来就没有东西要关。真删不动时会在下面如实报错。
+      try { await relay?.config?.accountForget?.(accountKey); } catch (e) { warn('accountForget:', e?.message); }
+
+      // ── ② 删数据 ────────────────────────────────────────────────────────
+      const slotDir = slotProfileDir(config.profileDir, siteId, slot, { primary: st.mountAtRelayRoot === true });
+      // 安全闸：只允许在**本插件自己的 profileDir 之内**动手。槽目录由纯函数算出来，
+      // 这里是最后一道「算错了也不至于删到别处」的兜底（与 session-import 同一姿势）。
+      if (!isWithinRoots(slotDir, [config.profileDir].filter(Boolean))) {
+        return { ok: false, error: '拒绝删除：目标目录不在本插件 profile 目录内（' + slotDir + '）' };
+      }
+      const removed = [];
+      try {
+        if (isDefault) {
+          // 默认槽：只删属于这个账号的**文件**，绝不动目录本身（见上方长注释）。
+          //   登录态判定缓存 / 身份缓存（昵称头像）/ 本槽与 DSH 会话的映射。
+          for (const f of [
+            path.join(slotDir, 'webcode-login-state.json'),
+            path.join(slotDir, 'webcode-account-identity.json'),
+            path.join(slotDir, 'webcode-sessions-' + siteId + '.json'),
+          ]) {
+            try { if (fs.existsSync(f)) { fs.rmSync(f, { force: true }); removed.push(f); } } catch (e) {
+              return { ok: false, error: '删除 ' + path.basename(f) + ' 失败：' + String(e?.message || e).slice(0, 160) };
+            }
+          }
+        } else if (fs.existsSync(slotDir)) {
+          fs.rmSync(slotDir, { recursive: true, force: true });
+          removed.push(slotDir);
+        }
+      } catch (e) {
+        return {
+          ok: false,
+          error: '该账号的浏览器 profile 正被占用（独立窗口或后台驱动还开着），删除未完成；'
+            + '请先点「独立窗口」收起、或关掉该站点的窗口再试。原始错误：' + String(e?.message || e).slice(0, 160),
+        };
+      }
+
+      // ── ③ 摘槽位 + 清悬空引用 ──────────────────────────────────────────
+      const current = settingsStore.get() || {};
+      const next = { ...current };
+      if (!isDefault) {
+        next.accounts = normalizeAccounts(current.accounts)
+          .filter((a) => !(a.siteId === siteId && a.slot === slot))
+          .map(({ siteId: s, slot: sl, enabled }) => ({ siteId: s, slot: sl, enabled }));
+      }
+      if (current.sendGapMsBySlot && Object.prototype.hasOwnProperty.call(current.sendGapMsBySlot, accountKey)) {
+        const gaps = { ...current.sendGapMsBySlot };
+        delete gaps[accountKey];
+        next.sendGapMsBySlot = gaps;
+      }
+      if (!isDefault && current.defaultModelBySite && typeof current.defaultModelBySite[siteId] === 'string') {
+        // 站点默认模型可能正指向这个槽（`siteId@slot:model`）。留着它就等于留一行
+        // 指向**已不存在的账号**的模型：下一次解析会去建一份空 profile，把刚删掉的
+        // 账号悄悄复活。因此这里一并清掉（回落成「跟随主线默认模型」）。
+        let parsedModel = null;
+        try { parsedModel = parseModelId(current.defaultModelBySite[siteId]); } catch { parsedModel = null; }
+        if (parsedModel && parsedModel.siteId === siteId && parsedModel.slot === slot) {
+          const bySite = { ...current.defaultModelBySite };
+          delete bySite[siteId];
+          next.defaultModelBySite = bySite;
+        }
+      }
+      settingsStore.set(next);
+      log(`account-remove: ${accountKey}（默认槽=${isDefault}，删除 ${removed.length} 项）`);
+      return {
+        ok: true, siteId, slot, accountKey,
+        // 槽位是否被摘掉：默认槽永远 false（它隐式存在），面板据此给不同的回执文案。
+        slotRemoved: !isDefault,
+        profileRemoved: !isDefault && removed.includes(slotDir),
+        removed,
+      };
+    },
     'GET preset': async () => {
       const info = presetInfo?.() ?? null;
       if (!info) return { ok: true, prompt: null, note: '尚未发送过首轮请求——发送第一条消息后这里显示实际注入的完整提示词模板' };
@@ -1301,11 +1417,24 @@ export function createWebControl(deps = {}) {
     'POST account-identity': async (body) => {
       // 打开账号下拉时的一次轻量刷新：只读 DOM，不导航、不发送。
       // 前端据此把「抓不到就回落槽名」这件事变成可重试的（用户登录完点一下下拉即可）。
+      //
+      // `debug: true`（0.19.60）是**取证通道**：同一次调用额外回传页面上「可能是昵称/
+      // 头像」的候选节点（含可复用选择器提示），供人据此给该站点声明 `accountProbe`。
+      // 为什么不新开一条端点：候选扫描与身份读取读的是**同一个页面、同一个时机**，
+      // 分成两条路由会让两者可以分别演进、口径迟早漂移；而前端从不传 debug，
+      // 正常轮询的行为与开销一字未变。暴露面也不变——本动作整个挂在同一道
+      // `csrfSafe` 门禁之后（回环 Host + 同源/白名单 Origin），回传的只是用户
+      // 自己已登录页面上的可见文本与图片地址，与既有的 name/avatarUrl 同级。
       const accountKey = accountKeyOf(body);
+      const debug = body?.debug === true;
       const drv = relay?.config?.siteConnect?.(accountKey);
       if (!drv || typeof drv.readAccountIdentity !== 'function') return { ok: false, error: 'no driver' };
-      const id = await drv.readAccountIdentity().catch(() => null);
-      return { ok: true, accountKey, name: id?.name ?? null, avatarUrl: id?.avatarUrl ?? null, basis: id?.basis ?? null };
+      const id = await drv.readAccountIdentity(debug ? { debug: true } : undefined).catch(() => null);
+      if (!debug) return { ok: true, accountKey, name: id?.name ?? null, avatarUrl: id?.avatarUrl ?? null, basis: id?.basis ?? null };
+      return {
+        ok: true, accountKey, name: id?.name ?? null, avatarUrl: id?.avatarUrl ?? null, basis: id?.basis ?? null,
+        candidates: id?.candidates ?? null, candidatesError: id?.candidatesError ?? null,
+      };
     },
     // 「导入本机登录态」：把用户真实 Edge profile 的 cookies 采纳进所选站点的桥
     // profile。动机（真机 2026-09-13）：桥 profile 里除 deepseek 外**没有任何站点

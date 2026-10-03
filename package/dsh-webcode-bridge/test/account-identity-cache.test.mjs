@@ -39,6 +39,9 @@ const pkg = dirname(here);
 const { createBrowserDriver } = await import(
   new URL('file://' + join(pkg, 'lib', 'browser-driver.js').replace(/\\/g, '/')).href
 );
+const { ACCOUNT_CANDIDATE_PROBE } = await import(
+  new URL('file://' + join(pkg, 'lib', 'account-candidates.js').replace(/\\/g, '/')).href
+);
 
 /** 缓存文件名（判据的公开面）。 */
 const CACHE = 'webcode-account-identity.json';
@@ -125,5 +128,40 @@ test('⑤ 落盘写入路径存在且受 0o600 约束（与登录态缓存同一
   assert.match(drvSrc, /writeIdentityCache\(cfg\.profileDir/, '读到身份后必须落盘（真源）');
   assert.ok(!/webcode-account-identity\.json/.test(drvSrc),
     '驱动里不得再出现缓存文件名——出现即意味着第二份口径（会漂移）');
+});
+
+test('⑥ debug 取证：没有活页时**不得凭空造候选**（候选只能在页面上扫出来）', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ident-dbg-'));
+  writeFileSync(join(dir, CACHE), JSON.stringify({ name: 'RSYHN', basis: 'site-probe' }), 'utf8');
+  const id = await driver(dir).readAccountIdentity({ debug: true });
+  assert.equal(id.name, 'RSYHN', 'debug 不得影响身份读数本身（仍要读回落盘缓存）');
+  assert.equal(id.candidates, undefined,
+    '没有活页 ⇒ 没有页面可扫 ⇒ 不许回传候选。凭空造候选会让「取证」变成编选择器');
+});
+
+test('⑦ 页面侧扫描只有一处定义：模块自包含 + 两个消费者都只引用它', () => {
+  // ① 自包含（`page.evaluate` 会把它序列化后单独执行；引用模块作用域会 ReferenceError，
+  //    而 Node 侧单测全绿——这条教训写在 wiki/glossary.md 的「页面侧函数」条）。
+  const src = ACCOUNT_CANDIDATE_PROBE.toString();
+  assert.ok(!/\brequire\s*\(/.test(src), '页面侧函数不得 require');
+  assert.ok(!/\bimport\b/.test(src), '页面侧函数不得 import');
+  // 能脱离模块求值 = 「不引用模块作用域」的可执行证明。
+  const rebuilt = new Function('return (' + src + ')')();
+  assert.equal(typeof rebuilt, 'function', 'ACCOUNT_CANDIDATE_PROBE 必须能独立求值（自包含）');
+  assert.ok(src.includes('document.querySelectorAll'), '它必须真的去扫页面 DOM');
+
+  // ② 驱动侧只在 debug 分支调用它，且调用发生在 debug 判据**之后**。
+  const drvSrc = readFileSync(join(pkg, 'lib', 'browser-driver.js'), 'utf8');
+  const dbgAt = drvSrc.indexOf('opts?.debug === true');
+  const callAt = drvSrc.indexOf('evaluate(ACCOUNT_CANDIDATE_PROBE)');
+  assert.ok(dbgAt >= 0, '驱动必须用 `opts?.debug === true` 做开关');
+  assert.ok(callAt > dbgAt, '候选扫描必须挂在 debug 判据之后（否则每次轮询都白扫一遍 DOM）');
+
+  // ③ 离线探针**不得**再内联第二份扫描实现（两处各写一遍必然漂移）。
+  const probeSrc = readFileSync(join(pkg, 'test-mock', 'probe-account-identity.mjs'), 'utf8');
+  assert.match(probeSrc, /const READ = ACCOUNT_CANDIDATE_PROBE/,
+    '探针必须引用 lib/account-candidates.js 的那一份，而不是自己再写一份');
+  assert.ok(!probeSrc.includes('document.querySelectorAll'),
+    '探针里不得再出现内联的 DOM 扫描（第二份口径会漂移）');
 });
 

@@ -5,6 +5,130 @@ All notable changes to this package. Newest first.
 The canonical, in-progress record of what was changed and why lives in [doc/progress.md](../../doc/progress.md);
 this file is the package-facing release history.
 
+## 0.19.60
+
+**站点显示名统一为网站原名 + 账户身份取证的活页面通道。**
+
+### 用户报了什么（原话，逐字）
+
+> 「你好，请你查看本插件：
+> 现在设置界面：各个站点，不同账户没能使用已抓取真实账户头像和账户名
+> 2.右侧网页界面，单个账户时候：例如豆包，居然不是显示原来网站名称？」
+
+### ① 站点显示名 = 网站原名（右栏与设置页从此同一个名字）
+
+站点显示名此前**有两份口径**且互不相同：服务端 `providers.js` 的 `name`
+（`DeepSeek 网页版` / `智谱清言 (GLM)` / `通义千问 (Qwen)` / `豆包`）与客户端 `client.cjs`
+的 `SITE_NAMES`（`DeepSeek` / `智谱清言` / `通义千问` / `豆包`）。于是同一个站点在右栏标签页
+标题、工具条、目录卡片与设置页 tab 上是**两个名字**——这正是用户看到的「豆包不显示原来网站名称」。
+
+现在十站统一为**网站自己的名字**：`DeepSeek / GLM / ChatGPT / Kimi / Qwen / Doubao / Grok /
+Claude / Gemini / Z.ai`（去掉「网页版」「(GLM)」「(月之暗面)」这类注解后缀）。
+范围含 `lib/providers.js`、`lib/sites/deepseek.js`、`lib/client.cjs`、`lib/settings-page.js`
+与客户端两处任务表单下拉。**只改展示**：站点 id、模型 id、`shortKey` 与分组键
+（`glm → chatglm`、`zai → z.ai`）一个字都没动。
+
+**新护栏**：`test/provider-surface.test.mjs` 判据 7 同时钉「服务端 `name` 等于网站原名」
+与「客户端 `SITE_NAMES` 与服务端 `name` 逐字一致」——两份口径各写一遍时，任何只渲染一侧的
+单测都不会红，这一条专门补上那个盲区。
+
+### ② 账户真实昵称/头像：造出**活页面取证通道**（选择器待真机读数再声明）
+
+真机 `/status` 读数（2026-10-03）：12 个槽里只有 **glm**（唯一声明了 `accountProbe` 的站点）
+与 **kimi** 有真实昵称；deepseek / doubao / zai 的 `accountName` 为空 ⇒ 界面必然回落成
+「站点名 + 站点矢量图」。接线本身是通的，断的是**抓**这一步。
+
+本版新增取证能力（**默认路径零开销**）：
+- `lib/account-candidates.js`（新模块）：页面侧候选扫描的**唯一**实现（昵称候选 / 头像候选 /
+  登录态线索 + 可复用选择器提示 + 语义分数），桥的活页面与离线探针共用同一份；
+- `browser-driver.readAccountIdentity({ debug: true })`：仅在显式 debug 时多扫一遍页面，
+  常规轮询（右栏每 8s 一次）行为与开销一字未变；
+- `POST /__webcode/account-identity { siteId, slot, debug: true }`：把候选原样透出。
+  ⚠ 候选是**取证读数**，不是最终选择器——本项目纪律是选择器必须来自真机读数。
+
+**重启后的真机取证结果**（新增 `test-mock/probe-account-identity-live.mjs`，6 个已登录槽串行取证）：
+据此给 **Doubao**（昵称 = 头像右侧那行 + 账号头像 CDN）与 **Kimi**（`span.user-name` /
+`img.user-avatar`）声明了 `accountProbe`，GLM 复核通过。**DeepSeek 与 Z.ai 刻意不声明**——
+真机读数里 deepseek 的昵称候选 **0 条**（账号区不可见；头像照样读得到，因为读取不判可见性）、
+z.ai 的最优头像候选 `rect.x = -12`（侧栏在视口外）且是 Svelte 哈希类名：两站**读不到昵称节点本身**，
+凭印象补 CSS 等于把猜测写进真源，已登记为长期问题 **#43**（含两条出路）。
+
+### ③ 离线探针不再静默半拷贝
+
+新增 `test-mock/probe-account-identity.mjs`（在 profile **副本**上取证）。真机踩到并已堵住的坑：
+运行中的浏览器**独占** `<profile>/Default/Network/Cookies`，`copyFileSync` 抛 EBUSY 后被
+`copyProfile` 的 catch 咽掉 ⇒ 副本**没有登录态**，页面渲染成游客态，而读数看起来「完全正常」。
+现在显式核对「源有 cookie 库而副本没有」⇒ 硬失败并指出两条出路（关掉浏览器再跑 / 改用活页面通道）。
+
+### ④ 发布工具 `scripts/install-profiles.mjs` 两个真 bug
+
+装箱时踩到并修掉：`--profiles <名字>` 的取值被当成显式 tarball 路径（⇒ 直接报「找不到
+tarball」）；以及只传一个不在默认名单里的 profile 时，筛选结果是空数组、一个都没装却照样
+打印「✔ 已装入」并退 0。修后 `desktop`（GUI 实际运行的 profile）也装到 0.19.60。
+
+### 验证
+
+受影响护栏全绿：`provider-surface` 7/7、`account-identity-cache` 9/9、`client-render`、
+`control-routes`、`settings-transport`、`client-server-contract`、`accounts`、
+`accounts-integration`、`model-labels`、`hooks-order`；反向变异两条均已确认精确变红。
+闸门 `gen-index --check` / `lint-comments` / `check-ledger` / `check-repo-hygiene` /
+`check-plugin-contract` / `check-long-term-issues` 全部 PASS。
+
+**已知边界（如实记）**：本机受限模式下 Chromium 起不来（Mojo 命名管道被拦），因此探针的
+真机读数依赖不受限的终端；而**运行中的 profile 一律拿不到登录态副本**，与长期问题 #32 同族——
+活页面通道是本机唯一可靠的取证路径。
+
+## 0.19.59
+
+**设置界面四改 + 会话纪律写进 AGENTS.md（含一处产品姿态变化：网页自动化改为恒开、不可关）。**
+
+### 用户要的是什么（原话，逐字）
+
+> 「1.本插件记录到agents.md中：每次会话结束都需要记录用户原话，每次会话开始都需要提问让用户选择
+> 正确意图才开始操作，确保没有理解错误
+> 2.设置界面左侧：『账号与余额 / 通用设置 / 模型 / 内置插件 / Agent 预设 / 通知 / Jet Hub /
+> 网页桥接 / 壁纸引擎』栏目中，没有设置好网页桥接的图标，仍然是默认齿轮
+> 3.同步右侧面板中各个网站的账户图像展示方法没有同步：豆包和kimi--一个账户的那种展示不错，但是
+> deepseek和z..ai两个账户的就不行？展示，可以以第一个按照原来的那样，，234你自己想怎样适配
+> 4.设置界面，给『连接 / 网页服务 / 中继已连接 / 主线落点 / deepseek:deepseek · deepseek/deepseek /
+> 去配置 DeepSeek / 启用网页自动化 / 已启用（本机永久保存）』都不显示，就是去除那一框，内部都是
+> 默认全开启
+> 5.请你给每个设置界面的网站分页，每个账户除了『更换账户 检测 导入本机登录态 独立窗口』外增加
+> 一个按钮：『删除』作用是：删除这个账户数据
+> 提问确保理解再开始」
+
+本轮按新规矩执行：**先读代码、再提问确认意图、用户选定后才动手**。
+
+### 改了什么
+
+- **① 会话纪律**（`AGENTS.md` 新增 §0）：会话开始先提问确认意图；会话结束跑
+  `node scripts/user-voice-log.mjs` 重新生成 `doc/user-voice-log.md`（该文件是脚本生成）。
+- **② 「网页桥接」导航图标**：**不修**。取证结论——`settings.section` 的注册契约只有
+  `id/order/label`（没有 `icon`），导航字形由官方壳 `dsh-client-ui-settings-general` 的
+  `navIcon(id)` 硬编码，未知 id 一律回落齿轮。插件侧结构上做不到，已登记
+  `doc/long-term-issues.md` #42（不 hack 官方包、不占用 shipped id）。
+- **③ 右栏站点卡片的账户图像**：多账户站点改为「**第 1 个账户当主身份**（真实昵称 + 真实头像）
+  + 其余账户在头像右下角**叠层**（最多 3 颗，超出折成 `+N`）」；单账户站点行为不变。
+  顺带修掉一个真缺陷：旧实现把头像与站点矢量标记**并排**画（抓到头像时两个图标同时出现），
+  现在头像绝对定位**盖住**标记，`onError` 才真的「露出下面的标记」。
+- **④ 删掉设置页「连接」整卡**：网页服务读数 / 主线落点 + 去配置 X / 启用网页自动化勾选框
+  一并消失。授权改为**恒开**（`relay.js`: `consent` 是常量 true，不再读落盘
+  `accepted:false`，`setConsent(false)` 也关不掉）——**这是一处产品姿态变化**：
+  用户不再有「一键停用网页自动化」的把手，要停只能停插件或退出进程。
+- **⑤ 每个账户行新增「删除」**：服务端 `POST account-remove` 一条动作——先关该账号自己的
+  浏览器（`accountForget` → 驱动 `close()`，非默认槽从 `drivers` 摘掉）→ 删数据 →
+  摘槽位并清掉两处悬空引用（`sendGapMsBySlot[accountKey]`、正指向该槽的
+  `defaultModelBySite[siteId]`）。**默认槽只清文件、绝不 rm -rf 目录**（deepseek 的默认槽
+  就是 profileDir 根，其余站点的默认槽目录里还住着账户 2/3）。界面为两步点击确认
+  （不用阻塞式 `window.confirm`）。
+
+### 验证
+
+- 全量 **121 个测试文件逐文件 exit 0**；受影响面 `control-routes` 18/18（新增 account-remove
+  用例）、`client-render` 67/67（新增 2 条 0.19.59 用例 + 「连接卡」三条改反向）、
+  `settings-transport` 9/9（分区锚点改到「速度与等待」）、`hooks-order` 2/2、`run-m1` PASS。
+- 台账 / 注释 / 卫生三闸门 PASS。
+
 ## 0.19.58
 
 **品牌图标按用户微调稿定稿：黑色 + 旋转 90° + 浅蓝副影 + 白底圆角（修 0.19.57 做错的部分）。**

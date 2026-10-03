@@ -159,16 +159,30 @@ token 由 `getToken()` 取得，`mirror.js:630-631`，注入调用 `mirror.js:64
 
 | 文件 | 位置（代码） | 写入方式与权限 |
 | --- | --- | --- |
-| `webcode-consent.json` | 路径 `relay.js:35`；读写 `relay.js:48-66` | 原子写（tmp + rename），`{ mode: 0o600 }`，`relay.js:62-64` |
+| `webcode-consent.json` | 路径 `relay.js`（`consentStorePath`） | 原子写（tmp + rename），`{ mode: 0o600 }`。⚠ 0.19.59 起**只写不读**：`consent` 恒为 true（见下） |
 | `webcode-settings.json` | 路径 `index.js:366`；写入 `index.js:395-400` | 原子写，`{ mode: 0o600 }`，`index.js:398` |
 | `webcode-send-state.json` | 路径 `index.js:1037`；写入 `index.js:1055-1063` | 原子写，`{ mode: 0o600 }`，`index.js:1060` |
 | `webcode-login-state.json` | 路径 `browser-driver.js:241`；写入 `browser-driver.js:245-251` | `fs.writeFileSync(loginStatePath(), JSON.stringify(entry))`，`browser-driver.js:249`，**未指定 mode**（见第 6 节） |
 | `webcode-sessions-<siteId>.json` | 路径 `browser-driver.js:313`；写入 `browser-driver.js:325-330` | `browser-driver.js:328`，**未指定 mode**（见第 6 节） |
 | 持久 Edge profile 本身 | `index.js:54` 的 `profileDir`；启动 `browser-driver.js:660` | 由 Edge 自己管理，里面是**真实 cookie / 登录态** |
-| 中继 control 状态（内存） | `relay.js:43-46` | 仅内存，`stop()` 时 `consent = false`（`relay.js:298`） |
+| 中继 control 状态（内存） | `relay.js`（`status()`） | 仅内存。0.19.59 起 `consent` **恒为 true**，`stop()` 不再把它翻成 false |
 
-`webcode-consent.json` 的原子写动机写在 `relay.js:60-61`：避免进程退出留下被截断的
-consent 文件、把「已同意」静默变回「首次运行」。
+`webcode-consent.json` 的原子写动机：避免进程退出留下被截断的 consent 文件、
+把「已同意」静默变回「首次运行」。
+
+**⚠ 0.19.59 的姿态变化（授权不再可关）**——用户 2026-10-03 明令删除设置页那一框
+（原话：「……启用网页自动化 / 已启用（本机永久保存）……都不显示，就是去除那一框，
+内部都是默认全开启」）。因此：
+
+- `relay.js` 的 `consent` 是**常量 true**，`loadConsent()` 整段删除（落盘里的
+  `accepted:false` **不再有任何读者**，一台以前关过的机器现在同样恒开）；
+- 三条控制面闸门（`POST interact` / `POST attach-probe` / 另一处）与
+  `requireConsent` 判据仍在，但**再也不可能为假**；
+- `POST /bridge/consent` 与 `POST /__webcode/consent` 保留为兼容入口，
+  传 `false` 不再能关掉自动化（`setConsent()` 只写 `accepted:true`）；
+- 残余风险：**用户失去了「一键停用网页自动化」这个把手**。要停只能停插件
+  （`dsh plugin ... remove` / 禁用）或退出进程。这是产品决策，不是遗漏——
+  评审时若认为不可接受，应恢复一个非设置页的开关，而不是把这一条读成 bug。
 
 `webcode-send-state.json` 只存「站点 id → 上次发出时刻」（`index.js:1031-1037`），
 读取时还会过滤未知站点与超过 24h 的陈旧基准（`index.js:1040-1053`），不含凭据。

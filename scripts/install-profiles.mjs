@@ -144,9 +144,13 @@ function verify(target) {
 }
 
 function main(argv) {
-  const explicit = argv.find((a) => !a.startsWith('--'));
   const onlyIdx = argv.indexOf('--profiles');
   const only = onlyIdx >= 0 ? String(argv[onlyIdx + 1] || '').split(',').filter(Boolean) : null;
+  // ⚠ 取「显式 tarball」时必须**排掉 `--profiles` 的取值**（2026-10-04 修）：
+  // `node scripts/install-profiles.mjs --profiles desktop` 里 `desktop` 不是路径，
+  // 而旧写法 `!a.startsWith('--')` 会把它当成显式 tarball ⇒ `resolve('desktop')`
+  // 不存在 ⇒ 直接报「找不到 tarball」。症状是「想只装一个 profile，却连装都没开始」。
+  const explicit = argv.find((a, i) => !a.startsWith('--') && !(onlyIdx >= 0 && i === onlyIdx + 1));
 
   const tarball = explicit ? path.resolve(explicit) : newestTarball();
   if (!tarball || !fs.existsSync(tarball)) {
@@ -158,7 +162,11 @@ function main(argv) {
 
   const profilesRoot = path.join(dshHome(), 'profiles');
   let names = ['web', 'headless'];
-  if (only) names = names.filter((n) => only.includes(n));
+  // ⚠ 旧写法是 `names.filter((n) => only.includes(n))`（2026-10-04 修）：只传
+  // `--profiles desktop` 时过滤结果是**空数组**，循环一次都不跑，却照样打印
+  // 「✔ 已装入」并退 0 —— 「说做了、其实没做」，正是本仓库最忌讳的静默 no-op。
+  // 现在按调用方给的名单走（`desktop` 也是合法 profile：GUI 跑的就是它）。
+  if (only && only.length) names = only;
 
   let failed = 0;
   const results = [];

@@ -206,8 +206,13 @@ try {
   const st0 = await callRoute('/__webcode/status', mockReq('GET'), mockRes());
   ok('status: consent default-on with no stored record', JSON.parse(st0.body()).relay.consent === true);
 
-  // 显式关过就必须仍然关：默认值只在「从未做过选择」时生效。
-  // 注意：落盘记录是在 `start()` 里读的（`loadConsent()`），所以必须先 start。
+  // 0.19.59（用户 2026-10-03：「启用网页自动化……都不显示，就是去除那一框，内部都是
+  // 默认全开启」）：开关已**恒开**——落盘记录里的 `accepted:false` 不再能把它关掉。
+  //
+  // 旧断言（"explicit stored false still wins over default-on"）钉的是 0.19.31 的行为，
+  // 而那正是用户这一轮明确去掉的东西，因此判据跟着产品决策改：一台以前关过的机器
+  // 现在同样恒开。注意这不是「放宽」——下面同时钉住**兼容入口也关不掉**，
+  // 否则一个 API 调用就能造出「界面上没有开关、实际却被关掉」的机器。
   {
     const { default: fsMod } = await import('node:fs');
     fsMod.writeFileSync(join(consentDir, 'webcode-consent.json'), JSON.stringify({ accepted: false }), 'utf8');
@@ -216,7 +221,9 @@ try {
       port: 0, host: '127.0.0.1', requireConsent: true, driver, profileDir: consentDir,
     });
     r2.start();
-    ok('explicit stored false still wins over default-on', r2.status().consent === false);
+    ok('stored false is ignored: consent is permanently on', r2.status().consent === true);
+    r2.setConsent(false);
+    ok('setConsent(false) can no longer turn automation off', r2.status().consent === true);
     r2.stop();
   }
 

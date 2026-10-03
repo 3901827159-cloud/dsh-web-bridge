@@ -625,8 +625,14 @@ test('★ 0.16.38 设置页作用域：全局页与站点页各只有自己那�
   assert.ok(!gt.includes('的模型'), '全局页不该有站点模型卡');
   // 0.19.x：「正在运行（子代理 / Team）」卡已按用户要求删除，故不在 keep 列表里；
   // 它的「不得复活」由下面「文案精简」用例的反向断言钉住。
-  for (const keep of ['提示词投递', '连接', '速度与等待', '会话与子代理', '全局指令', '发送间隔（全局）']) {
+  // 0.19.59：「连接」整卡也按用户要求删除（见下一条反向断言），故同样不在 keep 列表里。
+  for (const keep of ['提示词投递', '速度与等待', '会话与子代理', '全局指令', '发送间隔（全局）']) {
     assert.ok(gt.includes(keep), '全局页缺少卡片：' + keep);
+  }
+  // 「连接」卡删除的三样东西逐一反向断言：运行读数（中继已连接）、重复入口
+  //（主线落点 + 去配置 X）、以及那个恒开的开关（启用网页自动化）。
+  for (const gone of ['中继已连接', '启用网页自动化', '去配置 ']) {
+    assert.ok(!gt.includes(gone), '「连接」卡又回来了（出现：' + gone + '）');
   }
   const site = await renderPane({ payloads: [emptyWindows], which: 'settings', settingsTab: 'deepseek', sites: [
     { siteId: 'deepseek', siteName: 'DeepSeek 网页版', accountKey: 'deepseek', displayName: 'DeepSeek 网页版', initialized: true, loggedIn: true },
@@ -674,10 +680,18 @@ test('★ 0.19.x 设置页文案：解释性长句与开发者自用读数不得
   assert.ok(!/最近一次实际投递/.test(text), '设置页又出现「最近一次实际投递」');
   assert.ok(!/41\.7 万字符/.test(text), '设置页又出现真机事故叙述');
   assert.ok(!/runAttachProbe|probeBusy/.test(src), '探针的客户端接线应随卡片一并删除');
-  // 5.4 「连接」卡只留短状态。
+  // 5.4 「连接」整卡**已删除**（0.19.59，用户原话：「……都不显示，就是去除那一框，
+  // 内部都是默认全开启」）。旧断言钉的是「卡还在、但要写短状态」——卡本身没了，
+  // 于是判据改成**反向**：那三样东西（运行读数 / 重复入口 / 恒开的勾选框）都不得复活。
+  assert.ok(!/中继已连接/.test(text), '「连接」卡的网页服务行复活了');
+  assert.ok(!/启用网页自动化/.test(text), '「启用网页自动化」勾选框复活了（开关恒开、界面不得再有入口）');
   assert.ok(!/已永久保存到本机/.test(text), '连接卡又写了一整句解释');
-  assert.ok(text.includes('已启用（本机永久保存）'), '连接卡缺少短状态读数');
-  assert.ok(/'.*未启用/.test(src), '连接卡未启用态必须给一句短状态');
+  // 勾选框的**接线**也必须一并消失：留着 `action('consent', …)` 或那个 checkbox
+  // 就是「界面上没有这个开关，代码里却还在改它」——那正是本项目记过的「静默行为」形状。
+  // 判据写成**代码形状**而不是某句文案：文案在注释里被引用是正常的，
+  // 用文案去断言会把注释一起误伤（本文件上方记过「判据范围过宽」的教训）。
+  assert.ok(!/action\('consent'/.test(src), 'consent 动作的客户端接线应随勾选框一并删除');
+  assert.ok(!/type: 'checkbox', checked: consent/.test(src), '恒开开关的勾选框接线不得残留');
   // 5.9 开发者向的内部机制描述不出现在界面上。
   assert.ok(!/回落链/.test(text), '设置页又写了「回落链」这类内部机制');
   // 5.9 等待口径那句长解释（「发送间隔补满 + 限流退避重试…同源同口径」）压成一句。
@@ -837,13 +851,16 @@ test('★ 0.16.35 站点目录：从上往下列出全部站点，且不显示�
   // 两条都钉在这里：① 十个站点**全部**按 SITE_NAMES 的顺序从上往下出现；
   // ② 登录态词（已登录/未登录/待检查）**不得**出现在目录的可见文本里——这是本轮
   // 的明确要求，不是遗漏。它仍存在于设置页「账户与登录管理」与右栏工具条状态点。
+  // 夹具里的 `siteName`/`displayName` 一律用**网站原名**（2026-10-03 统一后的形态）：
+  // `DeepSeek`（原 `DeepSeek 网页版`）、`GLM`（原 `智谱清言 (GLM)`）、
+  // `Qwen`（原 `通义千问`）、`Doubao`（原 `豆包`）。
   const ten = [
-    { siteId: 'deepseek', siteName: 'DeepSeek 网页版', initialized: true, loggedIn: true },
-    { siteId: 'glm', siteName: '智谱清言 (GLM)', initialized: false, loggedIn: true, loggedInCached: true, loginBasis: 'probe-fallback' },
+    { siteId: 'deepseek', siteName: 'DeepSeek', initialized: true, loggedIn: true },
+    { siteId: 'glm', siteName: 'GLM', initialized: false, loggedIn: true, loggedInCached: true, loginBasis: 'probe-fallback' },
     { siteId: 'chatgpt', siteName: 'ChatGPT', initialized: false, loggedIn: null, loginBasis: 'stale' },
     { siteId: 'kimi', siteName: 'Kimi', initialized: false, loggedIn: false },
-    { siteId: 'qwen', siteName: '通义千问', initialized: false, loggedIn: null },
-    { siteId: 'doubao', siteName: '豆包', initialized: false, loggedIn: false },
+    { siteId: 'qwen', siteName: 'Qwen', initialized: false, loggedIn: null },
+    { siteId: 'doubao', siteName: 'Doubao', initialized: false, loggedIn: false },
     { siteId: 'grok', siteName: 'Grok', initialized: false, loggedIn: null },
     { siteId: 'claude', siteName: 'Claude', initialized: false, loggedIn: null },
     { siteId: 'gemini', siteName: 'Gemini', initialized: false, loggedIn: null },
@@ -854,7 +871,7 @@ test('★ 0.16.35 站点目录：从上往下列出全部站点，且不显示�
   const full = await renderPane({ payloads: [emptyWindows], sites: ten, which: 'catalog' });
   assert.deepEqual(full.errors, [], '十站点表渲染抛错：' + full.errors.map(e => e.message).join('; '));
   const text = treeText(full.tree);
-  for (const n of ['DeepSeek', '智谱清言', 'Kimi', '豆包', 'Z.ai']) {
+  for (const n of ['DeepSeek', 'GLM', 'Kimi', 'Doubao', 'Z.ai']) {
     assert.ok(text.includes(n), '站点目录缺少 ' + n);
   }
   // 登录态不显示（用户明确要求）。
@@ -891,7 +908,11 @@ test('★ 0.16.35 站点目录：点一行会为该站点开标签，并带上 s
   const def = tabDefinitions.get('webcode-site');
   assert.ok(def, '未注册站点网页标签类型 webcode-site');
   assert.equal(def.multiple, true, '站点标签类型必须 multiple:true —— 否则多个站点会挤成一个标签');
-  // 找到目录里「智谱清言」那一行的按钮并点它（真实调用链，不是直接调函数）。
+  // 找到目录里「GLM」那一行的按钮并点它（真实调用链，不是直接调函数）。
+  // ⚠ 2026-10-03：站点显示名已统一成**网站原名**（`智谱清言` → `GLM`），
+  // 因此这里找行的字面量随之改为 `GLM`。判据本身（点一行 → 为该站点开标签）
+  // 一个字都没动——改的是它要匹配的显示名。参照站仍取 GLM：它排第 2，能顺带
+  // 证明「不是只有第一行可点」。
   const buttons = [];
   const collect = (el) => {
     if (!el || typeof el !== 'object') return;
@@ -903,8 +924,8 @@ test('★ 0.16.35 站点目录：点一行会为该站点开标签，并带上 s
   };
   collect(tree);
   assert.ok(buttons.length >= 10, '站点目录行不足（实际 ' + buttons.length + '）');
-  const glmRow = buttons.find(b => treeText(b).includes('智谱清言'));
-  assert.ok(glmRow, '目录里找不到「智谱清言」行');
+  const glmRow = buttons.find(b => treeText(b).includes('GLM'));
+  assert.ok(glmRow, '目录里找不到「GLM」行');
   glmRow.props.onClick();
   // 0.16.39：目录页改走**本标签自己的**动作（官方 guide 的做法），因此这条断言
   // 从「ctx.sidebarRight.openTab 被调用」改成「tab.actions.openTab 被调用，且带
@@ -940,8 +961,8 @@ test('★ 0.16.39 站点目录：拿不到本标签动作时降级为 ctx.sideba
     (el.children || []).forEach(collect);
   };
   collect(tree);
-  const glmRow = buttons.find(b => treeText(b).includes('智谱清言'));
-  assert.ok(glmRow, '降级路径下目录里找不到「智谱清言」行');
+  const glmRow = buttons.find(b => treeText(b).includes('GLM'));
+  assert.ok(glmRow, '降级路径下目录里找不到「GLM」行');
   glmRow.props.onClick();
   assert.equal(inPlaceOpenCalls.length, 0, '没有 actions 时不该调 tab.actions.openTab');
   assert.equal(openTabCalls.length, 1, '降级路径必须仍然开标签（否则点了没反应）');
@@ -2002,6 +2023,71 @@ test('★ 0.19.4 站点目录右侧统一成账号下拉：真实头像/昵称 +
   assert.ok(/const isBusy = \(key\) => busyAccounts\.includes\(key\)/.test(src),
     '开窗的忙碌状态必须按账号判（用户要求「能够同时开多个账号的窗口」）');
   assert.ok(!/busySids/.test(src), '按站点判的旧忙碌状态必须清干净');
+});
+
+test('★ 0.19.59 站点目录：多账户卡片以第 1 个账户为主身份，其余叠层（+N），且头像不再与站点标记并排', async () => {
+  // 用户 2026-10-03 原话：「豆包和kimi——一个账户的那种展示不错，但是deepseek和z.ai
+  // 两个账户的就不行？……展示，可以以第一个按照原来的那样，234你自己怎样适配」。
+  //
+  // 旧实现（0.19.47）只在**单账户**站点取真实身份当卡片身份，多账户一律回落成
+  // 「站点名 + 站点矢量图」——那正是用户看到的「站点之间不同步」。
+  const src = bridgeSrcFrom('client.cjs');
+  // ① 主身份取值不再只认单账户站点。
+  assert.ok(/const primary = accounts\[0\] \|\| null;/.test(src), '卡片主身份必须取第 1 个账户');
+  assert.ok(!/accounts\.length === 1 \? accounts\[0\] : null/.test(src),
+    '「只在单账户时取真实身份」的旧判据必须消失（它就是站点之间不同步的来源）');
+  // ② 叠层存在、绝对定位（不参与排版：账号多少都不改胶囊几何），且上限显式声明。
+  assert.ok(/hwb-catalog-stack/.test(src), '多账户缺少叠层挂点');
+  assert.ok(/\.hwb-catalog-stack\{[^}]*position:absolute/.test(src),
+    '叠层必须绝对定位——否则它会挤动标题，账号多的站点胶囊会变形');
+  assert.ok(/const STACK_MAX = 3;/.test(src), '叠层上限必须显式声明（否则「+N」没有阈值）');
+  // ③ 主头像必须**盖住**站点标记（绝对定位），而不是并排——并排时抓到头像的站点
+  //    会同时画出两个图标，那是「展示方法不一致」的可见来源。
+  assert.ok(/\.hwb-catalog-img\{[^}]*position:absolute/.test(src),
+    '主头像必须绝对定位在身份盒里（否则头像与矢量标记同时出现）');
+  // ④ 行为断言：两个账户的站点 → 卡片标题是**第 1 个账户**的真实昵称，
+  //    叠层与说明行都在，两个账户的昵称/头像一个都不丢。
+  const two = [
+    { siteId: 'deepseek', siteName: 'DeepSeek 网页版', accountKey: 'deepseek', slot: 'default', displayName: 'DeepSeek 网页版', initialized: true, loggedIn: true, accountName: 'RSYHN', avatarUrl: 'https://cdn.example.test/a.png' },
+    { siteId: 'deepseek', siteName: 'DeepSeek 网页版', accountKey: 'deepseek#2', slot: '2', displayName: 'DeepSeek 网页版 (账户2)', initialized: true, loggedIn: true, accountName: '17700000000' },
+  ];
+  const r = await renderPane({ payloads: [emptyWindows], sites: two, which: 'catalog' });
+  assert.deepEqual(r.errors, [], '多账户目录渲染抛错：' + r.errors.map(e => e.message).join('; '));
+  const text = treeText(r.tree);
+  assert.ok(text.includes('RSYHN'), '卡片主身份必须是第 1 个账户的真实昵称（不是站点名）');
+  assert.ok(text.includes('2 个账号'), '说明行必须给出账户总数（叠层只画缩略图，计数在这里）');
+  const html = JSON.stringify(r.tree);
+  assert.ok(html.includes('hwb-catalog-stack'), '多账户卡片必须真的渲染叠层节点');
+  assert.ok(html.includes('https://cdn.example.test/a.png'), '第 1 个账户的真实头像必须画进卡片');
+  assert.ok(html.includes('17700000000'), '第 2 个账户的昵称必须仍在（下拉里各自一行）');
+});
+
+test('★ 0.19.59 账户删除：站点页每个账户行都有「删除」，走服务端 account-remove 且必须两步确认', async () => {
+  // 用户 2026-10-03 原话：「每个设置界面的网站分页，每个账户除了『更换账户 检测
+  // 导入本机登录态 独立窗口』外增加一个按钮：『删除』作用是：删除这个账户数据」。
+  const src = bridgeSrcFrom('client.cjs');
+  assert.ok(/apiSoft\('account-remove'/.test(src),
+    '「删除」必须调服务端 account-remove——面板自己拼路径/键 = 第二套规则');
+  assert.ok(/onClick: \(\) => removeAccount\(s\)/.test(src),
+    '「确认删除」必须把**这一行**交给 removeAccount（否则同站点两个账户会互相删错）');
+  assert.ok(/const \[confirming, setConfirming\] = React\.useState\(null\)/.test(src),
+    '缺少行内二次确认状态');
+  assert.ok(/className: 'danger'/.test(src), '破坏性按钮必须与常规动作在样式上有区别（danger）');
+  assert.ok(/onClick: \(\) => setConfirming\(s\.accountKey\)/.test(src),
+    '第一次点击必须只进入「待确认」态（不直接删）');
+  assert.ok(!/window\.confirm\(/.test(src),
+    '不得**调用**阻塞式 window.confirm：本文件已记明它会卡住 5s 轮询与在途 fetch 回调');
+  assert.ok(/\.hwb-row-actions button\.danger\{/.test(src), 'danger 样式必须落在账户行按钮那一档上');
+  // 行为断言：站点页渲染出四个常规动作 + 删除，且不抛错。
+  const site = await renderPane({
+    payloads: [emptyWindows], which: 'settings', settingsTab: 'deepseek',
+    sites: [{ siteId: 'deepseek', siteName: 'DeepSeek 网页版', accountKey: 'deepseek', displayName: 'DeepSeek 网页版', initialized: true, loggedIn: true }],
+  });
+  assert.deepEqual(site.errors, [], '站点页渲染抛错：' + site.errors.map(e => e.message).join('; '));
+  const text = treeText(site.tree);
+  for (const b of ['更换账户', '检测', '导入本机登录态', '独立窗口', '删除']) {
+    assert.ok(text.includes(b), '账户行缺少按钮：' + b);
+  }
 });
 
 test('★ 0.16.37 站点目录：官方「新建终端」同款胶囊 + 右侧官方 Menu 账户展开', async () => {

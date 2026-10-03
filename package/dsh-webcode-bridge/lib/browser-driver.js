@@ -25,6 +25,9 @@ import { selectWebModel, pickerUsable } from './model-picker.js';
 import { deriveLastRate, shouldSettleWip, shouldSettleStalledThinking, answerDomLength, cleanAnswerDomText, shouldRescueStalledCapture } from './metrics.js';
 import { emptyWebResponseError } from './zero-progress.js';
 import { readIdentityCache, writeIdentityCache } from './account-cache.js';
+// 「昵称/头像候选」的页面侧扫描：**只在显式 debug 时**使用（见 readAccountIdentity）。
+// 与离线探针脚本共用同一份实现——两处各写一份必然漂移（见该模块文件头）。
+import { ACCOUNT_CANDIDATE_PROBE } from './account-candidates.js';
 import { applyEffort } from './think-effort.js';
 // 错误码真源：本文件是抛点最多的一个（20 处）。**不要**再手写 `err.code = 'X'`
 // ——那样不带 `failure` 快照，码会在 harness 边界被归一化成 `UNKNOWN`
@@ -1161,10 +1164,12 @@ export function createBrowserDriver(options = {}) {
   /**
    * 从当前页面读「这个账号真实的昵称与头像 URL」。
    *
-   * @returns {Promise<{name: string|null, avatarUrl: string|null, basis: string, capturedAt: string|null}>}
+   * @param {{debug?: boolean}} [opts] `debug:true` 时**额外**回传页面候选节点
+   *   （`candidates`），供真机取证选择器；常规调用不要传它。
+   * @returns {Promise<{name: string|null, avatarUrl: string|null, basis: string, capturedAt: string|null, candidates?: object|null}>}
    *   读不到时 `name`/`avatarUrl` 为 null；`basis` 说明来源（site-probe / generic / no-page / cache）。
    */
-  async function readAccountIdentity() {
+  async function readAccountIdentity(opts = {}) {
     const probe = site.accountProbe || null;
     const nameSels = (probe?.name?.length ? probe.name : GENERIC_NAME_SELECTORS);
     const avatarSels = (probe?.avatar?.length ? probe.avatar : GENERIC_AVATAR_SELECTORS);
@@ -1220,6 +1225,20 @@ export function createBrowserDriver(options = {}) {
       if (!writeIdentityCache(cfg.profileDir, accountIdentity)) warn('account identity cache save failed (profileDir=' + cfg.profileDir + ')');
     } else if (!accountIdentity) {
       accountIdentity = { name: null, avatarUrl: null, basis: probe ? 'site-probe' : 'generic', capturedAt: null };
+    }
+    // 取证通道（0.19.60，**opt-in**）：把页面上「可能是昵称/头像」的候选节点一并回传，
+    // 供人据此挑出稳定选择器（本项目纪律：选择器必须来自真机读数，不许凭印象编）。
+    //
+    // 为什么必须显式开关而不是默认带上：常规路径是右栏每 8s 一次的轮询，
+    // 每次都多扫一遍全页 DOM（子树遍历 + 计算样式）纯属浪费，而这条读数的唯一
+    // 消费者是人在排障/取证时的一次性调用。默认行为**一字未改**。
+    if (opts?.debug === true) {
+      try {
+        return { ...accountIdentity, candidates: await p.evaluate(ACCOUNT_CANDIDATE_PROBE) };
+      } catch (e) {
+        // 取证失败不影响身份读数本身：如实记原因，字段留 null。
+        return { ...accountIdentity, candidates: null, candidatesError: String(e?.message || e) };
+      }
     }
     return accountIdentity;
   }

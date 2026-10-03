@@ -3824,6 +3824,29 @@ function imageMarkdown(images) {
     // 桥 profile。旧实现写死默认驱动——对 glm/kimi/qwen 调用会去改 DeepSeek 的
     // 登录态（站点间串号），因此按 siteId 路由到对应驱动（与 login/window 同规则）。
     sessionImport: (accountKey, dir) => driverFor(accountKey || 'deepseek').importStorageFromProfile(dir),
+    // 「删除账户」的**运行时半边**（0.19.59）：把该账号的浏览器关掉、驱动实例丢掉，
+    // 使它的 profile 目录不再被占用——Windows 上被浏览器占着的目录删不干净
+    //（EBUSY/EPERM），而「删了一半」比「没删」难查得多。真正的文件删除在
+    // web-control 的 `POST account-remove` 里（那里才有 profileDir 与设置真源）。
+    //
+    // 两条纪律：
+    //   · 只关**该账号自己**的浏览器。别人的窗口不该被这次删除牵连（多账号并发的
+    //     前提就是「每个账号一份独立 profile 与独立实例」）；
+    //   · **注入的默认 driver 不被丢弃**（`isInjectedDefaultSlot`）：它是测试注入契约，
+    //     也是既有 deepseek profile 的载体，丢了会让后续调用拿到一个空实例。
+    //     非默认槽的实例从 `drivers` 里删掉即可——它下次要用时会按需重建。
+    accountForget: async (accountKey) => {
+      let parsed = null;
+      try { parsed = parseAccountKey(accountKey || 'deepseek'); } catch { return { ok: false, error: 'bad accountKey' }; }
+      const key = formatAccountKey(parsed.siteId, parsed.slot);
+      const isInjected = isInjectedDefaultSlot(parsed.siteId, parsed.slot);
+      const d = isInjected ? driver : drivers.get(key);
+      if (d && typeof d.close === 'function') {
+        try { await d.close(); } catch (e) { warn('accountForget close:', e?.message); }
+      }
+      if (!isInjected) drivers.delete(key);
+      return { ok: true, accountKey: key, hadDriver: Boolean(d) };
+    },
     onHttp: (req, res) => {
       const u = new URL(req.url, 'http://localhost');
       const pathname = u.pathname;

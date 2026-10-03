@@ -24,6 +24,9 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import {
   SITES, providerIdsForRegistration, providerIdForSite, siteIdForProvider,
@@ -69,6 +72,22 @@ const EXPECTED_GROUP_NAMES = {
   deepseek: 'deepseek', glm: 'chatglm', chatgpt: 'chatgpt',
   kimi: 'kimi', qwen: 'qwen', doubao: 'doubao',
   grok: 'grok', claude: 'claude', gemini: 'gemini', zai: 'z.ai',
+};
+
+/**
+ * 每站点的**显示名**（2026-10-03 用户指令：「全部统一成网站原名」，例：豆包 → Doubao）。
+ *
+ * 这一样为什么算「对外面」：它就是用户在**右栏标签页标题 / 工具条 / 站点目录卡片 /
+ * 设置页站点 tab / 账户行**上读到的字。它此前散成两份且互不相同——
+ *   · `lib/providers.js` 的 `name`：`DeepSeek 网页版` / `智谱清言 (GLM)` / `通义千问 (Qwen)` / `豆包`
+ *   · `lib/client.cjs` 的 `SITE_NAMES`：`DeepSeek` / `智谱清言` / `通义千问` / `豆包`
+ * 于是**同一个站点在两处是两个名字**，用户报的「右侧网页界面单个账户（豆包）不显示
+ * 原来网站名称」正是这一处。改判据前请停下来问一句：这是有意的对外变更吗？
+ */
+const EXPECTED_SITE_NAMES = {
+  deepseek: 'DeepSeek', glm: 'GLM', chatgpt: 'ChatGPT',
+  kimi: 'Kimi', qwen: 'Qwen', doubao: 'Doubao',
+  grok: 'Grok', claude: 'Claude', gemini: 'Gemini', zai: 'Z.ai',
 };
 
 test('判据 1：站点 id 与顺序逐字不变', () => {
@@ -126,4 +145,32 @@ test('判据 6：模型目录的形状快照（防「少了一行」这类静默
   // 兼容别名必须仍在（历史会话与 OpenAI 前端的 `model: 'deepseek-web'` 依赖它）。
   assert.ok(models.some((m) => m.id === 'deepseek-web'),
     '兼容别名 `deepseek-web` 必须仍在目录里——历史设置值与 OpenAI 前端依赖它解析');
+});
+
+/**
+ * 从 `lib/client.cjs` 的源码里抽出 `SITE_NAMES` 字面量。
+ *
+ * 为什么要抽源码而不是渲染后读文本：客户端半边是单文件 bundle（`window.__ModuleLoader__`
+ * 注册、只能 `require`，**不能 import lib/**），因此服务端拿不到它、它也拿不到服务端；
+ * 两边唯一的对齐方式就是**静态比对**。渲染后比对只能覆盖「渲染过的那些站点」，
+ * 而漂移恰恰可以先出现在没人渲染的那一个上。
+ */
+function clientSiteNames() {
+  const src = readFileSync(path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../lib/client.cjs'), 'utf8');
+  const m = src.match(/const SITE_NAMES = \{([\s\S]*?)\};/);
+  assert.ok(m, 'client.cjs 里找不到 `const SITE_NAMES = {…};` 字面量——先修本测试的解析');
+  const out = {};
+  for (const kv of m[1].matchAll(/([a-z][a-z0-9.]*)\s*:\s*'([^']*)'/g)) out[kv[1]] = kv[2];
+  return out;
+}
+
+test('判据 7：站点显示名 = 网站原名，且客户端 `SITE_NAMES` 与服务端 `name` 逐字一致', () => {
+  const server = {};
+  for (const s of SITES) server[s.id] = s.name;
+  assert.deepEqual(server, EXPECTED_SITE_NAMES,
+    'providers.js 的站点显示名必须逐字等于网站原名（豆包 → Doubao，不是中文译名、不带括号注解）');
+  const client = clientSiteNames();
+  assert.deepEqual(client, EXPECTED_SITE_NAMES,
+    'client.cjs 的 SITE_NAMES 与 providers.js 的 name 漂移了——同一个站点会在右栏与设置页显示成两个名字，'
+    + '而任何只渲染一侧的单测都不会红（这正是用户报过的症状）');
 });
