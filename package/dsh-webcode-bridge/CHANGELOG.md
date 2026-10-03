@@ -5,6 +5,48 @@ All notable changes to this package. Newest first.
 The canonical, in-progress record of what was changed and why lives in [doc/progress.md](../../doc/progress.md);
 this file is the package-facing release history.
 
+## 0.19.56
+
+**更新源切到 GitHub Releases（修「检查更新永远说已是最新」）+ 启动自动检查一次 + 更新按钮与 GitHub 链接同圆框 + 品牌图标统一为 icon.svg 同构。**
+
+### 用户要的是什么（原话，逐字）
+
+> 「设置界面的更新：为什么没法做到真正更新？--点击检查更新后不能自动拉取更新安装？
+> 已经现在设置默认启动时候检查一次更新吧，然后是按钮和右边的github一样圆框」
+> 「现在"插件"界面那个带有颜色的矢量图不错，本插件形象，但是别的地方的都是绘制错误了，
+> 请你：能彩色地方彩色，用这里的图，不能的地方改为正确黑色矢量图」
+
+### ① 更新为什么一直是假的（根因）
+
+检查与安装都对着 npm registry，但本项目**从不 publish**（release.yml 有守卫强制，
+唯一发布渠道是 GitHub Releases）。registry 最新 0.19.51 ≤ 本地 0.19.55，
+`updateDecision` 永远回答 `current`——按钮没坏，是**更新源指错了地方**。
+
+### ② 改了什么
+
+- **`lib/update.js` 判据层换数据源**：`fetchPackument` → `fetchReleases`
+  （`GET /repos/RSLN-creator/dsh-web-bridge/releases`，匿名只读）；`pickLatest`
+  改吃 Releases 数组（draft / prerelease 不进候选、按版本号比不按数组顺序）；
+  新增 `assetForVersion`（按 release.yml 命名规则定位 `<包名>-<版本>.tgz`）与
+  `isSafeDownloadUrl`（下载域白名单——资产 URL 来自外部 API，不直接信任）；
+  `runInstall` → `installLocalTarball`（装**下载到本地的 tgz**）+ `installFromReleases`
+  一条龙。「有新版但 tarball 资产缺失」如实报 `unknown`，不冒充「已是最新」。
+- **启动自动检查一次**：进程起来 15 秒后打一次 Releases API，结果写进设置页
+  同一个缓存——打开设置页第一眼就是已检查的结论（测试进程与
+  `WEBCODE_UPDATE_CHECK=off` 跳过）。
+- **更新按钮同圆框**：`.hwb-update-btn` 数值逐项对齐右侧 GitHub 链接
+  （12px 字号 / 2px 8px 内边距 / 12px 圆角 / .5px 边框）。「有新版换主色底」
+  是唯一剩余差异。
+- **品牌图标统一**：`DwbMark` 重绘为 icon.svg 的**同构线稿**（拱 + 两端方墩 +
+  中间虚线，currentColor，官方图标行内使用）；新增 `DwbMarkColor`（icon.svg
+  原始配色）只用于设置页品牌位——「能彩色的地方彩色，不能的地方正确黑色矢量图」。
+
+### ③ 边界
+
+安装坚持「先下载 tgz 到本地再 `dsh plugin --profile <p> add <路径>`」——
+`dsh plugin add <https://…>` 没有契约背书，本地 tarball 是 README 写明的安装形态。
+装完仍然**只提醒重启、绝不代重启**（重启会终止在跑的会话）。
+
 ## 0.19.55
 
 **并发会话改造：每一列都是一条真官方会话（不再自绘），入口搬到左栏「并发会话」。**

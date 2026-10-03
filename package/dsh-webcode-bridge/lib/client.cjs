@@ -2023,50 +2023,88 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * **dwb 品牌标记**（0.19.39）。
+     * **dwb 品牌标记**（0.19.39 引入；0.19.56 重绘为与 icon.svg 同构）。
      *
-     * 用户原话：「为本项目 dwb 设计合适的矢量图标，替代所有本项目默认的图标：
-     * 设置界面两个，右侧 tab 界面两个：标签页和主界面大图标，设置切换标签页和
-     * 设置界面项目主界面介绍大图标」。
+     * 用户原话（0.19.56）：「现在"插件"界面那个带有颜色的矢量图不错，本插件形象，
+     * 但是别的地方的都是绘制错误了，请你：能彩色地方彩色，用这里的图，不能的地方
+     * 改为正确黑色矢量图」。
      *
-     * ## 图形语义（为什么是这个形状）
+     * ## 为什么重绘
      *
-     * 本插件的本质是**桥**：一边是多个网页站点，另一边是一个模型接口。因此用
-     * 「拱桥 + 顶点节点」而不是一个通用齿轮/终端图标——
-     *   · 拱（`M2.5 12.5c0-4 …`）＝「桥接」这件事本身；
-     *   · 桥面（`M1.5 12.5h13`）＝被连起来的那一排**多个**站点；
-     *   · 顶点圆点＝桥接的落点（模型/会话）。
-     * 三点结构让它在 16px 下仍然读得出「连接」而不是「一栋房子」。
+     * 插件管理页显示的是 `icon.svg`（一座拱桥 + 两端方墩 + 中间断线）——那是
+     * 用户认可的形象。而这里 0.19.39 自绘的是**另一个形状**（浅拱 + 平桥面 +
+     * 顶点圆点），与认可形象对不上，用户把它判为「绘制错误」。因此本组件现在
+     * 按 icon.svg 的**同一几何**重画：
+     *   · 拱 `M7.5 18.5C7.5 11 28.5 11 28.5 18.5` —— icon.svg 的桥拱，等比缩到
+     *     24 viewBox；
+     *   · 两端方墩（圆角矩形）＝桥落地的两岸；
+     *   · 中间那条**断线**＝「网页 ↔ 本地」两侧尚未直连、由桥来接的语义，
+     *     它是 icon.svg 的核心表意，旧画法把它丢了。
      *
-     * ## 为什么画法与 TaskBoardPanelIcon 逐项同源
+     * ## 两套颜色是**同一个形状**的两份，不是两个图标
      *
-     * `viewBox 16` / `stroke-width 1.3` / `round` 端点 / `currentColor`——与官方
-     * panel 行图标同一套刻度。这样并排时光学粗细一致（写死颜色或换 stroke 宽度
-     * 会让它在一排官方图标里明显「重」一档）。
-     * `currentColor` 还让**明暗主题与选中态自动成立**：颜色由宿主继承下来，
-     * 我们不需要知道当前是什么主题。
+     *   · 本组件（DwbMark）：`currentColor` 线稿。左栏行、右栏 tab 标题、guide
+     *     图标都在官方图标的颜色体系里（明暗主题/选中态由宿主继承），用户说的
+     *     「不能彩色的地方」= 这些位置，给「正确的黑色矢量图」（currentColor 在
+     *     常态即近黑的前景色）；
+     *   · `DwbMarkColor`（见下）：icon.svg 原始配色。只用在设置页顶部品牌位——
+     *     那里是插件自己的品牌区（「能彩色的地方」），彩色形象在那里成立。
      *
-     * ## 尺寸：`props.size` 由宿主给
+     * 两份必须**逐坐标同构**（只差 stroke/fill 颜色），改任何一个都要同步另一个——
+     * 官方 plugin 列表里那张彩色图与本插件界面里的线稿若再漂移，就是又一次
+     * 「两处口径漂移」。
      *
-     * 官方在折叠成 56px 轨道时给 18px、展开时给 16px；右栏 guide 大图标给 22/26px。
-     * 因此这里必须读 `props.size` 而不是写死一个数——写死会让它在折叠态里显得偏大。
-     * 缺省 16 只是兜底。
+     * ## 刻度与旧版一致的原因
+     *
+     * `props.size` 由宿主给（折叠轨道 18px、展开 16px、右栏 guide 22/26px、
+     * tab 标题 13px），必须读而不是写死。线稿模式沿用官方刻度：fill:none +
+     * stroke:currentColor + round 端点——并排时与官方图标光学粗细一致。
      *
      * @param {{size?: number}} props 宿主给的图标呈现（与官方 IconProps 同形）
      */
     function DwbMark(props) {
+      return DwbMarkColor({ ...props, monochrome: true });
+    }
+
+    /**
+     * dwb 品牌标记的**彩色**版（0.19.56）：icon.svg 的逐字投影。
+     *
+     * 形状与 DwbMark 共用同一组坐标（见上），只差颜色：左墩蓝渐变、右墩青渐变、
+     * 拱与落点 `#7CB7FF`、断线 `#45D9E7`——全部来自 icon.svg，不另造配色。
+     * `monochrome: true` 时退化为 currentColor 线稿（DwbMark 就是这么实现的，
+     * 放在同一函数里是让「两份必须同构」成为**结构性**事实而不是一句纪律）。
+     *
+     * 渐变 id 带 `dwb-` 前缀：SVG 渐变 id 在**整个文档**里唯一，两张实例
+     * （设置页 + 其他任何地方）若都用裸 `left`/`right` 会互相抢 id。
+     *
+     * @param {{size?: number, monochrome?: boolean}} props
+     */
+    function DwbMarkColor(props) {
       const size = Number(props?.size) || 16;
+      const mono = props?.monochrome === true;
+      // 24 viewBox：icon.svg 是 36，坐标 ÷1.5 得到整数刻度（36/24 = 1.5）。
       return h('svg', {
-        viewBox: '0 0 16 16', width: size, height: size, fill: 'none',
-        stroke: 'currentColor', strokeWidth: 1.3, strokeLinecap: 'round',
-        strokeLinejoin: 'round', 'aria-hidden': 'true', focusable: 'false',
+        viewBox: '0 0 24 24', width: size, height: size,
+        fill: 'none', 'aria-hidden': 'true', focusable: 'false',
       },
-        // 拱：桥的主体
-        h('path', { d: 'M2.5 12.4c0-3.9 2.46-6.9 5.5-6.9s5.5 3 5.5 6.9' }),
-        // 桥面：被连起来的一排站点
-        h('path', { d: 'M1.5 12.4h13' }),
-        // 顶点：桥接的落点
-        h('circle', { cx: 8, cy: 3.6, r: 1.35 }));
+        // 左右两墩：icon.svg 的两个圆角矩形（x=3/24, y=21, w=h=9 → 2/16, 14, 6×6）
+        h('rect', { x: 2, y: 14, width: 6, height: 6, rx: 1.33, fill: mono ? 'none' : 'url(#dwb-left)', stroke: mono ? 'currentColor' : 'none', 'stroke-width': mono ? 1.3 : undefined, 'stroke-linejoin': mono ? 'round' : undefined }),
+        h('rect', { x: 16, y: 14, width: 6, height: 6, rx: 1.33, fill: mono ? 'none' : 'url(#dwb-right)', stroke: mono ? 'currentColor' : 'none', 'stroke-width': mono ? 1.3 : undefined, 'stroke-linejoin': mono ? 'round' : undefined }),
+        // 拱：icon.svg 的 `M7.5 18.5C7.5 11 28.5 11 28.5 18.5`（÷1.5）
+        h('path', { d: 'M5 12.33C5 7.33 19 7.33 19 12.33', stroke: mono ? 'currentColor' : '#7CB7FF', strokeWidth: 1.6, strokeLinecap: 'round', fill: 'none' }),
+        // 两个落点：icon.svg 的 (7.5,21) 与 (28.5,21)（÷1.5）
+        h('circle', { cx: 5, cy: 14, r: 1.07, fill: mono ? 'currentColor' : '#7CB7FF' }),
+        h('circle', { cx: 19, cy: 14, r: 1.07, fill: mono ? 'currentColor' : '#7CB7FF' }),
+        // 中间断线：icon.svg 的 `M13 25.5H23`（÷1.5），虚线是「待桥接」的表意本体
+        h('path', { d: 'M8.67 17H15.33', stroke: mono ? 'currentColor' : '#45D9E7', strokeWidth: 1.6, strokeLinecap: 'round', strokeDasharray: '2 2', fill: 'none' }),
+        // 渐变只在彩色模式输出（线稿模式引用未定义的 id 会画出黑块）
+        !mono ? h('defs', null,
+          h('linearGradient', { id: 'dwb-left', x1: 5, y1: 14, x2: 5, y2: 20, gradientUnits: 'userSpaceOnUse' },
+            h('stop', { stopColor: '#7CB7FF' }),
+            h('stop', { offset: 1, stopColor: '#145AF3' })),
+          h('linearGradient', { id: 'dwb-right', x1: 19, y1: 14, x2: 19, y2: 20, gradientUnits: 'userSpaceOnUse' },
+            h('stop', { stopColor: '#45D9E7' }),
+            h('stop', { offset: 1, stopColor: '#0E9AA8' }))) : null);
     }
 
     /**
@@ -3292,7 +3330,9 @@ window.__ModuleLoader__.load({
         // 让用户再也看不到更新（本项目不做「点了就永远不提醒」这种状态）。
         h('div', { className: 'hwb-settings-head' },
           h('span', { className: 'hwb-brand' },
-            h('span', { className: 'hwb-brand-mark', 'aria-hidden': 'true' }, h(DwbMark, { size: 20 })),
+            // 0.19.56：品牌位用**彩色**版（用户：「能彩色地方彩色，用这里的图」）。
+            // icon.svg 的原始配色在这里成立——它是插件自己的品牌区，不是官方图标行。
+            h('span', { className: 'hwb-brand-mark', 'aria-hidden': 'true' }, h(DwbMarkColor, { size: 20 })),
             h('h2', null, 'Harness Web Bridge')),
           h('span', { className: 'hwb-head-actions' },
             updateInfo
@@ -4852,11 +4892,14 @@ window.__ModuleLoader__.load({
         ".hwb-settings-head h2{margin:0}",
         // 0.19.39：品牌标记 + 名称 + 版本 + 更新 + GitHub 一行（用户要的顶部形态）。
         ".hwb-brand{display:inline-flex;align-items:center;gap:8px;min-width:0}",
-        ".hwb-brand-mark{display:inline-flex;align-items:center;justify-content:center;flex:none;color:var(--dsw-alias-brand-primary,#3b82f6)}",
+        ".hwb-brand-mark{display:inline-flex;align-items:center;justify-content:center;flex:none}",
         ".hwb-head-actions{display:inline-flex;align-items:center;gap:8px;flex:none;flex-wrap:wrap}",
         ".hwb-version{font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary,inherit);font-variant-numeric:tabular-nums;white-space:nowrap}",
-        ".hwb-update-btn{height:28px;padding:0 12px;font:inherit;font-size:12px;line-height:26px;color:var(--dsw-alias-label-primary,inherit);background:var(--dsw-alias-bg-layer-1,transparent);border:.5px solid var(--dsw-alias-border-l3,#8885);border-radius:14px;cursor:pointer;white-space:nowrap;transition:background .12s ease}",
-        ".hwb-update-btn:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover,#8882)}",
+        // 0.19.56：更新按钮改成与右侧 GitHub 链接**同一个圆框**（用户原话：「按钮和
+        // 右边的github一样圆框」）。数值逐项对齐 .hwb-repo-link（12px 字号 / 18px 行高 /
+        // 2px 8px 内边距 / 12px 圆角 / .5px 边框），只保留「有新版时换主色底」这一处差异——
+        // 那是「现在是主动作」的唯一视觉信号，形状本身两颗完全一致。
+        ".hwb-update-btn{font:inherit;font-size:12px;line-height:18px;padding:2px 8px;color:var(--dsw-alias-label-primary,inherit);background:var(--dsw-alias-bg-layer-1,transparent);border:.5px solid var(--dsw-alias-border-l3,#8885);border-radius:12px;cursor:pointer;white-space:nowrap;transition:background .12s ease,color .12s ease}",
         ".hwb-update-btn:disabled{opacity:.45;cursor:default}",
         // 「有新版」时才用主色底：常态是一颗安静的次级按钮，有更新才成为主动作。
         ".hwb-update-btn.primary{background:var(--dsw-alias-button-info-fill,#3b82f6);color:var(--dsw-alias-label-primary-foreground,#fff);border-color:transparent}",
@@ -4867,6 +4910,7 @@ window.__ModuleLoader__.load({
         ".hwb-update-notice.bad{color:var(--dsw-alias-state-error-primary,#93443e);background:var(--dsw-alias-interactive-bg-hover,#8881);border:.5px solid var(--dsw-alias-state-error-primary,#93443e)}",
         ".hwb-repo-link{flex:none;font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary,#6b7280);text-decoration:none;padding:2px 8px;border:.5px solid var(--dsw-alias-border-l3,#8885);border-radius:12px;transition:background .12s ease,color .12s ease}",
         ".hwb-repo-link:hover{color:var(--dsw-alias-label-primary,inherit);background:var(--dsw-alias-interactive-bg-hover,#8882)}",
+        ".hwb-update-btn:hover:not(:disabled){color:var(--dsw-alias-label-primary,inherit);background:var(--dsw-alias-interactive-bg-hover,#8882)}",
         ".hwb-lead{font-size:13px;line-height:22px;color:var(--dsw-alias-label-tertiary,#8a8f98);margin:0;max-width:100%;overflow-wrap:anywhere}",
         ".hwb-build{font-size:11px;line-height:16px;color:var(--dsw-alias-label-caption,#9aa0a6);margin:-6px 0 0;font-variant-numeric:tabular-nums}",
         // ---- 0.14.9 去臃肿：按调研出来的 token 表收紧 --------------------

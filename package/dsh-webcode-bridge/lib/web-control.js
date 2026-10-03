@@ -32,7 +32,9 @@ import { resolveBrowserExecutable, installBundledChromium } from './browser-runt
 import { httpFetch } from './upstream.js';
 // 更新与重启提醒（0.19.39）。检查是只读 HTTP，安装是一次 dsh CLI 调用；
 // 判据（版本比较/挑最新版）全在那个模块的纯函数里，本文件只做接线。
-import { fetchPackument, updateDecision, runInstall, PACKAGE_NAME } from './update.js';
+import {
+  fetchReleases, updateDecision, installFromReleases, PACKAGE_NAME, GITHUB_REPO,
+} from './update.js';
 // 并列多会话的列身份 → 提示词（0.19.21，用户 Q5 的沙箱适配）。
 import { withColumnGuidance, normalizeColumnContext } from './column-context.js';
 import { writeColumnArtifact, fencedBlocks, ColumnFsDenied } from './column-fs.js';
@@ -55,16 +57,53 @@ const MAX_BODY_BYTES = 256 * 1024;
 let browserInstallPromise = null;
 
 /**
- * 更新检查的**内存**缓存（0.19.39）。
+ * 更新检查的**内存**缓存（0.19.39；0.19.56 起数据源是 GitHub Releases）。
  *
- * 为什么需要：设置页每次打开都会读 `GET update-status`，而它要打一次 npm
- * registry。缓存让「打开设置页」不至于每次都等一次网络（registry 慢的时候面板
- * 首屏会卡）。10 分钟是「用户装完回来能看到新状态」与「不重复打 registry」的取中。
+ * 为什么需要：设置页每次打开都会读 `GET update-status`，而它要打一次 GitHub
+ * API。缓存让「打开设置页」不至于每次都等一次网络（API 慢的时候面板首屏会卡）。
+ * 10 分钟是「用户装完回来能看到新状态」与「不重复打 API」的取中。
  *
  * 只存内存、不落盘：重启进程自然重查一次——而那正是「装完要重启」之后该有的行为。
  */
 let updateCache = null;
 const UPDATE_CACHE_MS = 10 * 60 * 1000;
+
+/**
+ * 「启动时自动检查一次」（0.19.56，用户原话：「已经现在设置默认启动时候检查一次
+ * 更新吧」）。
+ *
+ * 实现是**懒触发 + 内存缓存**，不是真的在进程启动线上加一步：
+ *   · 模块加载即设一个定时器，进程起来后 15 秒做第一次检查（等 HTTP 服务与
+ *     浏览器驱动这些启动要务先走完，更新检查是纯锦上添花，不与它们抢资源）；
+ *   · 结果写进同一个 `updateCache`，设置页打开时 `GET update-status` 在缓存
+ *     窗口内直接命中——于是用户**打开设置页的第一眼**就是已检查过的结论；
+ *   · 全程 try/catch 吞错（落进 cache 的是 `unknown` 决策）：启动检查失败绝不
+ *     能影响插件加载，也不该刷出一条无人问津的日志错误。
+ *
+ * 为什么放在模块顶层而不是 createWebControl 里：standalone 入口与 DSH 入口都
+ * 会加载本模块，两边的设置页都吃同一个缓存，检查只做一次。
+ *
+ * 测试进程（NODE_TEST_CONTEXT）与显式 `WEBCODE_UPDATE_CHECK=off` 时**不启动**：
+ * 本仓库的纪律是「测试默认离线」（doc/comment-style.md §9.1 第 5 条），一个
+ * 15 秒后偷偷打 GitHub API 的定时器违反它——regression 全量要跑四分钟，
+ * 定时器一定会在测试中途开火。
+ */
+if (!process.env.NODE_TEST_CONTEXT && process.env.WEBCODE_UPDATE_CHECK !== 'off') {
+  setTimeout(() => {
+    (async () => {
+      try {
+        const r = await fetchReleases({});
+        updateCache = {
+          at: Date.now(),
+          value: updateDecision({ releases: r.ok ? r.releases : null, error: r.ok ? null : r.error }),
+          releases: r.ok ? r.releases : null,
+        };
+      } catch (e) {
+        updateCache = { at: Date.now(), value: updateDecision({ error: String(e?.message || e) }), releases: null };
+      }
+    })();
+  }, 15_000).unref?.();
+}
 
 /**
  * 「导入登录态」允许的源 profile 根目录（0.14.4）。
@@ -1296,15 +1335,17 @@ export function createWebControl(deps = {}) {
       const r = await importer(accountKey, dir);
       return { ok: true, siteId: accountKey, accountKey, sourceProfileDir: dir, ...(r || {}) };
     },
-    // ---- 本插件自身的版本与更新（0.19.39）----------------------------------
+    // ---- 本插件自身的版本与更新（0.19.39；0.19.56 换数据源 + 启动检查）------
     //
     // 用户原话：「参考 dsh-store 的设置界面顶部『插件市场 / dsh-market / v1.65.1 /
     // 更新插件市场 / 本次全部忽略』设计好本插件的更新和只做提醒重启操作，替换
-    // 现在空白的单独 github 按钮」。
+    // 现在空白的单独 github 按钮」；0.19.56 追加：「为什么没法做到真正更新？
+    // ——点击检查更新后不能自动拉取更新安装？已经现在设置默认启动时候检查一次
+    // 更新吧」。
     //
     // 三个动作分开，各自只回答一个问题：
     //   GET  update-status —— 「现在跑的是哪一版、有没有新版」（只读，不安装）
-    //   POST update        —— 「装」（唯一有副作用的那个，走 csrfSafe 门禁）
+    //   POST update        —— 「下载并安装」（唯一有副作用的那个，走 csrfSafe 门禁）
     // 分开的直接理由：设置页挂载时就要显示版本，而它**不该**顺带触发一次安装。
     'GET update-status': async () => {
       const current = config.version || null;
@@ -1317,32 +1358,43 @@ export function createWebControl(deps = {}) {
           return base && base !== '.' && base !== '/' ? base : 'web';
         } catch { return 'web'; }
       })();
-      // 上一次检查的结果缓存在内存里：设置页每次打开都打一次 registry 是浪费，
-      // 而且 registry 慢的时候会让面板首屏卡住。
+      // 上一次检查的结果缓存在内存里（启动 15 秒后的那次检查也写这里）：
+      // 设置页每次打开都打一次 GitHub API 是浪费，而且 API 慢的时候会让面板首屏卡住。
       if (updateCache && Date.now() - updateCache.at < UPDATE_CACHE_MS) {
-        return { ok: true, package: PACKAGE_NAME, current, profile, ...updateCache.value, cached: true };
+        return { ok: true, package: PACKAGE_NAME, repo: GITHUB_REPO, current, profile, ...updateCache.value, cached: true };
       }
-      const r = await fetchPackument({ name: PACKAGE_NAME });
-      const decision = updateDecision({ current, packument: r.ok ? r.packument : null, error: r.ok ? null : r.error });
-      updateCache = { at: Date.now(), value: decision };
-      return { ok: true, package: PACKAGE_NAME, current, profile, cached: false, ...decision };
+      const r = await fetchReleases({});
+      const decision = updateDecision({ current, releases: r.ok ? r.releases : null, error: r.ok ? null : r.error });
+      // 原始清单也留在缓存里：POST update 要从它定位 tarball 资产，
+      // 复用同一次检查能省一次 API 往返（清单本身不随 current 变，只有判据变）。
+      updateCache = { at: Date.now(), value: decision, releases: r.ok ? r.releases : null };
+      return { ok: true, package: PACKAGE_NAME, repo: GITHUB_REPO, current, profile, cached: false, ...decision };
     },
-    // 「更新插件市场」的对应物。**真的装**（用户明确选择「点了就真装」），
+    // 「更新插件市场」的对应物。**真的下载并安装**（用户明确选择「点了就真装」），
     // 装完给的是**重启提醒**而不是自动重启——重启会终止在跑的会话，
     // 而那正是用户此刻在用的东西（见 lib/update.js 文件头第 1 条）。
     'POST update': async (body) => {
       const profile = String(body?.profile || 'web').trim() || 'web';
-      // spec 只允许两种：包名本身（取 registry 最新）或一个显式版本号。
-      // **不接受任意字符串**——它会被拼进命令行，放开等于开一个任意参数入口。
+      // spec 只允许两种：不点版本（装 Releases 最新正式版）或一个显式版本号
+      //（含降级重装旧版）。**不接受任意字符串**——它曾经会被拼进命令行，
+      // 放开等于开一个任意参数入口；现在命令行里只有我们自己下载的本地路径。
       const requested = String(body?.version || '').trim();
-      const spec = requested ? PACKAGE_NAME + '@' + requested : PACKAGE_NAME;
       if (requested && !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(requested)) {
         return { ok: false, error: '版本号形状不合法：' + requested.slice(0, 40) };
       }
-      // 装完缓存必然过期（current 变了）——清掉，下一次检查重新问 registry。
+      // 装完缓存必然过期（current 变了）——清掉，下一次检查重新问 Releases。
+      // 清之前把缓存的 releases 清单取出来给安装用：显式版本号（含降级装旧版）
+      // 需要清单来定位资产，复用同一次检查省一次 API 往返；缓存没有清单
+      //（例如启动检查失败过）就传 null，installFromReleases 会自己拉。
+      const cachedReleases = updateCache?.releases || null;
       updateCache = null;
-      const r = await runInstall({ profile, spec });
-      return { ...r, profile, spec };
+      const r = await installFromReleases({
+        releases: cachedReleases,
+        version: requested,
+        profile,
+        current: config.version || '',
+      });
+      return { ...r, profile, spec: requested ? PACKAGE_NAME + '@' + requested : PACKAGE_NAME + '@latest' };
     },
     // 设置页「登录网站」下拉的数据源：站点清单 + 各自登录态，不启动浏览器。
     'GET login-sites': async () => {

@@ -1,16 +1,25 @@
-// update.test.mjs — 更新判据的纯函数护栏（0.19.39）。
+// update.test.mjs — 更新判据的纯函数护栏（0.19.39；0.19.56 换数据源后重写）。
 //
 // 需求（用户原话）：「参考 dsh-store 的设置界面顶部……设计好本插件的更新和只做
-// 提醒重启操作，替换现在空白的单独 github 按钮」。
+// 提醒重启操作，替换现在空白的单独 github 按钮」；0.19.56 追加：「为什么没法做到
+// 真正更新？——点击检查更新后不能自动拉取更新安装？」。
 //
-// 这一层是**判据层**：哪个版本算更新、查不到时说什么。它不碰网络也不碰进程，
-// 因此可以离线钉死。真装那一步（runInstall）不在本文件里——它有副作用，
-// 由接线层与人工验证覆盖。
+// 0.19.55 及之前更新源是 npm registry，但本项目**从不 publish**（release.yml 有
+// 守卫强制）——真发布渠道是 GitHub Releases。数据源换成 Releases 后，这一层钉的
+// 仍是**判据**：哪个版本算更新、资产怎么定位、URL 安不安全。它不碰网络也不碰
+// 子进程，因此可以离线钉死。真下载/真安装（fetchReleases / downloadReleaseAsset /
+// installLocalTarball）有副作用，由接线层与人工验证覆盖。
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  parseVersion, compareVersions, pickLatest, updateDecision, PACKAGE_NAME, DEFAULT_REGISTRY,
+  parseVersion, compareVersions, pickLatest, assetForVersion, updateDecision,
+  isSafeDownloadUrl, PACKAGE_NAME, GITHUB_REPO,
 } from '../lib/update.js';
+
+/** 造一条 Releases API 形状的记录（只带本模块消费的字段）。 */
+function rel(tag, { draft = false, prerelease = false, assets = [] } = {}) {
+  return { tag_name: tag, draft, prerelease, assets };
+}
 
 // ---- parseVersion ---------------------------------------------------------
 
@@ -50,66 +59,128 @@ test('compareVersions：正式版胜过同号预发布，两个预发布之间�
 
 // ---- pickLatest -----------------------------------------------------------
 
-test('pickLatest：只认正式版，预发布不进候选', () => {
-  const packument = {
-    'dist-tags': { latest: '9.9.9' },
-    versions: { '1.0.0': {}, '1.1.0': {}, '2.0.0-rc.1': {} },
-  };
-  // 2.0.0-rc.1 数字段最大，但它是预发布 ⇒ 不选它；
-  // dist-tags.latest 是 9.9.9，而它不在 versions 里 ⇒ 也不选它。
-  assert.equal(pickLatest(packument), '1.1.0');
+test('pickLatest：只认正式 release，预发布与草稿不进候选', () => {
+  const releases = [
+    rel('v2.0.0-rc.1', { prerelease: true }),
+    rel('v1.1.0'),
+    rel('v1.0.0', { draft: true }),
+    rel('v0.9.0'),
+  ];
+  // 2.0.0-rc.1 是 prerelease、1.0.0 是 draft ⇒ 都不选；
+  assert.equal(pickLatest(releases), '1.1.0');
 });
 
-test('pickLatest：全是预发布时回落到 dist-tags.latest（不是「没有更新」）', () => {
-  // 把「有得装」说成「没得装」是本项目记过的假陈述，因此这里必须有回落。
-  const packument = {
-    'dist-tags': { latest: '1.0.0-rc.3' },
-    versions: { '1.0.0-rc.1': {}, '1.0.0-rc.3': {} },
-  };
-  assert.equal(pickLatest(packument), '1.0.0-rc.3');
+test('pickLatest：tag 的 v 前缀被剥掉（对外报的版本号与 package.json 同形）', () => {
+  assert.equal(pickLatest([rel('v0.19.55'), rel('v0.19.54')]), '0.19.55');
 });
 
-test('pickLatest：畸形 packument 一律 null（不抛）', () => {
-  for (const bad of [null, undefined, {}, { versions: null }, { versions: { abc: {} } }, 'nope']) {
+test('pickLatest：按版本号比，不按数组顺序（补发旧 tag 时不被顺序骗到）', () => {
+  // GitHub 倒序里第一条是 v0.19.51，但版本号最大的是 v0.19.55。
+  assert.equal(pickLatest([rel('v0.19.51'), rel('v0.19.55'), rel('v0.19.54')]), '0.19.55');
+});
+
+test('pickLatest：全部不可用时回落数组第一条可解析 tag，仍不冒充「没有更新」', () => {
+  assert.equal(pickLatest([rel('v1.0.0-rc.3'), rel('v1.0.0-rc.1')]), '1.0.0-rc.3');
+});
+
+test('pickLatest：畸形响应一律 null（不抛）', () => {
+  for (const bad of [null, undefined, {}, [], 'nope', [null, 'x', {}]]) {
     assert.equal(pickLatest(bad), null);
   }
 });
 
+// ---- assetForVersion ------------------------------------------------------
+
+test('assetForVersion：按命名规则定位 <包名>-<版本>.tgz，返回下载地址', () => {
+  const releases = [
+    rel('v0.19.55', { assets: [{ name: 'dsh-webcode-bridge-0.19.55.tgz', browser_download_url: 'https://github.com/RSLN-creator/dsh-web-bridge/releases/download/v0.19.55/dsh-webcode-bridge-0.19.55.tgz' }] }),
+    rel('v0.19.54', { assets: [{ name: 'dsh-webcode-bridge-0.19.54.tgz', browser_download_url: 'https://github.com/RSLN-creator/dsh-web-bridge/releases/download/v0.19.54/dsh-webcode-bridge-0.19.54.tgz' }] }),
+  ];
+  const a = assetForVersion(releases, '0.19.55');
+  assert.equal(a.name, 'dsh-webcode-bridge-0.19.55.tgz');
+  assert.match(a.url, /^https:\/\/github\.com\//);
+  // 不带 v 前缀 / 带 v 前缀都能命中同一条
+  assert.equal(assetForVersion(releases, 'v0.19.54')?.name, 'dsh-webcode-bridge-0.19.54.tgz');
+});
+
+test('assetForVersion：资产缺失或域名不对时返回 null（不给未校验的 URL）', () => {
+  // 版本命中但没有 assets
+  assert.equal(assetForVersion([rel('v0.19.55')], '0.19.55'), null);
+  // 资产在，但下载域是陌生域（外部数据不可信）
+  const evil = [rel('v0.19.55', { assets: [{ name: 'dsh-webcode-bridge-0.19.55.tgz', browser_download_url: 'https://evil.example/x.tgz' }] })];
+  assert.equal(assetForVersion(evil, '0.19.55'), null);
+  // 版本号本身解析失败
+  assert.equal(assetForVersion([rel('v0.19.55')], 'abc'), null);
+  // 显式点名预发布允许命中（降级/内测场景），前提是资产齐全
+  const pre = [rel('v1.0.0-rc.1', { prerelease: true, assets: [{ name: 'dsh-webcode-bridge-1.0.0-rc.1.tgz', browser_download_url: 'https://github.com/r/r/dsh-webcode-bridge-1.0.0-rc.1.tgz' }] })];
+  assert.equal(assetForVersion(pre, '1.0.0-rc.1')?.name, 'dsh-webcode-bridge-1.0.0-rc.1.tgz');
+});
+
 // ---- updateDecision -------------------------------------------------------
 
-test('updateDecision：有新版 → outdated，带上 latest', () => {
-  const d = updateDecision({ current: '0.19.38', packument: { 'dist-tags': { latest: '0.19.39' }, versions: { '0.19.39': {} } } });
+test('updateDecision：有新版 → outdated，带上 latest 与 asset', () => {
+  const releases = [
+    rel('v0.19.56', { assets: [{ name: 'dsh-webcode-bridge-0.19.56.tgz', browser_download_url: 'https://github.com/r/r/dsh-webcode-bridge-0.19.56.tgz' }] }),
+    rel('v0.19.55'),
+  ];
+  const d = updateDecision({ current: '0.19.55', releases });
   assert.equal(d.status, 'outdated');
-  assert.equal(d.current, '0.19.38');
-  assert.equal(d.latest, '0.19.39');
+  assert.equal(d.current, '0.19.55');
+  assert.equal(d.latest, '0.19.56');
+  assert.equal(d.asset.name, 'dsh-webcode-bridge-0.19.56.tgz');
 });
 
 test('updateDecision：同版 → current（不提示更新）', () => {
-  const d = updateDecision({ current: '0.19.39', packument: { 'dist-tags': { latest: '0.19.39' }, versions: { '0.19.39': {} } } });
+  const d = updateDecision({ current: '0.19.55', releases: [rel('v0.19.55'), rel('v0.19.54')] });
   assert.equal(d.status, 'current');
 });
 
-test('updateDecision：本地版本比 registry 新 → current，不提示「有更新」', () => {
-  // 本地 tgz 比 registry 新是**真实存在**的状态（本项目常年在工作树里跑）。
+test('updateDecision：本地版本比 Releases 新 → current，不提示「有更新」', () => {
+  // 本地 tgz 比 Releases 新是**真实存在**的状态（本项目常年在工作树里跑）。
   // 那时提示「更新到更旧的版本」是错的。
-  const d = updateDecision({ current: '0.19.40', packument: { 'dist-tags': { latest: '0.19.39' }, versions: { '0.19.39': {} } } });
+  const d = updateDecision({ current: '0.19.56', releases: [rel('v0.19.55')] });
   assert.equal(d.status, 'current');
+});
+
+test('updateDecision：最新版没有 tarball 资产 → unknown（说得出「有新版但装不了」）', () => {
+  // 把「有新版」说成「current」是假陈述；「outdated 却没有 asset」会在安装时
+  // 才爆炸——所以判据层就把它定为 unknown 并给出原因。
+  const d = updateDecision({ current: '0.19.55', releases: [rel('v0.19.56')] });
+  assert.equal(d.status, 'unknown');
+  assert.match(d.reason, /tarball 资产缺失/);
 });
 
 test('updateDecision：查不到 → unknown，**不是** current（不把没查到说成已是最新）', () => {
-  const a = updateDecision({ current: '0.19.39', error: 'HTTP 502' });
+  const a = updateDecision({ current: '0.19.55', error: 'HTTP 502' });
   assert.equal(a.status, 'unknown');
   assert.match(a.reason, /502/);
-  const b = updateDecision({ current: '0.19.39', packument: {} });
+  const b = updateDecision({ current: '0.19.55', releases: [] });
   assert.equal(b.status, 'unknown');
   // 当前版本本身不可解析也是 unknown —— 没有「可比较的两端」就没有结论。
-  const c = updateDecision({ current: 'dev', packument: { 'dist-tags': { latest: '1.0.0' }, versions: { '1.0.0': {} } } });
+  const c = updateDecision({ current: 'dev', releases: [rel('v1.0.0')] });
   assert.equal(c.status, 'unknown');
 });
 
-// ---- 常量与默认值 ---------------------------------------------------------
+// ---- isSafeDownloadUrl ----------------------------------------------------
 
-test('包名与 registry 默认值可核对（改包名会让更新指向别的包）', () => {
+test('isSafeDownloadUrl：只放行 Releases 资产的真实下载域，http 与陌生域一律拒绝', () => {
+  for (const good of [
+    'https://github.com/RSLN-creator/dsh-web-bridge/releases/download/v0.19.55/dsh-webcode-bridge-0.19.55.tgz',
+    'https://objects.githubusercontent.com/SIGNED-URL/x.tgz',
+    'https://release-assets.githubusercontent.com/SIGNED-URL/x.tgz',
+  ]) assert.equal(isSafeDownloadUrl(good), true, good);
+  for (const bad of [
+    'http://github.com/r/r/x.tgz',                      // 明文 http
+    'https://evil.example/x.tgz',                       // 陌生域
+    'https://github.com.evil.example/x.tgz',            // 伪装子域（hostname 不等于 github.com）
+    'ftp://github.com/x.tgz',                           // 非 http(s) 协议
+    'not a url', '', null, undefined, 'javascript:alert(1)',
+  ]) assert.equal(isSafeDownloadUrl(bad), false, String(bad));
+});
+
+// ---- 常量 -----------------------------------------------------------------
+
+test('包名与发布仓库可核对（改了任何一个，更新就指向了别处）', () => {
   assert.equal(PACKAGE_NAME, 'dsh-webcode-bridge');
-  assert.match(DEFAULT_REGISTRY, /^https:\/\//);
+  assert.equal(GITHUB_REPO, 'RSLN-creator/dsh-web-bridge');
 });
