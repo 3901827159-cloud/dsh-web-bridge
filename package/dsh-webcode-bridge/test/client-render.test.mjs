@@ -1057,6 +1057,34 @@ test('★ 0.19.51 反向验证：menu.item 缺 id 时桩必须拒绝（真实 Sl
   }
 });
 
+// 0.19.57：品牌形象换 Iconoir `bridge-3d`（用户指定：作者 Luca Burgio，MIT，
+// https://github.com/iconoir-icons/iconoir）。历史教训是 0.19.39 自绘了一个与
+// 插件管理页形象对不上的形状（用户判为「绘制错误」），0.19.56 又自绘了第二次。
+// 因此这里把「品牌几何 = 官方逐字路径」钉死：三条路径（两条短竖线 + S 形桥体）
+// 的 `d` 必须与 iconoir `icons/regular/bridge-3d.svg` 完全一致，自改坐标即红。
+// 反向验证：改动桥体路径任一数字 ⇒ 本条红（已做）。
+test('★ 0.19.57 品牌图标：DwbMark 必须是 Iconoir bridge-3d 的官方几何（不自改坐标）', () => {
+  const src = bridgeSrcFrom('client.cjs');
+  // 官方 bridge-3d regular 的三条路径（逐字；取件 2026-10-03，unpkg iconoir）。
+  assert.ok(src.includes("'M18 4L21 4'"), '右上短竖线不是官方路径（自改了坐标？）');
+  assert.ok(src.includes("'M10 20C10 20 16.5 17.5 12 12C7.5 6.5 14 4 14 4'"),
+    'S 形桥体不是官方路径（自改了坐标？）');
+  assert.ok(src.includes("'M3 20H6'"), '左下短竖线不是官方路径（自改了坐标？）');
+  // 官方刻度：24 viewBox / stroke 1.5（官方 bridge-3d 的 stroke-width）。
+  assert.ok(src.includes("viewBox: '0 0 24 24'"), '品牌图标必须用官方 24 viewBox');
+  assert.match(src, /function DwbMarkColor\(props\)[\s\S]{0,600}sw = 1\.5/,
+    '品牌图标的线宽必须用官方 1.5（官方 bridge-3d 刻度）');
+  // 两个端点圆点（官方的实心小圆）也必须在。
+  assert.ok(src.includes('cx: 10, cy: 20, r: 1') && src.includes('cx: 14, cy: 4, r: 1'),
+    'bridge-3d 的两个端点圆点丢了');
+  // 旧形象（0.19.56 的拱桥 / 0.19.39 的浅拱）不得复活。
+  assert.ok(!src.includes('M5 12.33C5 7.33 19 7.33 19 12.33'), '0.19.56 的旧拱桥路径复活了');
+  assert.ok(!src.includes("'M2.5 12.4c0-3.9"), '0.19.39 的旧浅拱路径复活了');
+  // 彩色版与线稿必须同构：DwbMark 直接转发 DwbMarkColor（monochrome），不是第二份坐标。
+  assert.match(src, /function DwbMark\(props\)\s*\{\s*return DwbMarkColor\(\{\s*\.\.\.props,\s*monochrome: true\s*\}\);\s*\}/,
+    'DwbMark 必须直接转发 DwbMarkColor（两份坐标会漂移）');
+});
+
 // ------------------------------------------------------------------ 0.14.8
 
 test('★ 站点图标与一级选择框（0.16.23 接手网页会话半成品）：图标/档位说明/首屏选择框都要渲染出来', async () => {

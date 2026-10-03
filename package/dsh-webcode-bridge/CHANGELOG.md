@@ -5,6 +5,28 @@ All notable changes to this package. Newest first.
 The canonical, in-progress record of what was changed and why lives in [doc/progress.md](../../doc/progress.md);
 this file is the package-facing release history.
 
+## 0.19.57
+
+**品牌形象换成 Iconoir `bridge-3d`（用户指定；作者 Luca Burgio，MIT 许可）——三处同一官方几何，逐字路径不自改。**
+
+### 用户要的是什么（原话，逐字）
+
+> 「名称bridge-3d作者Luca Burgio许可MIT集合下，https://github.com/iconoir-icons/iconoir，
+> 请你查看本地图片……进行使用替换本地全部形象，彩色随官方色调你来绘制，
+> 主要注意每个需要图标大小/颜色需要参考对应官方图标」
+
+### 改了什么
+
+- **几何 = 官方逐字**：Iconoir `bridge-3d` regular（viewBox 24 / stroke 1.5 / round 端点）
+  的 5 条元素原样入画——两条短竖线、两个实心端点、S 形桥体。0.19.39/0.19.56 两轮
+  自绘形状被用户判为「绘制错误」的教训收口为一条护栏：品牌几何必须官方逐字，
+  自改坐标即红（反向验证已做）。
+- **颜色按位置分**（0.19.56 立的规则延续）：官方图标行内（左栏行 / 右栏 tab / guide）
+  用 `currentColor` 正确线稿；「能彩色的地方」（设置页品牌位 + `icon.svg` 插件管理页）
+  用桥的品牌蓝青——右上蓝 `#7CB7FF`（网页侧）、左下青 `#45D9E7`（本地侧），桥体
+  沿流向渐变。Iconoir 是单色图标集（无官方彩色变体），彩色取**本插件**的官方色调。
+- **功能图标不动**：任务板 / 并发会话 / 站点品牌矢量表达的是各自语义，不是插件形象。
+
 ## 0.19.56
 
 **更新源切到 GitHub Releases（修「检查更新永远说已是最新」）+ 启动自动检查一次 + 更新按钮与 GitHub 链接同圆框 + 品牌图标统一为 icon.svg 同构。**

@@ -2023,42 +2023,35 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * **dwb 品牌标记**（0.19.39 引入；0.19.56 重绘为与 icon.svg 同构）。
+     * **dwb 品牌标记**（0.19.39 引入；0.19.56 按 icon.svg 同构重绘；
+     * **0.19.57 换 Iconoir `bridge-3d`** —— 用户指定的插件形象）。
      *
-     * 用户原话（0.19.56）：「现在"插件"界面那个带有颜色的矢量图不错，本插件形象，
-     * 但是别的地方的都是绘制错误了，请你：能彩色地方彩色，用这里的图，不能的地方
-     * 改为正确黑色矢量图」。
+     * 用户原话（0.19.57）：「名称 bridge-3d 作者 Luca Burgio 许可 MIT 集合下，
+     * https://github.com/iconoir-icons/iconoir，请你查看本地图片
+     * iconoir_bridge-3d.png 进行使用替换本地全部形象，彩色随官方色调你来绘制，
+     * 主要注意每个需要图标大小/颜色需要参考对应官方图标」。
      *
-     * ## 为什么重绘
+     * ## 几何：Iconoir `bridge-3d` regular 的**逐字路径**
      *
-     * 插件管理页显示的是 `icon.svg`（一座拱桥 + 两端方墩 + 中间断线）——那是
-     * 用户认可的形象。而这里 0.19.39 自绘的是**另一个形状**（浅拱 + 平桥面 +
-     * 顶点圆点），与认可形象对不上，用户把它判为「绘制错误」。因此本组件现在
-     * 按 icon.svg 的**同一几何**重画：
-     *   · 拱 `M7.5 18.5C7.5 11 28.5 11 28.5 18.5` —— icon.svg 的桥拱，等比缩到
-     *     24 viewBox；
-     *   · 两端方墩（圆角矩形）＝桥落地的两岸；
-     *   · 中间那条**断线**＝「网页 ↔ 本地」两侧尚未直连、由桥来接的语义，
-     *     它是 icon.svg 的核心表意，旧画法把它丢了。
+     * 官方 SVG（unpkg `iconoir` npm 包 / GitHub 仓库 `icons/regular/bridge-3d.svg`，
+     * 作者 Luca Burgio，MIT）：
+     *   · `M18 4L21 4`            —— 右上短竖线（起点的「上探」）
+     *   · `M10 20C10 20 16.5 17.5 12 12C7.5 6.5 14 4 14 4` —— S 形桥体
+     *   · `M3 20H6`               —— 左下短竖线（终点的「落地」）
+     *   · 两个实心圆点 (14,4) 与 (10,20)（r=1，fill+stroke currentColor）
+     * 本组件**不改一个坐标**——品牌形象必须与官方原样一致，自改等于又造一次
+     * 「绘制错误」。viewBox 24 / stroke-width 1.5 / round 端点也都是官方值。
      *
-     * ## 两套颜色是**同一个形状**的两份，不是两个图标
+     * ## 颜色与刻度：位置决定形态（用户 0.19.56 立的规则）
      *
-     *   · 本组件（DwbMark）：`currentColor` 线稿。左栏行、右栏 tab 标题、guide
-     *     图标都在官方图标的颜色体系里（明暗主题/选中态由宿主继承），用户说的
-     *     「不能彩色的地方」= 这些位置，给「正确的黑色矢量图」（currentColor 在
-     *     常态即近黑的前景色）；
-     *   · `DwbMarkColor`（见下）：icon.svg 原始配色。只用在设置页顶部品牌位——
-     *     那里是插件自己的品牌区（「能彩色的地方」），彩色形象在那里成立。
+     *   · 本组件（DwbMark）：**currentColor 线稿**——左栏行、右栏 tab 标题、guide
+     *     图标都在官方图标的颜色体系里（明暗主题/选中态由宿主继承），即「不能
+     *     彩色的地方用正确黑色矢量图」；线稿刻度（fill:none / stroke 1.5 /
+     *     round）与 Iconoir 及官方 panel 行图标同源，并排时光学粗细一致；
+     *   · `DwbMarkColor`（见下）：**彩色版**，只用在设置页顶部品牌位（「能彩色
+     *     的地方」），配色取桥的既有品牌蓝青双色渐变。
      *
-     * 两份必须**逐坐标同构**（只差 stroke/fill 颜色），改任何一个都要同步另一个——
-     * 官方 plugin 列表里那张彩色图与本插件界面里的线稿若再漂移，就是又一次
-     * 「两处口径漂移」。
-     *
-     * ## 刻度与旧版一致的原因
-     *
-     * `props.size` 由宿主给（折叠轨道 18px、展开 16px、右栏 guide 22/26px、
-     * tab 标题 13px），必须读而不是写死。线稿模式沿用官方刻度：fill:none +
-     * stroke:currentColor + round 端点——并排时与官方图标光学粗细一致。
+     * 两份必须**逐坐标同构**（只差颜色），改任何一个都要同步另一个。
      *
      * @param {{size?: number}} props 宿主给的图标呈现（与官方 IconProps 同形）
      */
@@ -2067,44 +2060,44 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * dwb 品牌标记的**彩色**版（0.19.56）：icon.svg 的逐字投影。
+     * dwb 品牌标记的**彩色**版（0.19.57）：Iconoir `bridge-3d` 几何 + 桥的品牌蓝青。
      *
-     * 形状与 DwbMark 共用同一组坐标（见上），只差颜色：左墩蓝渐变、右墩青渐变、
-     * 拱与落点 `#7CB7FF`、断线 `#45D9E7`——全部来自 icon.svg，不另造配色。
-     * `monochrome: true` 时退化为 currentColor 线稿（DwbMark 就是这么实现的，
-     * 放在同一函数里是让「两份必须同构」成为**结构性**事实而不是一句纪律）。
+     * 「彩色随官方色调」的落点：Iconoir 官方是单色图标集（currentColor），没有
+     * 官方彩色变体可抄，因此彩色版沿用本插件 icon.svg 时代已确立的品牌色系
+     * （蓝 `#7CB7FF→#145AF3` / 青 `#45D9E7→#0E9AA8`）——色调是**本项目自己的
+     * 官方色调**，形状是 Iconoir 官方几何。S 形桥体从左下（青，本地侧）流向右上
+     * （蓝，网页侧），两个端点圆点各随所在端，两条短竖线取所在端的浅色。
      *
-     * 渐变 id 带 `dwb-` 前缀：SVG 渐变 id 在**整个文档**里唯一，两张实例
-     * （设置页 + 其他任何地方）若都用裸 `left`/`right` 会互相抢 id。
+     * 渐变 id 带 `dwb-` 前缀：SVG 渐变 id 在**整个文档**里唯一，两张实例若都用
+     * 裸 id 会互相抢（先渲染者的渐变赢，后者的颜色错）。
      *
      * @param {{size?: number, monochrome?: boolean}} props
      */
     function DwbMarkColor(props) {
       const size = Number(props?.size) || 16;
       const mono = props?.monochrome === true;
-      // 24 viewBox：icon.svg 是 36，坐标 ÷1.5 得到整数刻度（36/24 = 1.5）。
+      // 官方正刻度：stroke 1.5 / round 端点 / 圆点 r=1 实心。
+      const sw = 1.5;
       return h('svg', {
         viewBox: '0 0 24 24', width: size, height: size,
         fill: 'none', 'aria-hidden': 'true', focusable: 'false',
       },
-        // 左右两墩：icon.svg 的两个圆角矩形（x=3/24, y=21, w=h=9 → 2/16, 14, 6×6）
-        h('rect', { x: 2, y: 14, width: 6, height: 6, rx: 1.33, fill: mono ? 'none' : 'url(#dwb-left)', stroke: mono ? 'currentColor' : 'none', 'stroke-width': mono ? 1.3 : undefined, 'stroke-linejoin': mono ? 'round' : undefined }),
-        h('rect', { x: 16, y: 14, width: 6, height: 6, rx: 1.33, fill: mono ? 'none' : 'url(#dwb-right)', stroke: mono ? 'currentColor' : 'none', 'stroke-width': mono ? 1.3 : undefined, 'stroke-linejoin': mono ? 'round' : undefined }),
-        // 拱：icon.svg 的 `M7.5 18.5C7.5 11 28.5 11 28.5 18.5`（÷1.5）
-        h('path', { d: 'M5 12.33C5 7.33 19 7.33 19 12.33', stroke: mono ? 'currentColor' : '#7CB7FF', strokeWidth: 1.6, strokeLinecap: 'round', fill: 'none' }),
-        // 两个落点：icon.svg 的 (7.5,21) 与 (28.5,21)（÷1.5）
-        h('circle', { cx: 5, cy: 14, r: 1.07, fill: mono ? 'currentColor' : '#7CB7FF' }),
-        h('circle', { cx: 19, cy: 14, r: 1.07, fill: mono ? 'currentColor' : '#7CB7FF' }),
-        // 中间断线：icon.svg 的 `M13 25.5H23`（÷1.5），虚线是「待桥接」的表意本体
-        h('path', { d: 'M8.67 17H15.33', stroke: mono ? 'currentColor' : '#45D9E7', strokeWidth: 1.6, strokeLinecap: 'round', strokeDasharray: '2 2', fill: 'none' }),
-        // 渐变只在彩色模式输出（线稿模式引用未定义的 id 会画出黑块）
+        // 以下 5 条路径全部逐字取自 iconoir `bridge-3d` regular（MIT, Luca Burgio）。
+        // 右上短竖线（网页侧）
+        h('path', { d: 'M18 4L21 4', stroke: mono ? 'currentColor' : '#7CB7FF', strokeWidth: sw, strokeLinecap: 'round', strokeLinejoin: 'round' }),
+        // 终点圆点（左下，本地侧）
+        h('circle', { cx: 10, cy: 20, r: 1, fill: mono ? 'currentColor' : '#45D9E7', stroke: mono ? 'currentColor' : '#45D9E7', strokeLinecap: 'round', strokeLinejoin: 'round' }),
+        // 起点圆点（右上，网页侧）
+        h('circle', { cx: 14, cy: 4, r: 1, fill: mono ? 'currentColor' : '#7CB7FF', stroke: mono ? 'currentColor' : '#7CB7FF', strokeLinecap: 'round', strokeLinejoin: 'round' }),
+        // S 形桥体：本地（左下，青）→ 网页（右上，蓝）
+        h('path', { d: 'M10 20C10 20 16.5 17.5 12 12C7.5 6.5 14 4 14 4', stroke: mono ? 'currentColor' : 'url(#dwb-s)', strokeWidth: sw, strokeLinecap: 'round', strokeLinejoin: 'round' }),
+        // 左下短竖线（本地侧）
+        h('path', { d: 'M3 20H6', stroke: mono ? 'currentColor' : '#45D9E7', strokeWidth: sw, strokeLinecap: 'round', strokeLinejoin: 'round' }),
+        // 渐变只在彩色模式输出；沿桥体走向（右上蓝 → 左下青）
         !mono ? h('defs', null,
-          h('linearGradient', { id: 'dwb-left', x1: 5, y1: 14, x2: 5, y2: 20, gradientUnits: 'userSpaceOnUse' },
+          h('linearGradient', { id: 'dwb-s', x1: 14, y1: 4, x2: 10, y2: 20, gradientUnits: 'userSpaceOnUse' },
             h('stop', { stopColor: '#7CB7FF' }),
-            h('stop', { offset: 1, stopColor: '#145AF3' })),
-          h('linearGradient', { id: 'dwb-right', x1: 19, y1: 14, x2: 19, y2: 20, gradientUnits: 'userSpaceOnUse' },
-            h('stop', { stopColor: '#45D9E7' }),
-            h('stop', { offset: 1, stopColor: '#0E9AA8' }))) : null);
+            h('stop', { offset: 1, stopColor: '#45D9E7' }))) : null);
     }
 
     /**
@@ -3331,7 +3324,8 @@ window.__ModuleLoader__.load({
         h('div', { className: 'hwb-settings-head' },
           h('span', { className: 'hwb-brand' },
             // 0.19.56：品牌位用**彩色**版（用户：「能彩色地方彩色，用这里的图」）。
-            // icon.svg 的原始配色在这里成立——它是插件自己的品牌区，不是官方图标行。
+            // 0.19.57：品牌位用**彩色**版（Iconoir bridge-3d 几何 + 桥的品牌蓝青）。
+            // 「能彩色的地方彩色」——品牌区是插件自己的地盘，彩色形象在这里成立。
             h('span', { className: 'hwb-brand-mark', 'aria-hidden': 'true' }, h(DwbMarkColor, { size: 20 })),
             h('h2', null, 'Harness Web Bridge')),
           h('span', { className: 'hwb-head-actions' },
