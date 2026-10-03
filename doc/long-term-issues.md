@@ -52,7 +52,7 @@
 | 38 | **`NODE_TEST_CONTEXT` 守卫在裸跑形态的残余洞：prompt store 读写通道**（2026-10-02 登记；regression 用例本轮已补隔离）——同族于 #37 的第二条通道；且由此暴露**生产缺陷候选：真实轮重放读回首轮正本会丢后续增量（红线二形状）**，见正文 §38 | 高 | 否 | `lib/index.js`（`readSessionPrompt`、executor 重建分支）、`lib/prompt-store.js`、`test/regression.test.mjs` |
 | 39 | **错误码在 harness 边界全部退化成 `UNKNOWN`**（2026-10-02 登记；**同轮已修，0.19.54**）——本插件给普通 `Error` 挂 `.code`，而官方 `normalizeLlmFailure` 只认 `instanceof HarnessError`；实测 284 份会话里归因本插件的 **137/137** 条 error finishes 全是 `code:"UNKNOWN"`（官方 provider 丢码 0 条）。后果：官方 `llm-retry` 自动重试与 `compaction-basic` 超限自动压缩修复**对本插件从未生效且不报错**；UI 一律显示 `UNKNOWN`。另含 `RATE_LIMITED` ≠ 官方 `RATE_LIMIT` 的码名不符 | 高 | 否 | `lib/error-codes.js`（新增，错误码真源）、`lib/index.js`、`lib/browser-driver.js`、`lib/think-effort.js`、`lib/upstream.js`、`lib/zero-progress.js`、`test/error-codes.test.mjs`、`scripts/scan-error-codes.mjs`、`doc/research/2026-10-02-dsh-official-error-and-repair.md` || 40 | **并发会话的「一组一行」在官方会话清单里做不到**（2026-10-03 登记）——用户要「明显的一行是3个重叠标签页形状一行区分与普通会话」；真会话会各自成行，而官方清单条目是 **shell 私有代码**（`SessionNodeItem`），插件只能**装饰既有行**（4 个槽），不能新增行、不能分组。本轮已在**左栏面板行**上用「三个重叠标签页」图标表达「这是会话组」，清单内部分组未做 | 低 | 否 | `lib/client.cjs`（`ConcurrentPanelIcon`）、`doc/progress.md`（2026-10-03） |
 | 40 | **并发会话的「一组一行」在官方会话清单里做不到**（2026-10-03 登记）——用户要「明显的一行是3个重叠标签页形状一行区分与普通会话」；真会话会各自成行，而官方清单条目是 **shell 私有代码**（`SessionNodeItem`），插件只能**装饰既有行**（4 个槽），不能新增行、不能分组。本轮已在**左栏面板行**上用「三个重叠标签页」图标表达「这是会话组」，清单内部分组未做 | 低 | 否 | `lib/client.cjs`（`ConcurrentPanelIcon`）、`doc/progress.md`（2026-10-03） |
-| 41 | **CI 在 `main` 上长期恒红（2026-09-26 起）**（2026-10-03 登记，**同轮已修**）——每条都是**判据/环境**问题、与产品行为无关：① `site-prompt-transport.test.mjs` 把 profile 建在**被 gitignore 的** `.tmp/` 下，干净 clone 里不存在 ⇒ `ENOENT ...\.tmp\siteprompt-cp-XXXXXX`（④/⑥a/⑥b/session-import 四条一起红）；② `column-fs.test.mjs` 拿**未规范化**的 `columnRootOf()` 去比**已规范化**的写入返回值，在「临时目录带 8.3 短名」的机器（CI `C:\Users\RUNNER~1\…`）必然为假；③ `pre-deliver-window.test.mjs` ①b 用「两轮墙钟之差」量间隔，而 `end-to-start` 基准下该差值恒 = gap − 上一轮稳态收尾（CI 实测 `4302 vs 1514`） | 中 | 否 | `test/site-prompt-transport.test.mjs`、`test/column-fs.test.mjs`、`test/pre-deliver-window.test.mjs`、`doc/progress.md`（2026-10-03） |
+| 41 | **CI 在 `main` 上长期恒红（2026-09-26 起）**（2026-10-03 登记，**同轮已修**）——每条都是**判据/环境**问题、与产品行为无关：① `site-prompt-transport.test.mjs` 把 profile 建在**被 gitignore 的** `.tmp/` 下，干净 clone 里不存在 ⇒ `ENOENT ...\.tmp\siteprompt-cp-XXXXXX`（④/⑥a/⑥b/session-import 四条一起红）；② `column-fs.test.mjs` 拿**未规范化**的 `columnRootOf()` 去比**已规范化**的写入返回值，在「临时目录带 8.3 短名」的机器（CI `C:\Users\RUNNER~1\…`）必然为假；③ `pre-deliver-window.test.mjs` ①b 用「两轮墙钟之差」量间隔，而 `end-to-start` 基准下该差值恒 = gap − 上一轮稳态收尾（CI 实测 `4302 vs 1514`）；④ `column-fs.test.mjs` 另一条用例用 `new URL(import.meta.url).pathname.slice(1)` 拼源码路径，在 POSIX 上把 `/home/…` 削成 `home/…`（相对路径）⇒ ubuntu 腿 `ENOENT: open 'home/runner/…'`；⑤ `site-mount.test.mjs` 那条「白名单内 + 存在」的断言用 `path.join(os.homedir(),'.dsh')`，而 CI runner 上**没装 DSH** ⇒ 先撞「目录不存在」（两条腿都红）。修完前三条推上去 CI 又红，才暴露出④⑤——被前三条的噪声盖住了 | 中 | 否 | `test/site-prompt-transport.test.mjs`、`test/column-fs.test.mjs`、`test/pre-deliver-window.test.mjs`、`test/site-mount.test.mjs`、`doc/progress.md`（2026-10-03） |
 
 > **一览表完整性（2026-09-16 修正；2026-09-26 补上闸门）**：本表此前**漏登记 #19 与 #20**（正文有、表里没有）。
 > 这两条都是可机检的登记错误，而当时没有任何闸门覆盖「正文条目 ↔ 表格条目」的一致性。
@@ -2579,7 +2579,12 @@ function harnessErrorCode(error) {
 `CI / test (windows-latest, node 22|24)` 自 2026-09-26 的 `chore(release): 0.19.27` 之后**每轮都红**，
 且每次失败的是**同一组**用例。最近一次绿是 `36244903186 chore(release): 0.19.27 对外文案英文化`。
 
-### 三条都是**判据/环境**问题，不是产品行为
+### 五条都是**判据/环境**问题，不是产品行为
+
+> 修的过程中分**两批**发现：第一批是 CI 日志直接点出的三条（①②③），修完推上去之后
+> CI 又红，才暴露出第二批两条（④⑤）——它们此前**被前三条的噪声盖住了**：整套 `pnpm test`
+> 在同一个进程里跑，前面红了后面的读数就不再被人细看。这也是「一次只修一条、修完再看」
+> 比「一次性猜完」更可靠的原因。
 
 1. **profile 建在被 gitignore 的目录里**（`site-prompt-transport.test.mjs`）。
    它把 profile 建在 `package/dsh-webcode-bridge/.tmp/` 下，而 `.tmp/` 在 `.gitignore` 里、
@@ -2596,8 +2601,18 @@ function harnessErrorCode(error) {
    **生成结束**起算的，而「生成结束 → 本轮提交」之间还夹着驱动的稳态收尾（实测约 1.2s），
    那段时间先吃掉一部分间隔 ⇒ 墙钟之差 ≈ gap − 1.2s，**且差多少取决于机器**。
    CI 实测 `4302ms vs 1514ms`（差 2788 < 断言的 3000）。
+4. **把 POSIX 路径削成了相对路径**（`column-fs.test.mjs` 的另一条用例「三跳齐全：POST chat
+   必须落盘…」）。它用 `new URL(import.meta.url).pathname.slice(1)` 拼源码路径——那个
+   `.slice(1)` 是「Windows 上削掉盘符前多出来的斜杠」的补丁，在 POSIX 上却把
+   `/home/runner/...` 削成 `home/runner/...`（**相对路径**）⇒ ubuntu 腿直接
+   `ENOENT: open 'home/runner/work/.../lib/web-control.js'`；Windows 腿恰好正确，
+   所以这条也是**只在 CI 红、本机永远绿**。
+5. **断言依赖「装了 DSH 的机器」才有的目录**（`site-mount.test.mjs` 的
+   「白名单内 + 存在 ⇒ 放行」那条）。它用 `path.join(os.homedir(), '.dsh')`，
+   而 CI runner 上**没有** `~/.dsh` ⇒ 先撞「源 profile 目录不存在」分支，`ok` 变 false。
+   （这条在**两条腿上都红**——ubuntu 与 windows runner 都没装 DSH。）
 
-### 修法（三步各一处，产品代码零改动）
+### 修法（五步各一处，产品代码零改动）
 
 1. 先 `fs.mkdirSync(tmpRoot, { recursive: true })` 建父目录——保留「profile 落在包内 `.tmp`」的原语义，
    只补上缺的前置条件（**不**改用 `os.tmpdir()`，免得把语义一起改掉）。
@@ -2605,12 +2620,18 @@ function harnessErrorCode(error) {
 3. ①b 改用 `send-to-send` 基准 + **两次投递的时刻差**（`driver.calls`）：`send-to-send` 从上一轮
    **发出**起算（`rememberSend` 就在投递前一刻），所以 `calls[1] − calls[0] ≥ gap` 恒成立、
    与机器快慢无关；gap=0 时该差值只剩驱动自身耗时。基准语义本身由 `test/send-gap-basis.test.mjs` 钉住。
+4. 改用 `fileURLToPath(import.meta.url)`——Node 的跨平台正解（本文件其它用例早就这么写）。
+5. 把源目录换成**本包树**（`permittedImportRoots` 的第三个根，见 `lib/web-control.js:81`）：
+   断言含义一字未变（白名单内 + 真实存在 ⇒ 放行且原样透传站点 id），但不再要求机器上装过 DSH。
 
-### 反向验证（三条都做了，证明判据不是空转）
+### 反向验证（证明判据不是空转）
 
 - ① 还原旧写法 + 把 `.tmp` 挪走 ⇒ **3 红**，报错逐字与 CI 日志相同；
 - ② 还原「未规范化比较」+ 把 `TEMP` 指到 8.3 短名目录 ⇒ 精确复现那条红（另用真实短名探针亦复现）；
 - ③ 把 large 轮次的 `gapMs` 改成 0（= 间隔没生效）⇒ ①b **1 红**；
+- ④ 逐字演示旧表达式在 POSIX URL 上的读数：`new URL('file:///home/runner/…').pathname.slice(1)`
+  → `home/runner/…`（相对路径，丢掉了前导斜杠）——这就是 ubuntu 腿那条 `ENOENT` 的成因；
+- ⑤ 该条断言的「before」就是 CI 日志本身（两台 runner 都红、本机绿），修后本机 7/7；
 - 全量：121 个测试文件逐文件 exit 0；三条修好后逐字还原，各自回到绿。
 
 ### 为什么值得单列成一条

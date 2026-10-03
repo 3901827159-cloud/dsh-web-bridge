@@ -9,6 +9,7 @@ import http from 'node:http';
 import { listen } from './fixtures/listen.js';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { createMirror } from '../lib/mirror.js';
 import { createWebControl } from '../lib/web-control.js';
 import { isLoopbackHost, originMatchesHost } from '../lib/loopback.js';
@@ -212,9 +213,12 @@ test('web-control：session-import 按站点路由，失败原因是可读错误
   assert.match(String(outside.body.error), /允许范围/);
   assert.equal(calls.length, 0, '白名单外目录不得调用导入');
 
-  // 允许根之内且存在的目录（DSH home 本身即白名单根之一）。用 os.homedir() 会落在
-  // ~/.dsh **之外**，被白名单拦下——这正是 0.14.4 白名单带来的行为变化。
-  const src = path.join(os.homedir(), '.dsh');
+  // 允许根之内且**存在**的目录。这里刻意用**本包树**（`permittedImportRoots` 的第三个根，
+  // 见 lib/web-control.js:81），而不是 `path.join(os.homedir(), '.dsh')`：后者只在**装过 DSH
+  // 的机器**上存在，CI runner 上根本没有这个目录 ⇒ 会先撞「源 profile 目录不存在」那条
+  // 分支，让本条断言在干净环境恒红（实测：CI 红、本机绿）。换成本包树之后，
+  // 断言的含义一字未变——「白名单内 + 真实存在 ⇒ 放行且原样透传站点 id」。
+  const src = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'test');
   const ok = await post({ siteId: 'glm', sourceProfileDir: src });
   assert.equal(ok.body.ok, true);
   // 站点 id 必须原样透传（这是「按站点路由」的契约：旧实现写死默认驱动，

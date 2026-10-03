@@ -19,6 +19,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   COLUMN_FS_DENIED, ColumnFsDenied, assertUnderColumnRoot, canonicalWithMissingTail,
   columnRootOf, fencedBlocks, isPathUnder, writeColumnArtifact,
@@ -192,7 +193,13 @@ test('不同列 / 不同会话的产物目录必须互不相同（0.19.23 那个
  * 落盘结果如实透出、并且落盘包在 try 里而不是让异常冒出去。
  */
 test('三跳齐全：POST chat 必须落盘，且落盘失败不得让整轮变成失败', () => {
-  const src = fs.readFileSync(path.join(path.dirname(new URL(import.meta.url).pathname.slice(1)), '..', 'lib', 'web-control.js'), 'utf8');
+  // 路径必须走 `fileURLToPath`：旧写法 `new URL(import.meta.url).pathname.slice(1)` 是
+  // 「Windows 上去掉盘符前那个多余斜杠」的补丁，在 POSIX 上它会把 `/home/...` 削成
+  // `home/...`（相对路径）⇒ CI（ubuntu）上直接
+  // `ENOENT: open 'home/runner/work/.../lib/web-control.js'`；Windows 上却恰好正确，
+  // 于是这条**只在 CI 红、本机永远绿**。
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const src = fs.readFileSync(path.join(here, '..', 'lib', 'web-control.js'), 'utf8');
   const block = src.slice(src.indexOf("'POST chat'"), src.indexOf('  };\n\n  // ── `status`'));
   assert.ok(block.length > 0, '找不到 POST chat 的动作体（改名则本判据失效，需同步）');
   // 第二跳：拿到回复之后必须调用落盘。
