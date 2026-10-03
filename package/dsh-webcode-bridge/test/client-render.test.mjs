@@ -1529,8 +1529,8 @@ test('★ 标签页：只注册 webcode-bridge（官方花名册 Team 标签页 
   assert.ok(!tabDefinitions.has('webcode-tasks'),
     '右栏不得再注册任务板标签页（0.16.18 起任务板只走左栏 sidebar.panellist）');
   // 0.19.0：右栏不得再有 `webcode-team` 标签页。用户 2026-09-22 明确指出那份
-  // 「官方 agentTeams 花名册」参考错了——本插件的 Team 是中央区的**并列多会话**
-  // （`MultiModelCompareView`，注册在 `conversation.view`），不是右栏的花名册。
+  // 「官方 agentTeams 花名册」参考错了——本插件的 Team 是**多条各自独立的真会话并排**
+  // （0.19.55 起由左栏「并发会话」行 + 中央 `main` 面板提供），不是右栏的花名册。
   // 这条是反向断言：把它加回来即变红。
   assert.ok(!tabDefinitions.has('webcode-team'),
     '右栏不得再注册 webcode-team 标签页（0.19.0：Team = 中央区并列多会话，不是官方花名册）');
@@ -1557,27 +1557,34 @@ test('★ 标签页：只注册 webcode-bridge（官方花名册 Team 标签页 
 });
 
 /**
- * 0.19.0：Team 必须落在**中央对话区**的并列多会话视图上，而不是右栏满名册。
+ * 0.19.55：并发会话必须落在**左栏行 + 同名 main 面板**上，而不是会话内的视图页签。
  *
- * 这条与 `test/team-compare.test.mjs` 分工：那边查 `MultiModelCompareView` 的
- * 内部实现（列数组、按 id 回填、稳定 sessionKey），这边查**注册位置**——
- * 一个做对了但没注册到 `conversation.view` 的组件，用户点不到，等于没做。
+ * 这条与 `test/team-compare.test.mjs` 分工：那边查 `ConcurrentColumns` 的内部实现
+ * （真会话 create/retain/release、官方 conversation.content、两个页签），这边查
+ * **注册位置**——一个做对了但没注册到 `main` 的组件，用户点不到，等于没做。
+ *
+ * 为什么从 `conversation.view` 搬走（0.19.55，用户原话见 team-compare 文件头）：
+ * 每列现在渲染的是官方自己的会话体，而 `renderFactorySlot` 会检查渲染祖先——在
+ * `conversation.content` 的子树里（也就是会话内视图所在的位置）再渲染同名 factory
+ * 会当场抛 `recursive render of factory 'conversation.content'`。所以旧那个
+ * `webcode-compare-view` 页签**必须**不存在，改由左栏「并发会话」行 + `main` 提供。
  */
-test('★ 0.19.0 Team：并列多会话必须注册在 conversation.view（用户点得到才算做成）', async () => {
-  const { errors, viewDefinitions } = await renderPane({ payloads: [emptyWindows] });
+test('★ 0.19.55 并发会话：必须由左栏行 + 同名 main 提供，且不得再挂在 conversation.view', async () => {
+  const { errors, panelEntries, mainKeys, viewDefinitions } = await renderPane({ payloads: [emptyWindows] });
   assert.deepEqual(errors, [], '注册阶段抛错：' + errors.map(e => e.message).join('; '));
-  const entry = viewDefinitions.get('webcode-compare-view');
-  assert.ok(entry, 'conversation.view 未注册并列多会话视图（已注册：' + [...viewDefinitions.keys()].join(', ') + '）');
-  // label 必须与真实能力一致：列数由数组驱动、支持 2~4 列，
-  // 所以不得再叫「三列…」（用户加到第四列时那句话就是假的）。
-  assert.ok(typeof entry.label === 'function', 'label 必须是 thunk（语言切换要能重读）');
-  const labelText = String(entry.label());
-  assert.ok(!/三列/.test(labelText),
-    'label 仍写着「三列」而实际支持 2~4 列——名称与能力不符即假陈述：' + labelText);
-  // 0.19.31：名字由用户 2026-09-27 定为「并发」（逐字原话：「『并列多对话改为』-『并发』，
-  // 去除界面内的中心上方占用位置的『并列』两个字」）。用户要的词是判据，不改成同义词。
-  assert.equal(labelText, '并发',
-    'conversation.view 的 label 必须逐字是「并发」（用户点名的词）：' + labelText);
+
+  // 正面：左栏那一行逐字叫「并发会话」，并且有同名 main 座位。
+  const row = panelEntries.find((e) => e.id === 'webcode-concurrent-panel');
+  assert.ok(row, 'sidebar.panellist 未注册并发会话入口（已注册：'
+    + panelEntries.map((e) => e.id).join(', ') + '）');
+  assert.equal(typeof row.label, 'function', 'label 必须是 thunk（语言切换要能重读）');
+  assert.equal(row.label(), '并发会话', '左栏那一行必须逐字叫「并发会话」（用户点名的词）');
+  assert.ok(mainKeys.includes('webcode-concurrent-panel'),
+    'main 座位未注册同名 key（已注册：' + mainKeys.join(', ') + '）——只注册一半，点一下就报错');
+
+  // 反面：会话内那个「并发」页签必须已经删除（技术上也不可能，见上方文档注释）。
+  assert.ok(!viewDefinitions.has('webcode-compare-view'),
+    'conversation.view 上不得再有并发视图（0.19.55 起它必然抛 recursive render of factory）');
 });
 
 // 0.19.0 删除：三条「官方花名册 Team 面板」用例（成员角色/状态/模型渲染、inactive

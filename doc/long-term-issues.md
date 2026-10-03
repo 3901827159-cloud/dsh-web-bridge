@@ -51,6 +51,7 @@
 | 37 | **两条既有常红是同一条行为：网页会话丢失 → 整段重放**（2026-09-30 复核归因：**已修——根因是测试隔离缺陷，不是重放分支**；2026-09-30 晚登记）——`regression` 53/1 与 `aux-delta-compact` 4/1 的 60s 压线来自裸测试读到真实 profile 的发送间隔与基准 | 高 | 否 | `lib/index.js`（profile 落盘守卫）、`test/profile-isolation.test.mjs`、`doc/progress.md`（2026-09-30 段） |
 | 38 | **`NODE_TEST_CONTEXT` 守卫在裸跑形态的残余洞：prompt store 读写通道**（2026-10-02 登记；regression 用例本轮已补隔离）——同族于 #37 的第二条通道；且由此暴露**生产缺陷候选：真实轮重放读回首轮正本会丢后续增量（红线二形状）**，见正文 §38 | 高 | 否 | `lib/index.js`（`readSessionPrompt`、executor 重建分支）、`lib/prompt-store.js`、`test/regression.test.mjs` |
 | 39 | **错误码在 harness 边界全部退化成 `UNKNOWN`**（2026-10-02 登记；**同轮已修，0.19.54**）——本插件给普通 `Error` 挂 `.code`，而官方 `normalizeLlmFailure` 只认 `instanceof HarnessError`；实测 284 份会话里归因本插件的 **137/137** 条 error finishes 全是 `code:"UNKNOWN"`（官方 provider 丢码 0 条）。后果：官方 `llm-retry` 自动重试与 `compaction-basic` 超限自动压缩修复**对本插件从未生效且不报错**；UI 一律显示 `UNKNOWN`。另含 `RATE_LIMITED` ≠ 官方 `RATE_LIMIT` 的码名不符 | 高 | 否 | `lib/error-codes.js`（新增，错误码真源）、`lib/index.js`、`lib/browser-driver.js`、`lib/think-effort.js`、`lib/upstream.js`、`lib/zero-progress.js`、`test/error-codes.test.mjs`、`scripts/scan-error-codes.mjs`、`doc/research/2026-10-02-dsh-official-error-and-repair.md` || 40 | **并发会话的「一组一行」在官方会话清单里做不到**（2026-10-03 登记）——用户要「明显的一行是3个重叠标签页形状一行区分与普通会话」；真会话会各自成行，而官方清单条目是 **shell 私有代码**（`SessionNodeItem`），插件只能**装饰既有行**（4 个槽），不能新增行、不能分组。本轮已在**左栏面板行**上用「三个重叠标签页」图标表达「这是会话组」，清单内部分组未做 | 低 | 否 | `lib/client.cjs`（`ConcurrentPanelIcon`）、`doc/progress.md`（2026-10-03） |
+| 40 | **并发会话的「一组一行」在官方会话清单里做不到**（2026-10-03 登记）——用户要「明显的一行是3个重叠标签页形状一行区分与普通会话」；真会话会各自成行，而官方清单条目是 **shell 私有代码**（`SessionNodeItem`），插件只能**装饰既有行**（4 个槽），不能新增行、不能分组。本轮已在**左栏面板行**上用「三个重叠标签页」图标表达「这是会话组」，清单内部分组未做 | 低 | 否 | `lib/client.cjs`（`ConcurrentPanelIcon`）、`doc/progress.md`（2026-10-03） |
 
 > **一览表完整性（2026-09-16 修正；2026-09-26 补上闸门）**：本表此前**漏登记 #19 与 #20**（正文有、表里没有）。
 > 这两条都是可机检的登记错误，而当时没有任何闸门覆盖「正文条目 ↔ 表格条目」的一致性。
@@ -2533,3 +2534,39 @@ function harnessErrorCode(error) {
 
 **验收判据（唯一可证伪的）**：`node scripts/scan-error-codes.mjs` 的
 「本插件错误码存活率」从 **0.0%** 上升。改前改后各跑一次对照。
+
+## 40. **并发会话的「一组一行」在官方会话清单里做不到**（2026-10-03 登记）
+
+### 现象
+
+用户 2026-10-02 原话（逐字）：
+
+> 「然后是显示会话，明显的一行是3个重叠标签页形状一行区分与普通会话」
+
+意思是：并发会话那几条真会话，在左侧会话清单里希望**表现为一行**（一行里三个重叠的标签页），
+而不是三条各自独立的普通会话行。
+
+### 为什么做不到（官方契约，不是能力不足）
+
+0.19.55 起每列是一条**真官方会话**（`ctx.sessions.create()`），它们必然进入官方会话清单。
+而清单条目由 **shell 私有代码**渲染（`dsh-client-ui-workspace` 的 `SessionNodeItem`），
+插件能用的只有 4 个**装饰既有行**的槽（`sidebar.session.row.leading` / `sidebar.session.row.hover` /
+`sidebar.workspaces.session.menu.item` / `sidebar.workspaces.session.row.action`），
+**没有**「新增一行」「把多行合并成一行」「自定义分组」的入口。
+唯一能减少行数的杠杆是 `ctx.workspaces.archiveSession()`（归档行默认不显示），
+但它 ① 改变会话语义（归档 ≠ 分组）、② 在轮次进行中会被拒。
+
+### 这不是「没做」，是「做成了另一副样子」
+
+在**左栏面板行**（`sidebar.panellist` 的「并发会话」）上画了「三个重叠的标签页」图标，
+让这一行一眼区别于普通会话行——它代表的确实是一个**会话组**而不是一条会话。
+清单**内部**的分组未做，也不假装做了。
+
+### 若要继续，从哪下手
+
+1. 先确认 `ctx.workspaces.archiveSession()` 是不是唯一杠杆、归档会不会影响会话可用性；
+2. 若可接受，可在建组时归档成员会话，让清单只剩一条「并发会话」面板行——
+   **但那会把「能够查看」变成「只能从面板查看」**，与用户上一句「并发必须能够保留真实会话！
+   能够查看！」存在张力，须由用户拍板，不能替用户决定；
+3. 另一条路是给清单行加装饰（第一行显示「+2」、hover 展开），但它不改变「占三行」这个事实。
+

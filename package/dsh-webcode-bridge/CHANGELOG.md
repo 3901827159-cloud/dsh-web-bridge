@@ -5,6 +5,60 @@ All notable changes to this package. Newest first.
 The canonical, in-progress record of what was changed and why lives in [doc/progress.md](../../doc/progress.md);
 this file is the package-facing release history.
 
+## 0.19.55
+
+**并发会话改造：每一列都是一条真官方会话（不再自绘），入口搬到左栏「并发会话」。**
+
+### 用户要的是什么（原话，逐字）
+
+> 「并发必须能够保留真实会话！能够查看！」
+> 「然后是中间区域，将原本在会话中的『并发』删除，改为对齐新会话的『对话』和『轨迹』
+> --变为『并发对话』和『并发轨迹』」
+> 「我要一摸一样，确保每一列都有完整的官方会话所有能力」
+
+### 改了什么
+
+**① 每列 = 一条真会话。** 旧实现的每一列是**自绘的假会话**（消息只活在 React state 里、
+回复靠 `/__webcode/chat` 把网页正文抄回来、对话框是复刻的）。现在每一列：
+
+- `ctx.sessions.create()` 在 Host 上造一条**真会话**，`retain()` 拿到引用；
+- 官方座位 `SessionProvider` 显式绑定该引用（只认真引用——官方 `ui-session` 的
+  `bindingSource` 会校验世代）；
+- 渲染官方 `conversation.content` **factory**（`variant:'embedded'`），于是官方的消息列表、
+  思考块、工具调用、附件、**官方 composer（模型选择 / 权限 / Plan / 发送）**全部就位。
+  「完整官方能力」不是复刻出来的，是**本来那一份**。
+- 引用成对释放：移出列、面板卸载都 `release()`；**移出列不删会话**（用户要「保留真实会话」）。
+
+**② 位置：左栏「并发会话」行 + 中央 `main` 面板。** 会话内那个「并发」页签**已删除**——
+这不是取舍，是硬约束：`renderFactorySlot` 会检查渲染祖先，在 `conversation.content` 的子树里
+（会话内视图所在的位置）再渲染同名 factory 会当场抛 `recursive render of factory`，
+所以官方会话体**只能**渲染在官方会话之外。新位置走官方 `sidebar.panellist`（按钮由 shell 画，
+渲染顺序天然在「新会话」下方），两半同名成对（list id = main key）。
+
+**③ 两个页签：并发对话 / 并发轨迹**，分别把官方 `conversation.session` 的视图钉死为
+`chat` / `trajectory`（经 factory 的 `views` 局部槽覆盖）。**默认 3 列**
+（用户点名的「3 个重叠标签页」），可加到 4 列。
+
+**④ 「3 个重叠标签页」的入口图标**：左栏那一行代表的是**会话组**而不是一条会话，
+所以图标画成三个错位叠放的圆角矩形（画法与既有 panel 图标同刻度、`currentColor`）。
+
+**⑤ 组可恢复**：组（哪几条会话属于这一组）存浏览器本地，重开面板看到的是同一组会话，
+不会每次打开都新建一批。存的只是**本浏览器的面板布局**——会话本身早已在 Host 上，
+所以这份存储丢了也只是「重新建组」，不丢任何对话内容。
+
+### 保留（用户已验收的部分，判据逐字未动）
+
+列的可见边界（官方那套「平时隐形 + hover 一点光」）、列宽上下限（全部由官方常量推出）、
+三列**宽度同步**、放不下时左右切换（整列平移、永远不对齐到半列）、按钮位置与官方胶囊底色。
+
+### 删除（对象没了，判据与样式一并删）
+
+自绘 composer 的整套刻度（`hwb-col-composer-*`）、自绘消息与引用条（`hwb-quote-bar` /
+`hwb-chat-*`）、旧视图根节点（`hwb-compare-*`）、以及 `conversation.view` 上那个
+`webcode-compare-view` 注册本身。`test/team-compare.test.mjs` 的判据同步改写为钉**真会话那条链**
+（create / retain / release / SessionProvider / factory / 两个页签 / 位置），
+并保留反向断言防止自绘层与「会话内页签」复活。
+
 ## 0.19.54
 
 **错误码不再被 harness 吞掉：官方的自动重试与超限自动压缩修复终于对本插件生效。**

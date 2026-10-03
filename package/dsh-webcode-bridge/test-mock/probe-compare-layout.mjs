@@ -1,32 +1,38 @@
-// probe-compare-layout.mjs — 并列多会话「照抄官方」的真布局取证（0.19.22）。
+// probe-compare-layout.mjs — 并发会话面板的**真布局取证**（0.19.55 改写）。
 //
 // ## 为什么必须真开一次浏览器
 //
-// 0.19.22 的布局修复依赖两条**别人家的 DOM/CSS 契约**，只做字符串断言等于只证明
-// 「我写了这串字」，证明不了「这串字真的命中」。两条契约是：
+// 列宽同步、整列平移、观察窗裁剪、左右按钮的位置 —— 这几件事全都要**真实布局引擎**
+// 算过才算数。只做字符串断言等于只证明「我写了这串字」，证明不了「这串字真的命中」。
 //
-//   ① 视图根节点声明 `data-conversation-composer-overlay` ⇒ 官方 CSS
-//      `.scrollBody:has([data-conversation-composer-overlay])>[data-slot=conversation\.session]>.viewArea`
-//      把 `.viewArea` 变成 `flex:1 1 0;min-height:0;overflow:hidden`
-//      ⇒ 视图拿到**确定的整屏高度**（用户要的「上下都全长」）。
-//   ② 官方的对话框座位 `.composerSeat[data-composer-seat]` 与视图在**同一个滚动
-//      容器**里 ⇒ 本视图挂载期间必须让它让位，否则最底部再叠第四个框
-//      （用户原话：「被下面原生的挤了」）。
+// ## 0.19.55 改了探针的**对象**，不是改了判据的松紧
 //
-// ## 为什么不是「打开真 GUI 页面」
+// 旧版探针量的是「本插件复刻的官方 composer」（卡片 22px 圆角、34px 圆形发送按钮、
+// 官方对话框座位让位）。**那些对象已经不存在了**：0.19.55 起每一列渲染的是**官方自己的
+// 会话体**（官方 `conversation.content` factory），输入框/消息/模型选择都是官方那一份。
+// 所以旧版那几条断言现在只会证明「一份不存在的代码」，按本仓库「用例与样式不留在已删
+// 对象上」的规矩一并撤掉。
 //
-// `dsh web` 的页面要**进程级 token**（`?token=…`，401 就是缺它），而那个 token
-// 只存在进程内存里，`DSH_WEB_URL` 环境变量给的只是 origin。因此本探针改用
-// **官方样式原样回放**：从官方包里逐字抽出两份真实 CSS（ConversationRoot 与
-// InputBar，含官方那两条 `:has()` 规则），配上与官方渲染结构逐字相同的 DOM，
-// 再注入本插件的新版 CSS，最后由 Chromium 算**计算样式**。
+// 留下并继续钉的，是**我们这一层**（列怎么摆）：面板高度确定、页签形态、三列宽度同步、
+// 观察窗裁剪与整列平移、左右按钮位置与层级、列体的滚动前提。
 //
-// 这比字符串断言强一个量级：`:has()` 是否真的级联到 `.viewArea`、官方那份
-// hashed 类名是否真的被我们的属性选择器命中、我们那条让位规则是否**只在**本视图
-// 挂载时生效 —— 三件事都只有真渲染才能回答。
+// ## 本探针**不**覆盖什么（如实写明，别当成没做）
+//
+//   · 列里那份**官方会话体**的观感（消息、思考块、composer）——那是官方渲染器的产物，
+//     本探针不重放官方 CSS，因此不对它下任何结论；
+//   · 与真机的差别：`dsh web` 的页面要**进程级 token**（`?token=…`，401 就是缺它），
+//     而那个 token 只存在进程内存里 ⇒ 只能「用本插件 CSS + 等价 DOM」回放，
+//     不能开真 GUI 页面（能开的话，本探针早就那么做了）。
+//
+// ## 为什么本探针不在 CI 里
+//
+// 它需要 Playwright + 一个真实浏览器可执行文件。本仓库的 CI 不装浏览器；本机沙箱里
+// `spawn` 任何外部程序都是 `EPERM`（`doc/progress.md`「已知环境约束」），因此它
+// **默认跑不了**，只在能起浏览器的机器上手动跑。跑不了时它不会假装通过——找不到
+// 浏览器可执行文件就 exit 1 并说明原因。
 //
 // 用法：node test-mock/probe-compare-layout.mjs
-// 退出码：0 = 全部成立；1 = 有断言不成立（打印实际读数）。
+// 退出码：0 = 全部成立；1 = 有断言不成立或起不了浏览器（打印实际读数）。
 
 import fs from 'node:fs';
 import os from 'node:os';
@@ -37,112 +43,73 @@ import { resolveBrowserExecutable } from '../lib/browser-runtime.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const pkgRoot = path.resolve(here, '..');
-const OFFICIAL = 'C:/Users/rsyhn/AppData/Roaming/npm/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai';
 
-/** 从 JS 源码里取一个字面量字符串（`const css$4 = "…";`），逐字、不去转义歧义。 */
-function extractLiteral(file, varName) {
-  const src = fs.readFileSync(file, 'utf8');
-  const at = src.indexOf(`const ${varName} = "`);
-  if (at < 0) throw new Error(`找不到 ${varName}（${file}）`);
-  const open = src.indexOf('"', at + `const ${varName} = `.length);
-  let i = open + 1;
-  while (i < src.length) {
-    if (src[i] === '\\') { i += 2; continue; }
-    if (src[i] === '"') break;
-    i += 1;
-  }
-  const literal = src.slice(open, i + 1);
-  // eslint-disable-next-line no-new-func —— 输入是官方包里的纯字符串字面量
-  return Function(`"use strict"; return ${literal};`)();
-}
-
-/** 本插件新版里并列多会话那一段 CSS（从 client.cjs 的字符串数组里取）。 */
-function compareCss() {
+/**
+ * 本插件里并发会话面板那一段 CSS（从 client.cjs 的字符串数组里取）。
+ *
+ * 抽取必须**当场自证**：锚点变了就抛错，空 CSS 会让下面所有样式判据变成「全错」——
+ * 那种红指向的是探针自己，不指向产品（本仓库把这种红叫「空转」）。
+ */
+function concurrentCss() {
   const src = fs.readFileSync(path.join(pkgRoot, 'lib', 'client.cjs'), 'utf8');
-  const start = src.indexOf('"[data-conversation-scroll]:has(');
-  const end = src.indexOf('".hwb-chat-head');
-  if (start < 0 || end < 0 || end <= start) throw new Error('找不到并列多会话的 CSS 段（起点/终点锚点已变，需同步本探针）');
-  const raw = src.slice(start, end);
-  const out = raw
+  const start = src.indexOf('".hwb-concurrent-panel{');
+  const end = src.indexOf('].join(\'\');', start);
+  if (start < 0 || end < 0 || end <= start) {
+    throw new Error('找不到并发会话面板的 CSS 段（锚点 `".hwb-concurrent-panel{` / `].join(\'\')` 已变，需同步本探针）');
+  }
+  const out = src.slice(start, end)
     .split(/\r?\n/)
     .map((l) => l.trim())
     .filter((l) => l.startsWith('"'))
-    // `[data-cols=\"2\"]` 这类转义引号在 CSS 里不需要反斜杠，去掉它。
     .map((l) => l.replace(/^"/, '').replace(/",?$/, '').replace(/\\"/g, '"'))
     .join('\n');
-  // 抽歪了必须**当场炸**：空 CSS 会让下面所有样式判据变成「都失败」，
-  // 那种红指向的是探针自己，不指向产品 —— 本仓库把这种红叫「空转」。
-  if (!/\.hwb-col-composer-card\{/.test(out) || !/\.hwb-compare-view\{/.test(out)) {
-    throw new Error('CSS 抽取结果里找不到关键规则，抽取逻辑已失效');
+  for (const must of ['.hwb-concurrent-col{', '.hwb-concurrent-columns{', '.hwb-concurrent-pan{']) {
+    if (!out.includes(must)) throw new Error('CSS 抽取结果里找不到关键规则（抽取逻辑已失效）：' + must);
   }
   return out;
 }
 
-const convCss = extractLiteral(`${OFFICIAL}/dsh-client-ui-conversation/lib/client.js`, 'css$4');
-const inputCss = extractLiteral(`${OFFICIAL}/dsh-client-ui-conversation/lib/client.js`, 'css$1');
-const mine = compareCss();
-
-/** 与官方渲染结构逐字相同的 DOM（含本插件的三列与各自对话框）。
- *
- *  `[data-slot="conversation.session"]` 上的 `display:contents` **不是**这里编的：
- *  它是官方 slot 渲染器自己的锚点样式（`dsh-client-ui-renderer/lib/client.js:1094`
- *  `const ANCHOR_STYLE = { display: "contents" }`，注释原文「keeps the wrapper out of
- *  layout (grid/flex parents see the slot's own children)」）。少了它，`.viewArea`
- *  就不是滚动容器的 flex 子项，整条链的高度都算不对 —— 探针会红在**自己**身上。
- *
- *  0.19.29：列头（`.hwb-compare-col-head`）已按用户第 1 点删除；列宽不再是 grid 等分，
- *  而是「固定 `--hwb-col-width` + 观察窗平移」（用户第 3 点）。因此这里同步成新结构，
- *  否则探针量到的是**已经不存在的** DOM，读数全是假的。 */
-const COL = (n, site) => `
-  <div class="hwb-compare-col">
-    <div class="hwb-compare-col-body">第 ${n} 列正文</div>
-    <form class="hwb-col-composer">
-      <div class="hwb-col-composer-card">
-        <textarea class="hwb-col-composer-input" placeholder="向 ${site} 继续提问…"></textarea>
-        <div class="hwb-col-composer-row">
-          <div class="hwb-col-composer-tools">
-            <select class="hwb-col-composer-select"></select>
-          </div>
-          <div class="hwb-col-composer-trailing">
-            <span class="hwb-col-composer-hint">Enter 发送</span>
-            <button type="submit" class="hwb-col-composer-send">↑</button>
-          </div>
-        </div>
-      </div>
-    </form>
+/** 一列：面板 DOM 里我们负责的那一层（列头 + 列体；会话体由官方渲染器产生）。 */
+const COL = (n) => `
+  <div class="hwb-concurrent-col">
+    <div class="hwb-concurrent-col-head">
+      <span class="hwb-concurrent-col-title">会话 ${n}</span>
+      <button type="button" class="hwb-concurrent-mini">✕</button>
+    </div>
+    <div class="hwb-concurrent-col-body">
+      <div class="hwb-concurrent-body">第 ${n} 列（真会话体由官方渲染器插入此处）</div>
+    </div>
   </div>`;
 
 const html = `<!doctype html><html><head><meta charset="utf-8">
-<style id="official-conv">${convCss}</style>
-<style id="official-inputbar">${inputCss}</style>
-<style id="plugin-compare">${mine}</style>
+<style id="plugin-concurrent">${concurrentCss()}</style>
 <style>html,body{margin:0;height:100%}</style>
 </head><body>
-<div class="wSkVaW_root" data-phase="active" style="height:100vh">
-  <div class="wSkVaW_body" data-conversation-content="1">
-    <div class="wSkVaW_scrollBody" data-conversation-scroll="1">
-      <div data-slot="conversation.session" style="display:contents">
-        <div class="wSkVaW_viewArea">
-          <div class="hwb-compare-view" data-conversation-composer-overlay="1" style="--hwb-col-width:420px">
-            <div class="hwb-compare-viewport">
-              <button type="button" class="hwb-compare-pan left">‹</button>
-              <button type="button" class="hwb-compare-pan right">›</button>
-              <div class="hwb-compare-columns" data-cols="3" style="transform:translateX(-436px)">${COL(1, 'DeepSeek')}${COL(2, 'GLM')}${COL(3, 'Kimi')}</div>
-            </div>
-          </div>
-        </div>
-      </div>
-      <div class="wSkVaW_composerSeat" data-composer-seat="1">
-        <div class="wSkVaW_composerStack"><div class="uV2eYG_root"><div class="uV2eYG_card">官方对话框</div></div></div>
-      </div>
+<div class="hwb-concurrent-panel" style="height:100vh">
+  <div class="hwb-concurrent-tabs" role="tablist">
+    <button type="button" role="tab" class="hwb-concurrent-tab active" aria-selected="true">并发对话</button>
+    <button type="button" role="tab" class="hwb-concurrent-tab" aria-selected="false">并发轨迹</button>
+  </div>
+  <div class="hwb-concurrent" style="--hwb-col-width:420px">
+    <div class="hwb-concurrent-bar">
+      <span class="hwb-concurrent-count">3 列</span>
+      <button type="button" class="hwb-concurrent-action">+ 加一列</button>
+    </div>
+    <div class="hwb-concurrent-viewport">
+      <button type="button" class="hwb-concurrent-pan left">‹</button>
+      <button type="button" class="hwb-concurrent-pan right">›</button>
+      <div class="hwb-concurrent-columns" data-cols="3" style="transform:translateX(-436px)">${COL(1)}${COL(2)}${COL(3)}</div>
     </div>
   </div>
 </div>
 </body></html>`;
 
 const exe = resolveBrowserExecutable();
-if (!exe?.path) { console.error('找不到可用浏览器'); process.exit(1); }
-const tmp = path.join(os.tmpdir(), `hwb-compare-layout-${process.pid}.html`);
+if (!exe?.path) {
+  console.error('找不到可用浏览器（Playwright 需要真实可执行文件）；本探针不在 CI 里跑，请在能起浏览器的机器上手动执行。');
+  process.exit(1);
+}
+const tmp = path.join(os.tmpdir(), `hwb-concurrent-layout-${process.pid}.html`);
 fs.writeFileSync(tmp, html, 'utf8');
 
 let failed = 0;
@@ -157,88 +124,48 @@ try {
   await page.goto('file://' + tmp.replace(/\\/g, '/'));
   const r = await page.evaluate(() => {
     const q = (s) => document.querySelector(s);
-    const scroll = q('[data-conversation-scroll]');
-    const viewArea = q('.wSkVaW_viewArea');
-    const root = q('.hwb-compare-view');
-    const seat = q('[data-composer-seat]');
-    const cols = [...document.querySelectorAll('.hwb-compare-col')];
-    const cards = [...document.querySelectorAll('.hwb-col-composer-card')];
-    const send = q('.hwb-col-composer-send');
     const cs = (el) => getComputedStyle(el);
-    const out = {
-      viewArea: { flexGrow: cs(viewArea).flexGrow, flexBasis: cs(viewArea).flexBasis, minHeight: cs(viewArea).minHeight, overflow: cs(viewArea).overflow },
-      rootBox: { h: Math.round(root.getBoundingClientRect().height), w: Math.round(root.getBoundingClientRect().width) },
-      scrollBox: { h: Math.round(scroll.getBoundingClientRect().height) },
-      seatDisplay: cs(seat).display,
-      colCount: cols.length,
-      cardCount: cards.length,
-      cardRadius: cs(cards[0]).borderRadius,
-      cardWidths: cards.map((c) => Math.round(c.getBoundingClientRect().width)),
-      colWidths: cols.map((c) => Math.round(c.getBoundingClientRect().width)),
-      sendBox: { w: Math.round(send.getBoundingClientRect().width), h: Math.round(send.getBoundingClientRect().height), radius: cs(send).borderRadius },
-      // 让位规则必须是局部的：把视图根节点挪走，官方座位必须自己回来。
-      seatAfterUnmount: (() => { root.remove(); const d = cs(seat).display; scroll.prepend(root); return d; })(),
-      // 再把官方协议属性摘掉：.viewArea 必须**失去** overlay 那条规则给的
-      // `overflow:hidden`（基础 `.viewArea` 只写 flex/min-height，不写 overflow，
-      // 所以 overflow 才是这条属性在承重的**判别位**；flex-basis 两侧都是 0%，
-      // 用它判会得到一条永远绿的假判据）。
-      viewAreaWithoutMarker: (() => {
-        root.removeAttribute('data-conversation-composer-overlay');
-        const o = cs(viewArea).overflow; root.setAttribute('data-conversation-composer-overlay', '1'); return o;
-      })(),
+    const cols = [...document.querySelectorAll('.hwb-concurrent-col')];
+    const panel = q('.hwb-concurrent-panel');
+    const inner = q('.hwb-concurrent');
+    const vp = q('.hwb-concurrent-viewport').getBoundingClientRect();
+    const box = (el) => { const b = el.getBoundingClientRect(); return { w: Math.round(b.width), h: Math.round(b.height) }; };
+    return {
       hasSupport: CSS.supports('selector(:has(*))'),
-      // ── 0.19.29（用户第 3 点）：固定列宽 + 观察窗平移 ─────────────────────
-      viewport: {
-        overflow: cs(q('.hwb-compare-viewport')).overflow,
-        w: Math.round(q('.hwb-compare-viewport').getBoundingClientRect().width),
-      },
-      // 三列宽度必须**逐字相同**（用户：「3 个会话宽度同步」）。
+      panel: { display: cs(panel).display, flexDirection: cs(panel).flexDirection, h: box(panel).h },
+      inner: { minHeight: cs(inner).minHeight, overflow: cs(inner).overflow, h: box(inner).h },
+      tabs: [...document.querySelectorAll('.hwb-concurrent-tab')].map((t) => ({
+        text: t.textContent, radius: cs(t).borderRadius, active: t.classList.contains('active'),
+      })),
+      viewport: { overflow: cs(q('.hwb-concurrent-viewport')).overflow, w: Math.round(vp.width) },
+      colWidths: cols.map((c) => Math.round(c.getBoundingClientRect().width)),
       colWidthsUniq: [...new Set(cols.map((c) => Math.round(c.getBoundingClientRect().width)))],
-      // 平移到第 2 列后：第 2 列的左边缘必须贴观察窗左端（用户要的对齐语义）。
-      panAligned: (() => {
-        const vp = q('.hwb-compare-viewport').getBoundingClientRect();
-        const second = cols[1].getBoundingClientRect();
-        return Math.round(second.left - vp.left);
-      })(),
-      // 左右按钮：位置在观察窗左右边缘内侧、垂直居中。
-      panButtons: [...document.querySelectorAll('.hwb-compare-pan')].map((b) => {
-        const vp = q('.hwb-compare-viewport').getBoundingClientRect();
-        const box = b.getBoundingClientRect();
+      colStatic: { background: cs(cols[0]).backgroundColor, borderTopWidth: cs(cols[0]).borderTopWidth },
+      colBody: { minHeight: cs(q('.hwb-concurrent-col-body')).minHeight, overflow: cs(q('.hwb-concurrent-col-body')).overflow },
+      // 平移到第 2 列后：第 2 列的左边缘必须贴观察窗左端（用户要的整列对齐，不是半列）。
+      panAligned: Math.round(cols[1].getBoundingClientRect().left - vp.left),
+      panButtons: [...document.querySelectorAll('.hwb-concurrent-pan')].map((b) => {
+        const bb = b.getBoundingClientRect();
         return {
           cls: b.className,
           radius: cs(b).borderRadius,
-          offsetFromEdge: b.className.includes('left')
-            ? Math.round(box.left - vp.left)
-            : Math.round(vp.right - box.right),
-          // 垂直居中：按钮中心与观察窗中心的差（应为 0）。
-          vCenterDelta: Math.round((box.top + box.height / 2) - (vp.top + vp.height / 2)),
+          offsetFromEdge: b.className.includes('left') ? Math.round(bb.left - vp.left) : Math.round(vp.right - bb.right),
+          vCenterDelta: Math.round((bb.top + bb.height / 2) - (vp.top + vp.height / 2)),
           zIndex: cs(b).zIndex,
         };
       }),
     };
-    return out;
   });
 
   check('浏览器支持 :has()（官方 CSS 与本插件都依赖它）', r.hasSupport === true);
-  check('官方协议属性生效：.viewArea 拿到 flex:1 1 0 + min-height:0 + overflow:hidden',
-    r.viewArea.flexGrow === '1' && r.viewArea.flexBasis === '0px' && r.viewArea.minHeight === '0px' && r.viewArea.overflow === 'hidden',
-    JSON.stringify(r.viewArea));
-  check('★ 摘掉协议属性后 .viewArea 立刻失去 overlay 给的 overflow:hidden（这条属性在承重）',
-    r.viewAreaWithoutMarker !== 'hidden', 'overflow=' + r.viewAreaWithoutMarker);
-  check('视图占满整个滚动容器（上下都到边 = 用户要的「全长」）',
-    Math.abs(r.rootBox.h - r.scrollBox.h) <= 1, `root=${r.rootBox.h} scroll=${r.scrollBox.h}`);
-  check('★ 本视图挂载期间官方对话框座位让位（display:none）', r.seatDisplay === 'none', r.seatDisplay);
-  check('★ 视图卸载后官方对话框立刻回来（不是全局隐藏）', r.seatAfterUnmount !== 'none', r.seatAfterUnmount);
-  check('三列各有一个自己的对话框（3 者独立不变）', r.colCount === 3 && r.cardCount === 3,
-    `cols=${r.colCount} cards=${r.cardCount}`);
-  check('每列对话框卡片占满本列宽度（用户要的「左右也全长」）',
-    r.cardWidths.every((w, i) => w >= r.colWidths[i] - 14),
-    `card=${JSON.stringify(r.cardWidths)} col=${JSON.stringify(r.colWidths)}`);
-  check('卡片是官方刻度（radius 22px）', r.cardRadius === '22px', r.cardRadius);
-  check('发送按钮是官方那枚 34px 圆形主按钮',
-    r.sendBox.w === 34 && r.sendBox.h === 34 && r.sendBox.radius === '999px', JSON.stringify(r.sendBox));
-
-  // ── 0.19.29（用户第 3 点）：宽度同步 + 整列平移 + 按钮位置 ──────────────────
+  check('面板是纵向 flex 列，占满容器高度', r.panel.display === 'flex' && r.panel.flexDirection === 'column',
+    JSON.stringify(r.panel));
+  check('面板正文有确定的剩余高度（min-height:0 + overflow:hidden）',
+    r.inner.minHeight === '0px' && r.inner.overflow === 'hidden', JSON.stringify(r.inner));
+  check('页签是「并发对话 / 并发轨迹」两个，且选中态是浅色胶囊（不画下划线）',
+    r.tabs.length === 2 && r.tabs[0].text === '并发对话' && r.tabs[1].text === '并发轨迹'
+    && r.tabs.every((t) => t.radius === '999px') && r.tabs[0].active && !r.tabs[1].active,
+    JSON.stringify(r.tabs));
   check('★ 三列宽度逐字相同（用户要的「3 个会话宽度同步」）',
     r.colWidthsUniq.length === 1, '实测宽度集合=' + JSON.stringify(r.colWidthsUniq));
   check('★ 列宽真的吃到了 --hwb-col-width（固定宽，不是 grid 等分）',
@@ -247,15 +174,17 @@ try {
     r.viewport.overflow === 'hidden', r.viewport.overflow);
   check('★ 平移后第 2 列**左边缘贴观察窗左端**（用户要的整列对齐，不是半列）',
     r.panAligned === 0, '第2列左缘距观察窗左端=' + r.panAligned + 'px');
+  check('★ 列平时无底色、无边框（用户要的「去除分界」，光只在 hover 时浮起）',
+    r.colStatic.borderTopWidth === '0px', JSON.stringify(r.colStatic));
+  check('列体有滚动前提（min-height:0 + overflow:hidden）',
+    r.colBody.minHeight === '0px' && r.colBody.overflow === 'hidden', JSON.stringify(r.colBody));
   check('左右按钮都渲染在观察窗边缘内侧',
     r.panButtons.length === 2 && r.panButtons.every((b) => b.offsetFromEdge <= 8),
     JSON.stringify(r.panButtons.map((b) => b.offsetFromEdge)));
   check('★ 左右按钮垂直居中（用户要的「垂直居中」）',
-    r.panButtons.every((b) => b.vCenterDelta === 0),
-    JSON.stringify(r.panButtons.map((b) => b.vCenterDelta)));
+    r.panButtons.every((b) => b.vCenterDelta === 0), JSON.stringify(r.panButtons.map((b) => b.vCenterDelta)));
   check('左右按钮浮在列体之上可点（z-index:11，与官方 DragHandle 同层）',
-    r.panButtons.every((b) => b.zIndex === '11'),
-    JSON.stringify(r.panButtons.map((b) => b.zIndex)));
+    r.panButtons.every((b) => b.zIndex === '11'), JSON.stringify(r.panButtons.map((b) => b.zIndex)));
   console.log('读数：', JSON.stringify(r, null, 1));
 } finally {
   await browser.close();

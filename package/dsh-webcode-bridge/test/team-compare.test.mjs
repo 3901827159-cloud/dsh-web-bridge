@@ -1,4 +1,4 @@
-// team-compare.test.mjs — 「本插件并列多会话组成的 team」护栏（0.18.0）。
+// team-compare.test.mjs — 「本插件并列多会话组成的 team」护栏。
 //
 // ## 这个文件要证明什么
 //
@@ -9,14 +9,29 @@
 //   「3.删除参考官方用的team面板，和我设想的team不同，参考错误了...重构team功能，
 //    本插件的并列多会话组成的team」
 //
-// 即：Team = **若干条各自独立的网页会话并排**，不是官方 AgentTeams 的花名册。
+// 即：Team = **若干条各自独立的会话并排**，不是官方 AgentTeams 的花名册。
 //
-// 0.17.3 那版「三列对比视图」有三个真缺陷，本轮全部修掉。三条各一个护栏，
-// 任何一条被改回去都会在这里红：
+// ## 0.19.55：从「自绘的假会话」改成「每列一条真官方会话」
 //
-//   ① 硬编码三列 → 数组驱动，支持 2~4 列，可加可删；
-//   ② `msgs[msgs.length - 1]` 定位回复 → 每条消息带 id，按 id 精确回填；
-//   ③ 不带 `sessionKey` → 每列铸稳定会话键并一直复用。
+// 用户原话（2026-10-02，逐字）：
+//
+//   「并发必须能够保留真实会话！能够查看！」
+//   「然后是中间区域，将原本在会话中的『并发』删除，改为对齐新会话的『对话』
+//    和『轨迹』--变为『并发对话』和『并发轨迹』」
+//   「我要一摸一样，确保每一列都有完整的官方会话所有能力」
+//
+// 因此本轮换掉了实现路线：列里装的**不再是自绘的对话**，而是官方自己的会话体
+// （`conversation.content` factory），每列绑定一条真会话（`ctx.sessions.create()`
+// + `retain()`）。判据也跟着换：从前那些「按 id 回填消息 / 稳定 sessionKey / 复刻
+// composer 刻度」的断言**验证的对象已经不存在了**（那是自绘层的内部细节），留着它们
+// 只会证明一份已经不存在的代码。新判据钉的是**真会话那条链**：
+//
+//   ① 真会话：`sessions.create()` 造、`retain()` 拿引用、`release()` 成对释放；
+//   ② 官方会话体：`SessionProvider` 显式绑定 + `renderFactorySlot('conversation.content')`；
+//   ③ 两个页签「并发对话 / 并发轨迹」对齐普通会话的「对话 / 轨迹」；
+//   ④ 位置：左栏「并发会话」行 + 同名中央 `main` 面板（会话语义上不可能，见下）。
+//
+// 任何一条被改回去都会在这里红。
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -36,706 +51,268 @@ function clientSrc() {
   return fs.readFileSync(path.join(here, '..', 'lib', 'client.cjs'), 'utf8');
 }
 
-/** 取出 MultiModelCompareView 的函数体（到下一个顶层 function 为止）。 */
+/** 取出并发面板正文（`ConcurrentColumns`）的函数体，到下一个顶层 function 为止。 */
 function compareBody(src) {
-  const a = src.indexOf('function MultiModelCompareView(props) {');
-  assert.ok(a > 0, '找不到 MultiModelCompareView（改名则本护栏失效，需同步）');
+  const a = src.indexOf('function ConcurrentColumns(props) {');
+  assert.ok(a > 0, '找不到 ConcurrentColumns（改名则本护栏失效，需同步）');
   const b = src.indexOf('\n    function ', a + 10);
   return src.slice(a, b === -1 ? a + 20000 : b);
 }
 
-test('★ 0.18.0 Team：列数由数组驱动，支持 2~4 列（不得再硬编码三列）', () => {
+// ── ① 真会话：造、拿引用、成对释放 ──────────────────────────────────────────────
+
+test('★ 0.19.55 并发：每列必须是一条**真官方会话**（create + retain，不是自绘消息）', () => {
   const body = compareBody(clientSrc());
 
-  // ① 硬编码三列的**具体形态**：三个独立 state + 三段复制粘贴的 JSX。
+  // 正面判据：真的调了官方的会话控制面。
+  assert.match(body, /sessions\.create\(/, '每列必须由 ctx.sessions.create() 造一条 Host 上的真会话');
+  assert.match(body, /sessions\.retain\(id, \{ source: 'webcodeConcurrent' \}\)/,
+    '真会话必须 retain 出引用对象（SessionProvider 只认真引用，不认 sessionId 字符串）');
+
+  // 反面判据：自绘层不得复活。它的每一个形态都在这里被点名，防止「顺手加回来」。
+  assert.ok(!/api\('chat'/.test(body), '不得再走 /__webcode/chat 把网页正文抄进自绘消息里');
+  assert.ok(!/sessionKey/.test(body), '不得再有自铸的 sessionKey —— 真会话的身份是 Host 给的 sessionId');
+  assert.ok(!/messages: \[/.test(body), '不得再把消息存在 React state 里（那正是「假会话」的定义）');
+});
+
+test('★ 0.19.55 并发：`inject` 必须声明 sessions（不声明 ctx.sessions 就是 undefined）', () => {
+  const src = clientSrc();
+  assert.match(src, /const inject = \['slots', 'sidebarRightTabs', 'sidebarRight', 'sessions'\];/,
+    'sessions 必须进 inject 列表：并发会话的每一列都要 create/retain');
+});
+
+test('★ 0.19.55 并发：引用必须成对释放（retain 不 release 会让会话作用域永远驻留）', () => {
+  const body = compareBody(clientSrc());
+  // 两处 release：卸载时清空全部引用，移出某一列时只释放那一列。
+  assert.ok((body.match(/\.release\(\)/g) || []).length >= 2,
+    '必须有 ≥2 处 release（整组卸载 + 单列移出），实际='
+    + (body.match(/\.release\(\)/g) || []).length);
+  assert.match(body, /delete refs\[id\]|delete refsRef\.current\[col\.sessionId\]/,
+    '释放之后必须把引用从表里删掉，否则会二次释放');
+  // 卸载 effect 的清理函数必须真的释放，而不是「只把 alive 置 false」。
+  const mountEffect = body.slice(body.indexOf('aliveRef.current = true;'), body.indexOf('}, []);'));
+  assert.match(mountEffect, /\.release\(\)/, '卸载路径（effect 清理）必须释放引用');
+});
+
+test('★ 0.19.55 并发：移出某一列**不得删掉那条会话**（用户要「保留真实会话！」）', () => {
+  const src = clientSrc();
+  const body = compareBody(src);
+  const release = body.slice(body.indexOf('const releaseColumn ='), body.indexOf('const titleOf ='));
+  assert.ok(release.length > 0, '必须存在 releaseColumn（改名则本判据失效，需同步）');
+  assert.ok(!/sessions\.delete|deleteSession|sessions\.remove/.test(src),
+    '不得出现删除会话的调用 —— 用户要的是「保留真实会话」，移出面板只是移出面板');
+  assert.match(src, /只移出面板，不删会话/, '这条语义必须写在注释里（后人改之前先读到它）');
+});
+
+// ── ② 官方会话体：SessionProvider + conversation.content factory ───────────────
+
+test('★ 0.19.55 并发：每列必须渲染**官方**会话体（SessionProvider + conversation.content）', () => {
+  const src = clientSrc();
+  const body = compareBody(src);
+
+  // `SessionProvider` 必须拿到**引用对象**（官方 ui-session 的 bindingSource 会校验世代）。
+  assert.match(body, /h\(SessionProvider, \{ session: refsRef\.current\[col\.sessionId\] \}/,
+    '每列必须用官方 SessionProvider 显式绑定该列的会话引用');
+
+  // 官方会话体：conversation.content factory，embedded 变体。它在列正文组件里。
+  assert.match(src, /renderFactorySlot\('conversation\.content'/,
+    '必须渲染官方 conversation.content factory —— 那就是「完整官方会话能力」的来源');
+  assert.match(src, /variant: 'embedded'/, '嵌入形态必须逐字是官方那个 variant 值');
+});
+
+test('★ 0.19.55 并发：官方 `views` 局部槽必须按页签钉死 chat / trajectory', () => {
+  const src = clientSrc();
+  assert.match(src, /renderSlot\('conversation\.session', \{ view: 'chat' \}\)/,
+    '「并发对话」必须把视图钉死为官方的 chat');
+  assert.match(src, /renderSlot\('conversation\.session', \{ view: 'trajectory' \}\)/,
+    '「并发轨迹」必须把视图钉死为官方的 trajectory');
+  assert.match(src, /\{ slots: \{ views \} \}/,
+    'views 必须经 renderFactorySlot 的局部槽覆盖传入（官方的官方接法）');
+});
+
+test('★ 0.19.55 并发：会话体不是自绘 —— 不得再复刻 composer / 消息渲染', () => {
+  const src = clientSrc();
+  // 反面：自绘 composer 的那一整套刻度随对象一起删（样式规则也不许留）。
+  // 注意这里查的是**规则本身**而不是「名字出现过」：源码注释里会提到这些名字
+  //（说明「为什么删掉它们」），那正是我们要保留的解释，不该被判红。
+  for (const dead of ['.hwb-col-composer{', '.hwb-compare-view{', '.hwb-compare-col{', '.hwb-quote-bar{']) {
+    assert.ok(!src.includes(dead), '自绘层的样式规则必须随对象一起删除：' + dead);
+  }
+  assert.ok(!/className: 'hwb-(col-composer|compare-)/.test(src),
+    '自绘层的类名不得再出现在渲染代码里');
+  assert.ok(!/hwb-col-composer-select/.test(src), '自绘的站点/模型选择器不得复活（模型由官方 composer 选）');
+});
+
+// ── ③ 两个页签：并发对话 / 并发轨迹 ─────────────────────────────────────────────
+
+test('★ 0.19.55 并发：页签必须逐字是「并发对话」「并发轨迹」（对齐官方对话/轨迹）', () => {
+  const src = clientSrc();
+  assert.match(src, /name: '并发对话'/, '第一个页签必须叫「并发对话」');
+  assert.match(src, /name: '并发轨迹'/, '第二个页签必须叫「并发轨迹」');
+  assert.match(src, /const \[view, setView\] = React\.useState\('chat'\)/,
+    '页签必须有受控状态，默认落在 chat');
+  assert.match(src, /role: 'tab'/, '页签必须是真实的 tab 语义（读屏与键盘都要能识别）');
+});
+
+// ── ④ 位置：左栏行 + 中央 main 面板（会话语义上做不到，见下）───────────────────
+
+test('★ 0.19.55 并发：必须由左栏 `sidebar.panellist` 行 + 同名 `main` 面板成对提供', () => {
+  const src = clientSrc();
+  assert.match(src, /const CONCURRENT_PANEL_ID = 'webcode-concurrent-panel';/, '侧栏行与 main 的 id/key 必须同名');
+  assert.match(src, /inject\('sidebar\.panellist'/, '必须有左栏入口');
+  assert.match(src, /label: \(\) => '并发会话'/, '左栏那一行必须逐字叫「并发会话」（用户点名的词）');
+  assert.match(src, /inject\('main'/, '必须有中央面板（只注册侧栏一半，用户点一下就会被 layout 拒）');
+});
+
+test('★ 0.19.55 并发：会话内的「并发」页签必须**删除**（技术上也不可能，见下）', () => {
+  const src = clientSrc();
+  // 反面断言：这是本轮的核心动作之一，改回去即变红。
+  assert.ok(!/'webcode-compare-view'/.test(src), '会话内那个「并发」视图注册必须已删除');
+  assert.ok(!/inject\('conversation\.view'/.test(src),
+    '不得再往 conversation.view 注册并发 —— 在那里渲染官方会话体会抛 recursive render of factory');
+
+  // 正面：那条「为什么不可能」的理由必须留在源码里（它是这次搬迁的全部依据）。
+  assert.match(src, /recursive render of factory/, '必须写明「会递归渲染」这条官方约束');
+});
+
+test('★ 0.19.55 并发：子槽必须自有 + session 作用域（官方 conversation.session 不可重复声明）', () => {
+  const src = clientSrc();
+  assert.match(src, /const CONCURRENT_COLUMN_SLOT = 'webcode-concurrent\.column';/, '子槽必须用自有名字');
+  assert.match(src, /children: \{ \[CONCURRENT_COLUMN_SLOT\]: \{ kind: 'single', scope: 'session' \} \}/,
+    '必须声明一个 session 作用域子槽 —— 这是拿到 SessionProvider / renderSlot 的唯一途径');
+  assert.ok(!/children: \{ 'conversation\.session'/.test(src),
+    '不得重复声明 conversation.session（官方 conversation.content factory 已声明它，重复声明会抛 already declared）');
+});
+
+test('★ 0.19.55 并发：列正文必须注册进自有的 session 子槽（不是自绘节点）', () => {
+  const src = clientSrc();
+  assert.match(src, /inject\(CONCURRENT_COLUMN_SLOT/, '列正文必须注册进自有子槽');
+  assert.match(src, /function ConcurrentColumn\(props\)/, '必须存在列正文组件 ConcurrentColumn');
+  assert.match(src, /renderFactorySlot\('conversation\.content'[\s\S]{0,400}?slots: \{ views \}/,
+    '列正文必须把视图覆盖传进官方 factory');
+  // 顺序必须是**结构性**的：子槽注册嵌在 `main` 的 inject 回调里（先声明、后注册）。
+  // 靠两条并列 inject 的调度顺序会在宿主换实现时静默炸（SlotCore 拒绝向未声明的槽注册）。
+  const mainInject = src.slice(src.indexOf("ctx.slots.inject('main'"));
+  const childrenAt = mainInject.indexOf('children: {');
+  const colRegisterAt = mainInject.indexOf('inject(CONCURRENT_COLUMN_SLOT');
+  assert.ok(childrenAt > 0 && colRegisterAt > childrenAt,
+    '子槽注册必须嵌在 main 注册之后（先声明后注册），不得靠两条并列 inject 的调度顺序');
+});
+
+// ── ⑤ 版式：列数、宽度、平移（用户 0.19.29 第 3 点，已验收，逐字保留）────────
+
+test('★ 0.19.55 并发：列数由数组驱动，上限 4（不得再硬编码三列）', () => {
+  const src = clientSrc();
+  const body = compareBody(src);
   assert.ok(!/col1Site|col2Site|col3Site/.test(body),
     '不得再有 col1Site/col2Site/col3Site 三个独立 state —— 那正是「加不了第四列」的根源');
-  assert.ok(!/columns\[0\]|columns\[1\]|columns\[2\]/.test(body),
-    '不得再按下标取列 —— 那是三份复制粘贴的 JSX');
-
-  // ② 必须是数组驱动（正判据：不只看「没写死」，还看「有没有做对」）。
+  assert.ok(!/columns\[0\]|columns\[1\]|columns\[2\]/.test(body), '不得再按下标取列');
   assert.match(body, /const \[cols, setCols\] = React\.useState/, '列状态必须是数组');
-  assert.match(body, /const MIN_COLS = 2;/, '必须有 MIN_COLS');
-  assert.match(body, /const MAX_COLS = 4;/, '必须有 MAX_COLS —— 用户要的是 2~4 列');
+  assert.match(src, /const CONCURRENT_MAX_COLS = 4;/, '必须有上限常量 —— 用户要的是 2~4 列');
   assert.match(body, /cols\.map\(/, '渲染必须由 cols.map 驱动');
-  assert.match(body, /const addCol = \(\) =>/, '必须有加列操作');
-  assert.match(body, /const removeCol = \(key\) =>/, '必须有删列操作');
+  assert.match(body, /const createColumns = \(n\) =>/, '必须有加列操作');
+  assert.match(body, /const releaseColumn = \(key\) =>/, '必须有移出列操作');
 });
 
-test('★ 0.18.0 Team：CSS 列数必须按实际列数排（写死 repeat(3) 会让第四列换行）', () => {
+test('★ 0.19.55 并发：新建一组默认 3 列（用户点名的「3 个重叠标签页」）', () => {
   const src = clientSrc();
-  // 写死的具体形态。
-  assert.ok(!/\.hwb-compare-columns\{[^}]*repeat\(3,1fr\)/.test(src),
-    'CSS 不得写死 repeat(3,1fr) —— 加出来的第四列会被挤到第二行');
-  // 必须按 data-cols 自适应（正判据）。
-  //
-  // 这里用 indexOf 而不是正则：client.cjs 里的 CSS 是**带反斜杠转义的字符串**
-  // （`[data-cols=\"2\"]`），正则里写引号要再过一层转义，极易写成本条第一版那种
-  // 「看起来对、实际匹配不到」的判据 —— 那会让护栏变成装饰。
-  for (const n of ['2', '3', '4']) {
-    assert.ok(src.includes('data-cols=\\"' + n + '\\"]'),
-      '必须有 data-cols="' + n + '" 的列布局规则（实际文件里带反斜杠转义）');
+  const body = compareBody(src);
+  assert.match(src, /const CONCURRENT_DEFAULT_COLS = 3;/, '默认列数必须常量化为 3');
+  assert.match(body, /createColumns\(cols\.length === 0 \? CONCURRENT_DEFAULT_COLS : 1\)/,
+    '首次建组用默认 3 列，之后每次加 1 列');
+});
+
+test('★ 0.19.55 并发：列宽上下限取自官方常量，放不下时左右切换（三列同步）', () => {
+  const src = clientSrc();
+  const body = compareBody(src);
+  for (const [name, value] of [['SIDEBAR_MAX', 420], ['SIDEBAR_MIN', 264], ['RIGHTBAR_MIN', 300],
+    ['OFFICIAL_CONTENT_MAX', 920], ['OFFICIAL_CARD_PAD', 32], ['COL_GAP', 16]]) {
+    assert.ok(new RegExp('const ' + name + ' = ' + String(value).replace('.', '\\.') + ';').test(body),
+      '列宽常量必须逐字保留（用户 0.19.29 已验收）：' + name + '=' + value);
   }
+  assert.ok(/const RIGHTBAR_MAX_RATIO = 0\.7;/.test(body), '右栏上限比例必须逐字保留');
+  assert.match(body, /viewportW - SIDEBAR_MAX - Math\.round\(viewportW \* RIGHTBAR_MAX_RATIO\)/,
+    '下限 = 中间区最窄（左右栏都拉到最宽）');
+  assert.match(body, /viewportW - SIDEBAR_MIN - RIGHTBAR_MIN/, '上限不得超过中间区最宽');
+  assert.match(body, /Math\.min\(colWidthMax, Math\.max\(colWidthMin, officialDefault\)\)/,
+    '夹取顺序必须是 min(上限, max(下限, 默认))');
+  assert.match(body, /Math\.min\(OFFICIAL_CONTENT_MAX, Math\.max\(680, Math\.round\(viewportW \* 0\.64\)\)\)/,
+    '默认列宽必须用官方那条 clamp(680, column*0.64, 920)');
+  assert.match(src, /\.hwb-concurrent-columns\{[^}]*grid-auto-columns:var\(--hwb-col-width/,
+    '列宽必须由 --hwb-col-width 统一给（三列同一个值 ⇒ 宽度同步）');
+  assert.match(body, /'--hwb-col-width': colWidth \+ 'px'/, '列宽是算出来的像素值，挂在 style 上');
+  assert.match(body, /cols\.length > visible && h\('button'/, '放不下才出现切换按钮');
+  assert.match(body, /const visible = Math\.max\(1, Math\.floor\(\(viewportW \+ COL_GAP\) \/ \(colWidth \+ COL_GAP\)\)\)/,
+    '可见列数按整数列算，不出现半列');
+  assert.ok(body.includes("transform: 'translateX(' + (-first * (colWidth + COL_GAP)) + 'px)'"),
+    '平移量必须是整列宽 + 列间距（永远整列对齐）');
+  assert.match(body, /const maxFirst = Math\.max\(0, cols\.length - visible\)/, '必须有平移上界');
+  assert.match(body, /disabled: !canPanLeft/, '到最左时左按钮必须置灰');
+  assert.match(body, /disabled: !canPanRight/, '到最右时右按钮必须置灰');
+  assert.match(src, /\.hwb-concurrent-pan\{position:absolute;top:50%;transform:translateY\(-50%\)/,
+    '左右按钮必须绝对定位在中间区左右边缘、垂直居中');
+  assert.match(src, /\.hwb-concurrent-pan\{[^}]*background:var\(--dsw-specific-menu\)/,
+    '按钮底色必须是官方胶囊那一支 specific-menu');
+  assert.match(src, /\.hwb-concurrent-pan\{[^}]*backdrop-filter:var\(--dsw-menu-backdrop-filter\)/,
+    '毛玻璃必须与官方胶囊同源');
 });
 
-test('★ 0.18.0 Team：回复必须按消息 id 回填（不得用 msgs[length-1] 定位）', () => {
-  const body = compareBody(clientSrc());
-
-  // 竞态的具体形态：用「最后一条」定位要替换的回复。
-  assert.ok(!/msgs\[msgs\.length - 1\]\s*=/.test(body),
-    '不得用 msgs[msgs.length - 1] 定位回复 —— 并发下用户已发下一轮时，' +
-    '后到的回复会把新一轮的用户消息覆盖掉');
-
-  // 正判据：每条消息带 id，按 id 匹配回填。
-  assert.match(body, /const botId = /, '占位回复必须带 id');
-  // 0.19.20：回填的对照物从 `job.botId` 变成了本列的 `botId` 闭包变量 ——
-  // 「按 id 精确回填」这条判据本身不变，变的只是它长在哪个函数里。
-  assert.match(body, /m\.id !== botId \? m :/, '必须按 id 精确回填');
-  // 组件卸载后不许再 setState（并发回来的最后一拍）。
-  assert.match(body, /const aliveRef = React\.useRef\(true\)/, '必须有卸载判据');
-  assert.match(body, /if \(!aliveRef\.current\) return;/, '卸载后必须提前返回');
+test('★ 0.19.55 并发：列的可见边界 = 官方那套「隐形 + hover 光」（用户 0.19.29 第 1 点）', () => {
+  const src = clientSrc();
+  assert.ok(!/\.hwb-concurrent-col\{[^}]*background:var\(--dsw-alias-bg-layer-1/.test(src),
+    '列不得有常驻卡片底 —— 那就是用户说的「分界」');
+  assert.ok(!/\.hwb-concurrent-col\{[^}]*border:\.5px solid/.test(src), '列不得有常驻边框');
+  assert.match(src, /\.hwb-concurrent-col\{[^}]*background:transparent[^}]*border:0/, '平时必须透明、无边框');
+  assert.match(src, /\.hwb-concurrent-col:hover[^{]*\{[^}]*var\(--dsw-alias-interactive-bg-hover/, 'hover 才浮起交互底色');
+  assert.match(src, /\.hwb-concurrent-col:focus-within/, 'focus-within 也要给（键盘用户必须看得见落点）');
 });
 
-test('★ 0.18.0 Team：每列必须铸稳定 sessionKey 并复用（否则「多会话」名存实亡）', () => {
-  const body = compareBody(clientSrc());
-
-  // 请求必须带上该列的会话键 —— 这是「各自接着聊」的唯一凭据。
-  //
-  // 0.19.20：`POST chat` 的调用点从「按 job 循环发」变成「每列各发一次」，
-  // 所以判据改为「在 sendCol 体内、且 api('chat') 的参数对象里真的出现 sessionKey」。
-  // 只看「源码里出现过 sessionKey」是不够的——那在字段名上也会命中。
-  const sendFn = body.slice(body.indexOf('const sendCol = '));
-  assert.ok(sendFn.length > 0, '必须存在按列发送的函数 sendCol（改名则本判据失效，需同步）');
-  const chatCall = sendFn.slice(sendFn.indexOf("api('chat', {"));
-  assert.ok(chatCall.length > 0, 'sendCol 内必须真的调 api(chat)');
-  assert.match(chatCall.slice(0, 400), /\bsessionKey,/, 'api(chat) 必须带 sessionKey');
-  // 首次发送时铸键、之后复用（不是每轮新铸）。
-  assert.match(body, /const sessionKey = col\.sessionKey \|\| \(/, '首次发送才铸键，之后复用');
-  // 会话身份对用户可见（可核对续在哪条会话上）。
-  assert.match(body, /hwb-compare-session/, '会话身份必须可见 —— 用户要能核对');
+test('★ 0.19.55 并发：面板高度必须确定（min-height:0 + overflow，否则长会话把列撑破）', () => {
+  const src = clientSrc();
+  assert.match(src, /\.hwb-concurrent\{[^}]*flex:1 1 auto[^}]*min-height:0[^}]*overflow:hidden/,
+    '.hwb-concurrent 必须 flex:1 1 auto + min-height:0 + overflow:hidden');
+  assert.match(src, /\.hwb-concurrent-col-body\{[^}]*min-height:0/, '.hwb-concurrent-col-body 必须有 min-height:0');
+  assert.match(src, /\.hwb-concurrent-body\{[^}]*min-height:0/, '.hwb-concurrent-body 必须有 min-height:0');
 });
 
-test('★ 0.18.0 Team：一列失败只标那一列，其余列照常', () => {
-  const body = compareBody(clientSrc());
-  // 具体形态：失败的列单独标 error 状态与原因。
-  assert.match(body, /status: ok \? 'done' : 'error'/, '每列必须有独立的成败状态');
-  assert.match(body, /c\.status === 'error' && c\.error/, '失败原因只显示在它自己那一列');
-  // 不得有「一列失败就整轮中止」的形态。
-  assert.ok(!/Promise\.all\(/.test(body),
-    '不得用 Promise.all 等全体 —— 用户 §4-Q1 的默认是「单独标红，其余列照常」');
+// ── ⑥ 入口图标：三个重叠的标签页 ───────────────────────────────────────────────
+
+test('★ 0.19.55 并发：左栏那一行必须画「3 个重叠标签页」（用户点名的识别特征）', () => {
+  const src = clientSrc();
+  const icon = src.slice(src.indexOf('function ConcurrentPanelIcon'), src.indexOf('function ConcurrentPanelIcon') + 900);
+  assert.ok(icon.length > 0, '找不到 ConcurrentPanelIcon（改名则本判据失效，需同步）');
+  assert.equal((icon.match(/h\('rect'/g) || []).length, 3, '必须是三个矩形（三个重叠的标签页）');
+  assert.match(icon, /currentColor/, '必须用 currentColor —— 明暗主题与选中态由宿主继承');
+  assert.ok(!/fill: '#|fill: "rgb/.test(icon), '不得写死颜色');
 });
 
-// ── 0.19.0：官方花名册 Team 面板必须保持删除 ─────────────────────────────────
+// ── ⑦ 组的持久化（「能够查看」：重开面板要能看到同一组会话）───────────────────
+
+test('★ 0.19.55 并发：必须是同一个会话一条列、组可恢复（不是每次打开都新建一批）', () => {
+  const src = clientSrc();
+  assert.match(src, /const CONCURRENT_STORE_PREFIX = 'dsh-webcode-bridge\.concurrent\.';/,
+    '组必须有稳定的存储键前缀');
+  assert.match(src, /function readConcurrentGroup\(key\)/, '必须有读回函数');
+  assert.match(src, /function writeConcurrentGroup\(key, ids\)/, '必须有写回函数');
+  const body = compareBody(src);
+  assert.match(body, /readConcurrentGroup\(groupKey\)/, '挂载时必须读回上次的组');
+  assert.match(body, /writeConcurrentGroup\(groupKey, cols\.map\(c => c\.sessionId\)\)/,
+    '组变化必须落盘（只有一处写法，不会漏）');
+  assert.match(body, /catch \(e\)[\s\S]{0,120}?delete refs\[id\]/,
+    '读回来的会话若已不存在，必须从组里去掉而不是留一条打不开的列');
+});
+
+// ── ⑧ 官方花名册 Team 面板不得复活（0.19.0 的用户裁定）───────────────────────
 
 test('★ 0.19.0 Team：官方 agentTeams 花名册面板不得复活（用户明确说参考错了）', () => {
   const src = clientSrc();
-
-  // 组件本体不得存在。
-  assert.ok(!/function TeamPanel\(/.test(src),
-    'TeamPanel 组件复活了 —— 用户 2026-09-22 明确要求删除这份「官方 agentTeams 花名册」呈现：' +
-    '「team不是指的官方team那样……参考错误了」（doc/user-voice-log.md:3670）');
-
-  // 右栏标签页注册与正文座位都不得存在。
-  assert.ok(!/'dsh-webcode-bridge\/team'/.test(src),
-    'TEAM_ID（dsh-webcode-bridge/team）复活了 —— 官方花名册 Team 标签页必须保持删除');
-  assert.ok(!/'webcode-team'/.test(src),
-    'TEAM_KIND（webcode-team）复活了 —— 官方花名册 Team 标签页必须保持删除');
-  assert.ok(!/sidebarRightTabs\.register\(\{[^}]*webcode-team/s.test(src),
-    '右栏仍在注册 webcode-team 标签页类型');
-
-  // 正判据：本插件的 Team 必须落在**中央对话区**（conversation.view），
-  // 而不是右栏。只删不加 = 用户再也找不到 Team，那是另一种失败。
-  assert.match(src, /inject\('conversation\.view'/,
-    '并列多会话视图必须注册到 conversation.view（中央对话区）—— 删了旧的却没有新的，用户就找不到 Team 了');
-  assert.match(src, /'webcode-compare-view'/,
-    'conversation.view 的视图 id 必须是 webcode-compare-view');
-  // label 必须与真实能力一致：支持 2~4 列，不得再自称「三列」。
-  assert.ok(!/label: \(\) => '三列模型对比'/.test(src),
-    'label 仍写「三列模型对比」而实际支持 2~4 列 —— 名称与能力不符即假陈述');
+  assert.ok(!/function TeamPanel\(/.test(src), '官方花名册 TeamPanel 不得复活');
+  assert.ok(!/'dsh-webcode-bridge\/team'/.test(src), '右栏 Team 面板正文座位不得复活');
+  assert.ok(!/'webcode-team'/.test(src), '右栏 webcode-team 标签页类型不得复活');
+  assert.ok(!/label: \(\) => '三列模型对比'/.test(src), '旧名字不得复活');
 });
 
-test('★ 0.19.31 Team：视图名改「并发」，且中心上方不再有「并列」标题', () => {
-  const raw = clientSrc();
-  const body = compareBody(raw);
-  // 判据只看**去掉注释的代码**：本文件的注释会逐字引用用户原话（含「并列」），
-  // 不去注释就会把「解释」当成「旧标题还在」——本仓库反复踩到这个坑
-  //（team-compare 与 client-render 都为此立过规矩）。
-  // 另注意文件是 **CRLF**：按 `\r?\n` 切分，否则尾部 `\r` 会让 `$` 对不上、整行注释剥不掉。
-  const code = body
-    .split(/\r?\n/)
-    .map((line) => line.replace(/^\s*\/\/.*$/, ''))
-    .join('\n')
-    .replace(/\/\*[\s\S]*?\*\//g, '');
-
-  // ① 用户 2026-09-27 原话（逐字）：「去除界面内的中心上方占用位置的『并列』两个字」。
-  //    删的必须是**标题节点连同它的容器**，不是只删那两个字 —— 后者会留下一个空的
-  //    高度占位，而「不再占用上方位置」正是用户要的。
-  assert.ok(!/hwb-compare-title/.test(code),
-    '中心上方的标题节点必须删除（用户：「去除界面内的中心上方占用位置的『并列』两个字」）');
-  assert.ok(!/hwb-compare-header/.test(code),
-    '标题的容器也必须删除 —— 只删文字会留下空的高度占位，那仍然「占用中心上方位置」');
-  assert.ok(!/h\('h3'/.test(code), '视图内部不得再渲染 h3 标题');
-  assert.ok(!/并列/.test(code), '渲染代码里不得再出现「并列」二字（改名后它只活在注释里）');
-  // 上一轮（0.19.29）的判据一并保持：说明文字与顶部工具行不得回来。
-  assert.ok(!/每列一条独立网页会话/.test(code),
-    '标题下的说明文字不得回来 —— 用户说它「上方不必要占用位置」');
-  assert.ok(!/把某列设为「主审」后/.test(code), '说明文字第二句也不得回来');
-  assert.ok(!/hwb-compare-tools/.test(code),
-    '顶部工具行（3 列／主审：X／+ 加一列）不得回来 —— 它也是「上方占位置」的一部分');
-
-  // ② 视图名改为「并发」：用户要的词，承载在 `conversation.view` 的 label 上，
-  //    显示位置是中央区顶栏「对话 / 轨迹 / 并发」那一行。
-  assert.match(raw, /label: \(\) => '并发'/,
-    'conversation.view 的 label 必须逐字是「并发」—— 用户点名要的就是这个词');
-  assert.ok(!/label: \(\) => '并列/.test(raw), 'label 不得再叫「并列…」');
-
-  // ③ 能力不得回退：列数上限必须真的封顶（加列按钮到 MAX_COLS 即禁用）。
-  assert.match(code, /disabled: cols\.length >= MAX_COLS/,
-    '加列按钮必须在达到 MAX_COLS 时禁用 —— 否则用户可以加出布局撑不住的列数');
-  // 会话身份可见：用户要能核对「这一列续在哪条网页会话上」。
-  assert.match(code, /hwb-compare-session/,
-    '每列的会话身份必须可见');
-});
-
-/**
- * ★ 0.19.29：**去除列的分界**，改成官方那套「隐形 + hover 一点光」（用户第 1 点）。
- *
- * 用户原话（逐字）：「然后去除每列对话的对话框分界，用官方现在的隐形加上鼠标移到后
- * 显示一点光线的结构，完全照抄 dsh」。
- *
- * 判据成对：既要有「旧的可见分界确实没了」，也要有「新的 hover 光确实在」——
- * 只测前者能过掉「把样式全删了」，只测后者能过掉「旧边框还在」。
- */
-test('★ 0.19.29 Team：列分界必须改为「隐形 + hover 光」（照抄官方）', () => {
-  const raw = clientSrc();
-  const body = compareBody(raw);
-  // 同前：剥掉注释再判 —— 渲染处的注释会逐字解释「旧的列头长什么样」。
-  const code = body
-    .split(/\r?\n/)
-    .map((line) => line.replace(/^\s*\/\/.*$/, ''))
-    .join('\n')
-    .replace(/\/\*[\s\S]*?\*\//g, '');
-
-  // ── 负判据：常驻可见的分界必须整体消失 ──────────────────────────────────
-  // 列头那一行（站点下拉 / 状态 / 设为主审 / ✕）就是用户说的「分界」。
-  assert.ok(!/hwb-compare-col-head/.test(code),
-    '列头整行必须删除（用户：「去除每列对话的对话框分界」）');
-  // 旧写法：常驻的卡片底色 + 边框 —— 那是「分界」的本体。
-  assert.ok(!/\.hwb-compare-col\{[^}]*background:var\(--dsw-alias-bg-layer-1/.test(raw),
-    '列不得再有常驻的卡片底色（那就是用户看到的分界）');
-  assert.ok(!/\.hwb-compare-col\{[^}]*border:\.5px solid/.test(raw),
-    '列不得再有常驻边框（那就是用户看到的分界）');
-
-  // ── 正判据：官方那套 hover 光线必须在 ──────────────────────────────────
-  assert.match(raw, /\.hwb-compare-col\{[^}]*background:transparent[^}]*border:0/,
-    '列必须隐形：底色透明、无边框');
-  assert.match(raw, /\.hwb-compare-col:hover[^{]*\{[^}]*var\(--dsw-alias-interactive-bg-hover/,
-    '鼠标移到列上必须浮起官方那档交互底色（用户要的「一点光线」）');
-  // 键盘用户也要能看到落点，否则光线只在鼠标下存在。
-  assert.match(raw, /\.hwb-compare-col:focus-within/,
-    'focus-within 必须同样给光 —— 否则键盘用户永远看不到自己的落点在哪一列');
-
-  // ── 控件没有丢：四个都搬进了每列对话框工具栏 ────────────────────────────
-  const mapBody = body.slice(body.indexOf('cols.map('));
-  assert.match(mapBody, /className: 'hwb-col-composer-select'/, '站点选择必须搬进对话框工具栏');
-  assert.match(mapBody, /onChange: \(e\) => setColSite\(c\.key, e\.target\.value\)/,
-    '站点选择必须仍然改得动本列的站点');
-  assert.match(mapBody, /onClick: \(\) => setReviewCol\(c\.key\)/, '「设为主审」必须搬进工具栏');
-  assert.match(mapBody, /onClick: \(\) => removeCol\(c\.key\)/, '「移除列」必须搬进工具栏');
-  assert.match(mapBody, /hwb-col-composer-badge review/, '主审标记必须是极小徽标（用户要求）');
-});
-
-/**
- * ★ 0.19.29（用户第 2 点）：每列对话框必须**照抄官方**，且带完整的模型选择。
- *
- * 用户原话（逐字）：「『并列』中每列的对话框改为：官方原生的对话框：保留完整的
- * 切换模式，模型显示项目等完整能力/UI！直接照抄！」
- *
- * 这条要防的是「把类名改了、能力没接上」这种假修复，因此判据**四跳齐全**：
- *   ① 选择器在渲染里存在且受控（改得动）；
- *   ② 选项**真的来自桥的模型清单**，不是写死一份（写死的清单会随桥端新增模型静默过期）；
- *   ③ 选中的模型**真的随请求下发**（选了不发 = 假功能，本项目记过多次）；
- *   ④ 后端**本来就有**这个形参（不新增后端路径 —— 用户要求别动真实桥接 web 端）。
- */
-test('★ 0.19.29 Team：每列的模型选择必须四跳齐全（渲染 → 清单 → 下发 → 后端已有）', () => {
-  const raw = clientSrc();
-  const body = compareBody(raw);
-
-  // ① 渲染：工具栏里必须有受控的模型选择器。
-  assert.match(body, /className: 'hwb-col-composer-select'[\s\S]{0,400}?onChange: \(e\) => setColModel\(c\.key, e\.target\.value\)/,
-    '每列对话框工具栏必须有模型选择器，且改写的是**本列**的 modelId');
-
-  // ② 清单来自桥，不写死。
-  assert.match(body, /api\('models'\)/, '模型清单必须来自桥的 GET models（写死的清单会静默过期）');
-  assert.match(body, /const modelsForSite = \(siteId\) => modelCatalog\.filter\(\(m\) => m\.siteId === siteId\)/,
-    '必须按该列的站点过滤模型（跨站点的模型 id 发过去会发不动）');
-  // 写死清单的具体形态：组件里出现一个字面量模型数组。
-  assert.ok(!/modelCatalog: \[|modelOptions = \[\s*\{/.test(body),
-    '不得在组件里写死一份模型清单 —— 那会在桥端新增/改名模型时静默过期');
-
-  // ③ 下发：选了模型必须真的随请求发出（只在选了具体模型时才带，空串=该站默认）。
-  assert.match(body, /\.\.\.\(col\.modelId \? \{ model: col\.modelId \} : \{\}\)/,
-    '选中的模型必须随 api(chat) 下发 —— 选了不发就是假功能');
-
-  // ④ 后端已有该形参：本改动**不新增后端路径**（用户要求别动真实桥接 web 端）。
-  const wc = fs.readFileSync(path.join(root, 'lib', 'web-control.js'), 'utf8');
-  assert.match(wc, /sendTurn\(sessionKey, promptText, \{[\s\S]{0,160}?model: body\?\.model/,
-    'POST chat 必须把 body.model 交给 sendTurn（本改动只接线，不改后端）');
-
-  // 换站点必须清掉模型（模型清单按站点分组，留着旧 id 会发不动）。
-  assert.match(body, /const setColSite = \(key, siteId\) => \{[\s\S]{0,200}?modelId: ''/,
-    '换站点必须一并清空 modelId —— 否则会把 A 站的模型发给 B 站');
-  // 换模型**不清会话**：同一会话里切模型是合理用法，且「同上下文比较两个模型」正需要它。
-  const setModel = body.slice(body.indexOf('const setColModel = '), body.indexOf('const setColModel = ') + 400);
-  assert.ok(!/sessionKey: ''|messages: \[\]/.test(setModel),
-    '换模型不得清空会话或消息 —— 否则「同一段上下文下比较两个模型」这个用法就没了');
-});
-
-/**
- * ★ 0.19.30（用户第 2 点）：**模式切换**必须四跳齐全，不能只画一个控件。
- *
- * 用户原话（逐字）：「『并列』中每列的对话框改为：官方原生的对话框：保留完整的
- * 切换模式，模型显示项目等完整能力/UI！直接照抄！」
- *
- * 官方 `.uV2eYG_modes` 那两位放的是权限/Plan 两个槽。本插件三列走**网页控制面**，
- * 桥端既没有「权限」也没有「Plan」，画上去就是撒谎。桥端真正有、且逐字对得上
- * 「模式切换」的是 `thinkMode`（'auto'|'on'|'off'）。
- *
- * 这条判据防的是「把类名改了、控件画了、后端没接线」——那是最像完成、实际最坑
- * 的一种假修复（界面选得动、服务端收下、生成时不生效，全程无声）。
- * 因此四跳缺一不可：
- *   ① 渲染：`.modes` 组里有一个**受控**的选择器；
- *   ② 下发：选中的值随请求发出；
- *   ③ 控制面：`POST chat` 把它交给 `sendTurn`（此前正是断在这一跳）；
- *   ④ 驱动：`sendTurn` 本来就有这个形参（本改动不新增后端能力）。
- */
-test('★ 0.19.30 Team：模式切换必须四跳齐全（渲染 → 下发 → 控制面 → 驱动已有）', () => {
-  const raw = clientSrc();
-  const body = compareBody(raw);
-  const wc = fs.readFileSync(path.join(root, 'lib', 'web-control.js'), 'utf8');
-  const drv = fs.readFileSync(path.join(root, 'lib', 'browser-driver.js'), 'utf8');
-
-  // ① 渲染：`.modes` 组里的受控选择器（改的是**本列**）。
-  assert.match(body, /className: 'hwb-col-composer-modes'/,
-    '必须有官方 .uV2eYG_modes 那一位的模式切换组');
-  assert.match(body, /onChange: \(e\) => setColThink\(c\.key, e\.target\.value\)/,
-    '模式切换必须受控且只改本列 —— 画一个改不动的控件就是撒谎');
-  // 档位必须与驱动端的三态逐字一致，不得自造第四个值。
-  for (const v of ['auto', 'on', 'off']) {
-    assert.ok(new RegExp("id: '" + v + "'").test(body),
-      "档位必须包含驱动端真实支持的 '" + v + "'（不得自造驱动不认的值）");
-  }
-
-  // ② 下发：只在非默认时才带（'auto' 是出厂态，不带它请求体与上一版逐字相同）。
-  assert.match(body, /\.\.\.\(col\.thinkMode && col\.thinkMode !== 'auto' \? \{ thinkMode: col\.thinkMode \} : \{\}\)/,
-    '选中的思考模式必须随 api(chat) 下发 —— 选了不发就是假功能');
-
-  // ③ 控制面：必须真的交给 sendTurn。这一跳此前是断的。
-  assert.match(wc, /sendTurn\(sessionKey, promptText, \{[\s\S]{0,120}?thinkMode: body\?\.thinkMode/,
-    'POST chat 必须把 thinkMode 交给 sendTurn —— 否则界面选得动、生成时不生效（静默失败）');
-
-  // ④ 驱动本来就有这个形参（本改动只接线，不新增后端能力）。
-  assert.match(drv, /async function sendTurn\(key, message, \{[^}]*thinkMode[^}]*\} = \{\}\)/,
-    'browser-driver 的 sendTurn 必须本来就有 thinkMode 形参（本改动不新增后端路径）');
-  // 驱动认的取值就是那三态：未知值一律退回默认，绝不按真处理。
-  assert.match(drv, /thinkMode === 'on' \? true : thinkMode === 'off' \? false : null/,
-    '驱动的三态判定必须保持原样（本改动不碰它的语义）');
-});
-
-/**
- * ★ 0.19.29（round2 的第三条「披露」）：产出落盘必须**用户看得见**。
- *
- * 两轮思考的结论是：本插件把每列产出写进 `.hwb/cols/<键>/`（围栏见 `column-fs.js`），
- * 而那个目录**在磁盘上、界面上看不见**。只说「不撒谎」不够 —— 一个用户无从核对的
- * 事实，与没有这个事实几乎等价。因此披露必须三跳齐全：
- *
- *   ① 服务端 `POST chat` 把落盘读数放进响应（`artifacts`）；
- *   ② 客户端 `sendCol` 把它记到**本列**（不是全局、不是丢掉）；
- *   ③ 渲染处把它透出（`title` 给完整路径，行内给「已存」标记）。
- *
- * 只钉其中一跳的话，另外两跳断掉照样全绿（本仓库记过多次的「三跳只钉一跳」）。
- */
-test('★ 0.19.29 Team：产出落盘必须「服务端返回 → 客户端记录 → 用户看得见」三跳齐全', () => {
-  const raw = clientSrc();
-  const body = compareBody(raw);
-
-  // 第一跳：服务端必须把落盘读数放进响应。
-  const wc = fs.readFileSync(path.join(root, 'lib', 'web-control.js'), 'utf8');
-  const chatBlock = wc.slice(wc.indexOf("'POST chat'"), wc.indexOf('  };\n\n  // ── `status`'));
-  assert.match(chatBlock, /saveColumnReply\(body\?\.columnContext, taskRootOf\(body\), reply, sessionKey\)/,
-    'POST chat 必须真的落盘并拿到读数');
-  assert.match(chatBlock, /\.\.\.\(artifacts \? \{ artifacts \} : \{\}\)/,
-    '落盘读数必须随响应透出（不透出 ⇒ 用户永远不知道产出在哪）');
-
-  // 第二跳：客户端必须把读数记到**本列**。
-  const sendFn = body.slice(body.indexOf('const sendCol = '));
-  assert.match(sendFn, /const artifactDir = ok \? String\(res\?\.artifacts\?\.dir \|\| ''\) : ''/,
-    'sendCol 必须读取 res.artifacts.dir（读到却不用 = 白读）');
-  assert.match(sendFn, /artifactDir: artifactDir \|\| c\.artifactDir \|\| ''/,
-    '必须把落盘目录记进本列，且失败轮不清掉上一轮已知的目录');
-
-  // 第三跳：渲染处必须真的透出（否则「记录了」等于没记录）。
-  const mapBody = body.slice(body.indexOf('cols.map('));
-  assert.match(mapBody, /title: c\.artifactDir/, '必须把完整目录放进 title（hover 与读屏都能读到）');
-  assert.match(mapBody, /c\.artifactDir \? ' · 已存' : ''/, '行内必须有「已存」标记（用户扫一眼就知道）');
-
-  // 列对象形状一致：初始三列与 addCol 都必须带 artifactDir，
-  // 否则「加了列才发现读到 undefined」。
-  const initCount = (body.match(/artifactDir: ''/g) || []).length;
-  assert.ok(initCount >= 4, '初始三列 + 加列路径都必须带 artifactDir，实际=' + initCount);
-});
-
-/**
- * ★ 0.19.29（用户第 3 点）：列宽上下限必须来自官方常量，且放不下时用左右按钮切换。
- *
- * 用户原话（逐字）：「然后会话框最小就是右侧和左侧栏目拉到最小距离，多出来的别的列框
- * 通过点击居中中心左右的左右按钮进行切换视角--注意适配官方UI，然后最大一样最多是左右
- * tab 最大距离，不够显示就显示左右框点击左右切换--然后 3 个会话宽度同步」
- *
- * 以及他对「自适应」的明确否认：「我没有让你随着左右栏自适应啊！我只让你看左右栏导致
- * 切换按钮的位置以及上下限」—— 因此这里同时钉住「上下限取自官方常量」与
- * 「列宽不是左右栏的实时函数」两件事。
- */
-test('★ 0.19.29 Team：列宽上下限取自官方常量，放不下时左右切换（三条同步）', () => {
-  const raw = clientSrc();
-  const body = compareBody(raw);
-
-  // ── 上下限（用户 0.19.29 澄清后的方向）──────────────────────────────────
-  //
-  // 用户原话：「下限 = 中间区**最窄**，上限 = 官方会话的默认完整最宽」。
-  // 我第一版把上限写成「左栏最窄 + 右栏最宽」，实测**站不住**：官方右栏上限是
-  // viewport×0.7（1440 下右栏最宽 1008），中间区只剩 168px，比下限还小 ⇒ 上下限
-  // 整体翻转、列宽被夹成恒定小值、切换按钮永不出现。这条判据就是那次修正的钉子。
-  for (const [name, value] of [
-    ['SIDEBAR_MAX', 420], ['SIDEBAR_MIN', 264], ['RIGHTBAR_MIN', 300],
-    ['OFFICIAL_CONTENT_MAX', 920], ['OFFICIAL_CARD_PAD', 32],
-  ]) {
-    assert.ok(new RegExp('const ' + name + ' = ' + String(value).replace('.', '\\.') + ';').test(body),
-      name + ' 必须逐字等于官方常量 ' + value + '（来自 ui-layout 与 ConversationRoot）');
-  }
-  assert.ok(/const RIGHTBAR_MAX_RATIO = 0\.7;/.test(body),
-    '右栏上限比例必须逐字等于官方 ui-layout 的 0.7');
-
-  // ── 上下限：左右栏各取**相反**极值 ────────────────────────────────────────
-  //
-  // 用户原话：「会话框最小就是右侧和左侧栏目拉到最小距离……最大一样最多是左右
-  // tab 最大距离」。即：
-  //   下限 = 左右栏都拉到**最大**时中间剩的宽（中间区**最窄**）
-  //   上限 = 左右栏都拉到**最小**时中间剩的宽（中间区**最宽**，再被官方 952 封顶）
-  //
-  // ⚠️ 这条判据此前钉的是「下限 = 左栏最大 + 右栏**最小**」，方向是错的：
-  // 那样算出来**视口越大下限越大**（1920 → 1200），下限反超上限、列宽被钉死，
-  // 三列永远放不下（等于每列占满整屏）。本轮修正并在此钉住正确的一对。
-  assert.match(body, /viewportW - SIDEBAR_MAX - Math\.round\(viewportW \* RIGHTBAR_MAX_RATIO\)/,
-    '列宽下限必须由「左栏最宽 + 右栏最宽(vw×0.7)」推出（= 中间区最窄）');
-  assert.match(body, /viewportW - SIDEBAR_MIN - RIGHTBAR_MIN/,
-    '列宽上限必须由「左栏最窄 + 右栏最窄」推出（= 中间区最宽）');
-  // 上限 = 官方完整最宽 = 内容 920 + 卡片余量 32（再与「中间区最宽」取小）。
-  assert.match(body, /OFFICIAL_CONTENT_MAX \+ OFFICIAL_CARD_PAD/,
-    '列宽上限必须是官方完整最宽（内容 920 + 卡片余量 32）');
-  // 夹取顺序：上限赢（视口很大时下限会超过上限，此时「不超过官方最宽」是硬约束）。
-  assert.match(body, /Math\.min\(colWidthMax, Math\.max\(colWidthMin, officialDefault\)\)/,
-    '夹取顺序必须是 min(上限, max(下限, 默认)) —— 让上限在冲突时赢');
-
-  // ── 默认值 = 官方对话的默认内容宽（用户答「官方对话的默认值！」）──────────────
-  assert.match(body, /Math\.min\(OFFICIAL_CONTENT_MAX, Math\.max\(680, Math\.round\(viewportW \* 0\.64\)\)\)/,
-    '默认列宽必须用官方 ConversationRoot 的默认内容宽公式 clamp(680, column*0.64, 920)');
-
-  // ── 三条同步：宽度是**一个值**给到每一列（结构上不可能某列比别列宽）──────────
-  assert.match(raw, /\.hwb-compare-columns\{[^}]*grid-auto-columns:var\(--hwb-col-width/,
-    '列宽必须由同一个 --hwb-col-width 统一给 —— 「3 个会话宽度同步」的落点');
-  assert.match(body, /'--hwb-col-width': colWidth \+ 'px'/,
-    '视图必须把这个算出**一个**宽度发到 CSS（而不是每列各算一个）');
-
-  // ── 放不下时出现左右按钮，且整列平移（永不半列）────────────────────────────
-  assert.match(body, /cols\.length > visible && h\('button'/, '放不下时才出现切换按钮（放得下画两个点不动的箭头是噪音）');
-  assert.match(body, /const visible = Math\.max\(1, Math\.floor\(\(viewportW \+ COL_GAP\) \/ \(colWidth \+ COL_GAP\)\)\)/,
-    '一屏放得下几列必须按**整数列**算（否则会出现半列）');
-  // 用 indexOf 而不是正则：这段字面量里括号与加号密集，正则要过两层转义，
-  // 极易写成本仓库反复记过的「看起来对、实际匹配不到」的空转判据。
-  assert.ok(body.includes("transform: 'translateX(' + (-first * (colWidth + COL_GAP)) + 'px)'"),
-    '平移量必须是整列宽 + 列间距（用户：「优先跳转下一列让列左边对齐左端」）');
-  // 末列贴右端放不下时退到「刚好全放下」，两个方向都要能到头。
-  assert.match(body, /const maxFirst = Math\.max\(0, cols\.length - visible\)/, '必须有平移上界（末列贴边时退化到刚好全放下）');
-  assert.match(body, /disabled: !canPanLeft/, '到最左时左按钮必须置灰');
-  assert.match(body, /disabled: !canPanRight/, '到最右时右按钮必须置灰');
-  // 按钮位置按用户要求贴中间区左右边缘、垂直居中。
-  assert.match(raw, /\.hwb-compare-pan\{position:absolute;top:50%;transform:translateY\(-50%\)/,
-    '左右按钮必须绝对定位在中间区左右边缘并垂直居中');
-
-  // ── 0.19.31（用户 2026-09-27 原话）：「面板透明？--这个用在并发中面板一直悬浮的左右
-  //     按键上，然后这个面板改为和 dsh 官方别的胶囊面板同步的不透明」──────────────
-  //
-  // 判据成对，缺一条都能过掉一半的真缺陷：
-  //   · 只测「底色是 specific-menu」→ 放过「常态 opacity:0，根本看不见」；
-  //   · 只测「常态 opacity:1」→ 放过「底色还是那支发虚的专用色」。
-  assert.match(raw, /\.hwb-compare-pan\{[^}]*background:var\(--dsw-specific-menu\)/,
-    '左右按钮底色必须走官方胶囊面板同款 --dsw-specific-menu（用户：和官方别的胶囊面板同步）');
-  assert.match(raw, /\.hwb-compare-pan\{[^}]*backdrop-filter:var\(--dsw-menu-backdrop-filter\)/,
-    '底色为 specific-menu 的高层级表面必须同时上官方 menu backdrop-filter（两者同进同出）');
-  assert.match(raw, /\.hwb-compare-pan\{[^}]*opacity:1/,
-    '常态必须 opacity:1 —— 用户要的是「面板一直悬浮」，不是「hover 才现身」');
-  // 旧形态必须真的没了：靠视口 hover 才现形的规则、以及那支发虚的 input-major 底色。
-  assert.ok(!/\.hwb-compare-viewport:hover \.hwb-compare-pan/.test(raw),
-    '不得再靠「鼠标进视口才现形」—— 触屏/键盘路径根本等不到这一刻');
-  assert.ok(!/\.hwb-compare-pan\{[^}]*background:var\(--dsw-specific-input-major/.test(raw),
-    '左右按钮不得再用 --dsw-specific-input-major 当底色（那是输入框专用色，不是胶囊面板色）');
-});
-
-/**
- * ★ 0.19.0：发送锁必须**必然解开**（第三轮对抗审查抓到的阻断级真缺陷）。
- *
- * 原写法把 `setSending(false)` 放进一个 `setCols` 的 updater 里，并用微任务延后：
- *
- *     Promise.resolve().then(() => setCols((prev) => {
- *       if (prev.some((c) => c.status === 'streaming')) return prev;
- *       setSending(false); return prev;
- *     }));
- *
- * 它**必然不解锁**：微任务排进队列时，上面刚把每列设成 `streaming`，而 `api('chat')`
- * 的往返还没回来 ⇒ 判定「仍有 streaming」⇒ 提前返回，解锁那行永不执行。
- * 后果：三列都显示「已完成」，而发送按钮永远停在「发送中…」且 disabled——**一次挂载
- * 只能问一句**。而 `conversation.view` 是中央常驻视图、不随交互卸载，不会自愈。
- *
- * 判据三条（缺一即回到旧缺陷）：
- *   ① 必须用**计数**判断全线收尾，而不是事后扫描列状态（扫描必然在往返前跑）；
- *   ② 解锁必须放在 `finally` 里（失败也要减，否则一列异常就永久锁死）；
- *   ③ **不得**在 `setCols` 的 updater 里调 `setSending`——那是不纯 reducer，
- *      StrictMode 双调用下行为未定义。
- */
-test('★ 0.19.20 Team：每列一个独立对话框，不得再有「同时发送」（用户 Q5）', () => {
-  const raw = compareBody(clientSrc());
-  // 判据只看**去掉注释的代码**：下面这些说明里会逐字提到旧写法（含
-  // `handleSendAll` / `pendingRef`），不去注释就会把「解释」当成「缺陷仍在」——
-  // 这是本仓库反复踩到的坑（`client-render.test.mjs` 为此立过规矩）。
-  // 另注意文件是 **CRLF**：按 `\r?\n` 切分，否则尾部 `\r` 会让 `$` 对不上、整行注释
-  // 根本剥不掉（本项目记过的「空转」缺陷）。
-  const body = raw
-    .split(/\r?\n/)
-    .map((line) => line.replace(/^\s*\/\/.*$/, ''))
-    .join('\n')
-    .replace(/\/\*[\s\S]*?\*\//g, '');
-
-  // ── 负判据：旧形态必须**整体**消失 ────────────────────────────────────────
-  //
-  // 用户 2026-09-26 原话（逐字）：「移除『并列多会话』里面的同时发送功能，
-  // 然后尽可能将底部对话框变为三个，按照 dsh 风格分隔会话，3 者独立」。
-  // 因此下面四样东西一个都不能留下——留任何一个，用户就会看到「还能同时发」。
-  assert.ok(!/handleSendAll/.test(body), '不得再有 handleSendAll（那就是「同时发送」的本体）');
-  assert.ok(!/同时发送/.test(body), '界面上不得再出现「同时发送」字样（措词也是契约）');
-  // 共享的全局在途锁与全局发送态：它们正是「一列在跑、全体发不出去」的机制。
-  assert.ok(!/const pendingRef = React\.useRef\(0\)/.test(body),
-    '不得再有全局 pendingRef 在途计数器 —— 它的唯一职责是解锁那个共享按钮，共享按钮已删');
-  assert.ok(!/const \[sending, setSending\]/.test(body),
-    '不得再有全局 sending 态 —— 每列的锁必须由那一列自己的 status 派生');
-
-  // ── 正判据①：每列一个对话框（三列 = 三个）──────────────────────────────
-  //
-  // 判据落在**渲染结构**上而不是「出现过 input」上：`hwb-col-composer` 是列内
-  // 对话框的外层锚点。0.19.22 把它从「自绘 input + 按钮」换成**官方 composer 的
-  // 复刻**（用户：「每个列上下宽度都全长，和官方一样……直接抄 dsh」），
-  // 因此类名变了，但「每列一个、提交到本列、位置在列体之后」三条一字未改。
-  const mapIdx = body.indexOf('cols.map(');
-  assert.ok(mapIdx > 0, '渲染必须仍由 cols.map 驱动');
-  const mapBody = body.slice(mapIdx);
-  assert.match(mapBody, /className: 'hwb-col-composer'/, '每列内部必须有自己的对话框');
-  assert.match(mapBody, /className: 'hwb-col-composer-input'/, '每列的对话框必须有文本面');
-  assert.match(mapBody, /onSubmit: \(e\) => \{ e\.preventDefault\(\); sendCol\(c\.key\); \}/,
-    '每列的 form 必须提交到**本列**（sendCol(c.key)）—— 提交到全局函数就是共享输入条的回潮');
-  // 输入区的位置：必须在列体**之后**（底部），否则「底部对话框」这个名字就不成立。
-  const bodyIdx = mapBody.indexOf("className: 'hwb-compare-col-body'");
-  const inputIdx = mapBody.indexOf("className: 'hwb-col-composer'");
-  assert.ok(bodyIdx > 0 && inputIdx > bodyIdx,
-    '每列的对话框必须渲染在列体之后（= 视觉上的底部）');
-
-  // ── 正判据②：锁是**逐列**的 ────────────────────────────────────────────
-  //
-  // 这一条是 0.19.0 那个「按钮永久锁死」缺陷的结构性解药：只要锁由列自己的
-  // status 派生，就不存在「忘了减计数器」这种可能。
-  assert.match(body, /const isColSending = \(c\) => c\.status === 'streaming';/,
-    '必须有按列判在途的谓词（单一事实来源 = 列自己的 status）');
-  assert.match(body, /disabled: isColSending\(c\) \|\| !String\(c\.input \|\| ''\)\.trim\(\)/,
-    '发送按钮的 disabled 必须只看本列：在途 或 输入为空');
-
-  // ── 正判据③：hooks 仍在组件体顶层 ──────────────────────────────────────
-  //
-  // 0.19.0 第四轮自查抓到过的阻断级缺陷（hooks 写进事件处理器 → Invalid hook call）
-  // 与本次改动无关但同样是这块代码的地雷，因此保留按**位置**的判据。
-  const depthAt = (needle) => {
-    const lines2 = body.split('\n');
-    const startIdx = lines2.findIndex((l) => /function MultiModelCompareView/.test(l));
-    assert.ok(startIdx >= 0, '找不到 MultiModelCompareView（改名则本判据失效，需同步）');
-    let depth = 0;
-    let started = false;
-    for (let i = startIdx; i < lines2.length; i++) {
-      const code = lines2[i].replace(/'(?:\\.|[^'])*'/g, "''").replace(/"(?:\\.|[^"])*"/g, '""');
-      if (!started && code.includes('{')) started = true;
-      if (needle.test(lines2[i])) return depth;
-      for (const ch of code) {
-        if (ch === '{') depth += 1;
-        else if (ch === '}') depth -= 1;
-      }
-      if (started && depth <= 0 && i > startIdx + 5) break; // 组件体已结束
-    }
-    return -1; // 未找到
-  };
-  assert.equal(depthAt(/const \[quote, setQuote\] = React\.useState/), 1,
-    'quote 必须声明在组件体顶层（花括号深度 1）');
-  assert.equal(depthAt(/const sendCol = \(colKey\) =>/), 1,
-    'sendCol 是组件体顶层的函数定义（对照）');
-  assert.equal(depthAt(/const chatCall = /), -1, '不得再出现 chatCall 之类的中转变量（对照，防判据漂移）');
-});
-
-/**
- * ★ 0.19.20：引用是**跨列**的（用户 Q2 + Q5 的交汇点）。
- *
- * 用户要的两件事在这里合流：
- *   · Q2「完整实现引用会话内容」——引用要能把一段已有回复带进下一轮提问；
- *   · Q5「选定一个模型进行主要审查」——探索列的产出要能喂给主审列。
- *
- * 没有这条通路，三框就只是三个并排的聊天窗口，而不是「互不影响的方案探索 +
- * 统一审查」。判据因此落在**引用槽是全局的**这一点上：挂在某一列里的引用
- * 传不到别的列，功能等于没做。
- */
-/**
- * ★ 0.19.22：并列多会话的**布局与对话框照抄官方**（用户 2026-09-26 原话）。
- *
- * 用户原话（逐字）：
- *   「参考原生的对话框完成并列会话的设计而不是现在单独画三个框还被下面原生的挤了，
- *     直接抄 dsh」「每个列都能够做到上下宽度都全长和对话中的官方一样」
- *
- * 拆成两条可验证的判据，缺一即回到用户报的那个画面：
- *
- *   ① **不再被下面原生的挤** —— 视图根节点必须声明官方协议
- *      `data-conversation-composer-overlay`（官方轨迹视图用的同一条属性），
- *      并**且**在本视图挂载期间让官方那个属于主会话的对话框座位让位
- *      （`:has(.hwb-compare-view)`）。旧版 `.hwb-compare-view{height:100%}` 在
- *      滚动容器里 = 「占满一屏」＋「官方对话框再加一截」，三列因此被挤掉一截。
- *   ② **对话框是官方的复刻，不是自绘** —— 卡片必须是 radius 22px +
- *      `--dsw-specific-input-major` + `--dsw-elevation-soft`（逐字取自官方
- *      `.uV2eYG_card`），发送按钮必须是 34px 圆形 + `--dsw-alias-button-info-fill`。
- *      这一条防的是「把类名改了、样式没抄」这种假修复。
- *
- * 反向验证：把根节点那条属性删掉 → ①红；把卡片圆角改回 8px → ②红。
- */
-test('★ 0.19.22 Team：布局与对话框必须照抄官方（不被原生挤 + 复刻 composer）', () => {
-  const raw = clientSrc();
-  const body = compareBody(raw);
-
-  // ── ① 布局：官方整屏协议 + 官方对话框让位 ────────────────────────────────
-  assert.match(body, /'data-conversation-composer-overlay': ''/,
-    '视图根节点必须声明官方的 data-conversation-composer-overlay，否则 .viewArea 拿不到确定高度');
-  const css = raw;   // CSS 是 client.cjs 里的字符串字面量：直接在源码上断言
-                     // （与 0.18.0 那条「列数不得写死」判据同一手法；本组规则
-                     //   里没有转义引号，因此逐字可匹配）
-  assert.match(css, /\[data-conversation-scroll\]:has\(\.hwb-compare-view\)>\[data-composer-seat\]\{display:none\}/,
-    '本视图挂载期间必须让官方对话框座位让位（否则最底部会再叠第四个框 = 用户说的「被挤了」）');
-  // 让位规则必须是**局部**的：只在本视图存在时命中，切回官方 Chat 视图立即失效。
-  assert.ok(!/^\[data-composer-seat\]\{display:none\}/m.test(css),
-    '不得无条件隐藏官方对话框（那会连主会话都发不出消息）');
-  // 旧写法必须消失：`height:100%` 在滚动容器里正是「占满一屏还要再加一截」的来源。
-  assert.match(css, /\.hwb-compare-view\{[^}]*flex:1 1 auto[^}]*min-height:0[^}]*overflow:hidden/,
-    '.hwb-compare-view 必须是 flex:1 1 auto + min-height:0 + overflow:hidden（确定高度、内部滚动）');
-  assert.ok(!/\.hwb-compare-view\{[^}]*height:100%/.test(css),
-    '不得再用 height:100%（在滚动容器里它会和官方对话框的高度相加，导致三列被挤）');
-  // 列体要能真正滚动：flex 子项缺 min-height:0 时 overflow-y:auto 永不触发。
-  assert.match(css, /\.hwb-compare-col-body\{[^}]*min-height:0[^}]*overflow-y:auto/,
-    '.hwb-compare-col-body 必须 min-height:0 + overflow-y:auto（否则长回复把列撑破）');
-
-  // ── ② 对话框：官方 composer 的刻度逐条对上 ──────────────────────────────
-  assert.match(css, /\.hwb-col-composer-card\{[^}]*border-radius:22px/,
-    '卡片圆角必须 22px（官方 .uV2eYG_card）');
-  assert.match(css, /\.hwb-col-composer-card\{[^}]*background:var\(--dsw-specific-input-major/,
-    '卡片底色必须用官方的 --dsw-specific-input-major');
-  assert.match(css, /\.hwb-col-composer-card\{[^}]*box-shadow:var\(--dsw-elevation-soft/,
-    '卡片投影必须用官方的 --dsw-elevation-soft');
-  // 官方把「36px 起」放在 `.uV2eYG_input`，把「336px 封顶 + 滚动」放在 `.uV2eYG_scroll`
-  // ——**两个不同的盒子**。本插件照这个分层：文本面 36px 起，滚动盒封顶。
-  assert.match(css, /\.hwb-col-composer-input\{[^}]*min-height:36px/,
-    '文本面必须 36px 起（官方 .uV2eYG_input 的 docked floor）');
-  assert.match(css, /\.hwb-col-composer-scroll\{[^}]*max-height:var\(--dsh-composer-text-max-height/,
-    '滚动盒必须以官方的 --dsh-composer-text-max-height 封顶（官方 .uV2eYG_scroll）');
-  // 官方 `.uV2eYG_placeholder` 是**独立元素**，不是 textarea 的 placeholder 属性
-  //（官方文本面是 contenteditable，没有那个属性）。属性写法会与独立元素同时显示。
-  assert.match(css, /\.hwb-col-composer-placeholder\{/, '必须有官方的独立占位元素');
-  assert.ok(!/placeholder: '向 '/.test(body),
-    '文本面不得再用 placeholder **属性** —— 官方是独立元素，两处同时显示一眼就不是官方那个');
-  // 官方 `.uV2eYG_add`：28px 圆形图标按钮。
-  assert.match(css, /\.hwb-col-composer-add\{[^}]*width:28px;height:28px[^}]*border-radius:999px/,
-    '工具栏左侧必须有官方那枚 28px 圆形 .add 按钮');
-  // 官方 `.uV2eYG_modes` 模式切换（用户第 2 点点名要的「完整的切换模式」）。
-  assert.match(css, /\.hwb-col-composer-modes\{/, '必须有官方的 .modes 模式切换组');
-  assert.match(body, /hwb-col-composer-modes[\s\S]{0,400}?onChange: \(e\) => setColThink\(c\.key, e\.target\.value\)/,
-    '模式切换必须是**真的受控**（改得动本列），不是画一个摆件');
-  // 官方 `.uV2eYG_row` 是 inline-size 容器（靠它做窄卡片降级）。
-  assert.match(css, /\.hwb-col-composer-row\{[^}]*container-type:inline-size/,
-    '工具栏行必须是 inline-size 容器（官方 .uV2eYG_row）');
-  assert.match(css, /\.hwb-col-composer-send\{[^}]*width:34px;height:34px[^}]*border-radius:999px[^}]*background:var\(--dsw-alias-button-info-fill/,
-    '发送按钮必须是官方那枚 34px 圆形主按钮');
-  // 三列的对话框必须**各一个**（用户要的 3 者独立不变），而不是合成一个。
-  const mapBody = body.slice(body.indexOf('cols.map('));
-  assert.equal((mapBody.match(/className: 'hwb-col-composer'/g) || []).length, 1,
-    '对话框必须渲染在 cols.map 内部（一次渲染 × 每列一份 = 三份）');
-  assert.ok(!/hw[b]-compare-input-bar/.test(body), '不得复活共享底栏');
-});
-
-test('★ 0.19.20 Team：引用槽必须跨列（探索列 → 主审列的那条通路）', () => {
-  const body = compareBody(clientSrc());
-  // 全局引用槽（组件体 state，不是列对象的字段）。
-  assert.match(body, /const \[quote, setQuote\] = React\.useState\(null\)/,
-    '引用槽必须是全局 state（挂在列对象里就传不到别的列）');
-  // 每列每一条助手回复都有引用入口。
-  assert.match(body, /const quoteFrom = \(col, msg\) =>/, '必须有「引用这条回复」的动作');
-  assert.match(body, /m\.role === 'assistant' && c\.status !== 'streaming' && h\('button'/,
-    '引用按钮只应出现在已完成的助手回复上（引用自己的提问或半截回复都没有意义）');
-  // 引用随请求下发（第二跳：路由侧拼装，见下一条断言）。
-  assert.match(body, /quote: q\.text, quoteFrom: q\.from/, '发送时必须把引用一起下发');
-  // 引用是一次性的：用掉即清（隐式延续的状态最难排查）。
-  assert.match(body, /const q = quote;[\s\S]{0,80}?setQuote\(null\);/,
-    '引用必须在发出时清空 —— 否则下一轮会莫名其妙又带上同一段');
-
-  // 第二跳：`POST chat` 必须真的把它拼进 prompt。
-  const wc = fs.readFileSync(path.join(root, 'lib', 'web-control.js'), 'utf8');
-  const chatBlock = wc.slice(wc.indexOf("'POST chat'"), wc.indexOf('  };\n\n  // ── `status`'));
-  assert.ok(chatBlock.length > 0, '找不到 POST chat 的动作体（改名则本判据失效，需同步）');
-  assert.match(chatBlock, /const quoteText = String\(body\?\.quote \|\| ''\)\.trim\(\)/,
-    'POST chat 必须读取 quote 参数');
-  assert.match(chatBlock, /promptText/, '拼装后的 promptText 必须真的存在');
-  assert.match(chatBlock, /sendTurn\(sessionKey, promptText,/,
-    '必须把**拼装后**的文本发出去 —— 拼了却发原串就是假功能');
-  // 截断规则：引用长回复会吃掉上下文预算，必须有上限。
-  assert.match(chatBlock, /QUOTE_LIMIT = 4000/, '引用必须有长度上限（否则一次引用就顶掉大半预算）');
-});
-
-/**
- * ★ 0.19.20：主审列必须**全局唯一**，且可改选。
- *
- * 用户原话（2026-09-26）：「怎么做到选定一个模型进行主要审查？」
- * 答案是一个唯一的主审位 + 一个显式的「设为主审」动作。若允许多个主审，
- * 「主要审查」就没有出口；若不可改选，用户第一列选错了就再也没有退路。
- */
-test('★ 0.19.20 Team：主审列全局唯一且可改选', () => {
-  const body = compareBody(clientSrc());
-  // 唯一性：设某列为主审时，其余列一律降为 explore。
-  assert.match(body, /const setReviewCol = \(key\) => \{[\s\S]{0,160}?role: c\.key === key \? 'review' : 'explore'/,
-    '设为主审必须把其余列降为 explore —— 否则会出现多个主审，「主要审查」没有出口');
-  // 初始态必须**恰好有一个**主审（否则用户一进来就没有审查出口）。
-  const initialReview = (body.match(/role: 'review'/g) || []).length;
-  assert.equal(initialReview, 1,
-    '初始列状态里必须恰好有一个 role 为 review 的列，实际=' + initialReview);
-  // 可改选：非主审列上必须有「设为主审」入口。
-  assert.match(body, /onClick: \(\) => setReviewCol\(c\.key\)/, '非主审列必须能一键改选为主审');
-  // 可见性：主审身份要看得见（用户要能一眼看出审查落在哪个模型上）。
-  //
-  // 0.19.29：头部那行「主审：X」随列头一起删除（用户第 1 点「上方不必要占用位置」），
-  // 主审身份改由**每列工具栏里的极小徽标** + 该列自己的站点下拉共同表达 ——
-  // 徽标说「这列是主审」，下拉说「主审落在哪个站点」。判据因此跟着能力搬家，
-  // 而不是把这条护栏删掉（删掉它 = 主审变成不可见，那是功能倒退）。
-  assert.match(body, /const reviewCol = cols\.find\(\(c\) => c\.role === 'review'\)/, '必须能取出当前主审列');
-  assert.match(body, /className: 'hwb-col-composer-badge review'/,
-    '主审列的徽标必须可见 —— 用户要能一眼看出审查落在哪一列');
-});
-
+// ── ⑨ 官方 agentTeams 读取本身保留（它仍是任务板的来源）──────────────────────
 
 /**
  * ★ 0.19.0：用户要的「设置开始时间 / 模式 / 权限」必须**三跳齐全**。
@@ -757,7 +334,6 @@ test('★ 0.19.20 Team：主审列全局唯一且可改选', () => {
  */
 test('★ 0.19.0 任务排期：开始时间/模式/权限必须「界面 → 路由 → 台账」三跳齐全', () => {
   const src = clientSrc();
-  const body = compareBody(src);
   // 第一跳：新建弹窗必须有原生日期时间控件与三个执行面输入。
   assert.match(src, /type: 'datetime-local'/, '新建弹窗必须有开始时间输入框（datetime-local）');
   assert.match(src, /setStartAt\(/, '开始时间必须有受控状态');
@@ -766,8 +342,8 @@ test('★ 0.19.0 任务排期：开始时间/模式/权限必须「界面 → �
   assert.match(src, /mode: mode\.trim\(\)/, 'mode 必须真的发出');
   assert.match(src, /permission: permission\.trim\(\)/, 'permission 必须真的发出');
   // 详情页也要能改（只在新建时能设 = 半个功能）。
-  // 注意这里查的是**整份源码**而不是 `compareBody`：详情页不在 MultiModelCompareView
-  // 里，用前者会永远找不到（本判据的第一版就写错了，是它自己红出来的）。
+  // 注意这里查的是**整份源码**：详情页不在并发面板里，用 `compareBody` 会永远找不到
+  //（本判据的第一版就写错了，是它自己红出来的）。
   assert.match(src, /toLocalInputValue\(schedule\.startAt\)/, '详情页必须以本地时间回显开始时间');
   assert.match(src, /schedule: \{[\s\S]{0,160}?cron: cronExpr\.trim\(\)/, '详情页保存必须带上排期');
 

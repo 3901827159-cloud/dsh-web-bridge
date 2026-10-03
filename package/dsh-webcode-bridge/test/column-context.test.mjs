@@ -161,15 +161,20 @@ test('withColumnGuidance：无有效列身份时逐字返回原文（零位移�
   assert.ok(out.length > p.length, '有身份时必须真的拼进东西');
 });
 
-test('三跳齐全：client 发 columnContext → 路由拼进 promptText → sendTurn 收到拼好的文本', () => {
-  // 第一跳：客户端必须真的把列身份放进请求体。
+/**
+ * 0.19.55：客户端那一跳**已撤销**——并发列不再是「同一个网页会话里的三列」，
+ * 而是三条各自独立的**真官方会话**（每列一个 DSH session，见 `team-compare.test.mjs`）。
+ * 「这一列是哪一列」这件事已经由会话本身承载（每列有自己的上下文），
+ * 不再需要往提示词里塞一段列身份；硬塞反而会让真会话里多出一段与它无关的约定。
+ *
+ * 所以这条判据变成：**后两跳保留**（`POST chat` 仍接受并拼装 `columnContext`，
+ * 兼容仍会传它的调用方），**第一跳改为反向断言**（客户端不得再发它）。
+ */
+test('三跳：路由拼进 promptText → sendTurn 收到拼好的文本（第一跳已按 0.19.55 撤销）', () => {
+  // 反向断言：并发面板已经走真会话，不得再往请求体里塞列身份。
   const client = read('lib/client.cjs');
-  const sendFn = client.slice(client.indexOf('const sendCol = '));
-  const chatCall = sendFn.slice(sendFn.indexOf("api('chat', {"));
-  assert.ok(chatCall.length > 0, 'sendCol 内必须真的调 api(chat)');
-  assert.match(chatCall.slice(0, 1200), /columnContext: \{/, 'api(chat) 必须带上 columnContext（不带 = 界面知道列、模型不知道）');
-  assert.match(chatCall.slice(0, 1200), /role: col\.role === 'review' \? 'review' : 'explore'/,
-    'role 必须逐字取自列状态，且非法值回落 explore');
+  assert.ok(!/columnContext: \{/.test(client),
+    'client.cjs 不得再发 columnContext —— 每列已是独立真会话，列身份由会话本身承载');
 
   // 第二跳：路由必须真的拼（不是只读不拼）。
   const wc = read('lib/web-control.js');
