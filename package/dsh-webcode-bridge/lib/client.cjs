@@ -2403,14 +2403,22 @@ window.__ModuleLoader__.load({
                 // 真实头像（0.19.37）：抓到了就画真实头像，抓不到回落站点矢量标记。
                 // 跨域 CDN 可能拒热链 ⇒ onError 时藏掉 img，露出后面的标记；
                 // **不造假**：读不到就不用槽名冒充头像（与右栏账户下拉同一纪律）。
+                //
+                // 0.19.61 修**真缺陷**（用户 2026-10-04：「全部网站都是网站矢量」）：
+                // 旧实现的**顺序反了**——矢量标记写在 `<img>` 之前没问题，但
+                // `.hwb-avatar-img` 缺 `position:absolute`（目录页那条有、这里没有），
+                // 于是 img 与 glyph 是**并排的两个 flex 子项**挤在 28px 按钮里：
+                // 头像被压到一边/溢出（`.hwb-avatar` 无 overflow:hidden），
+                // 看起来就是「头像没渲染、只剩矢量」。现在与目录页**同一套几何**：
+                // 标记先画，头像绝对定位铺满圆框、盖在上面，失败时藏掉即露出标记。
+                h('span', { className: 'hwb-avatar-glyph', 'aria-hidden': 'true' },
+                  h(SiteGlyph, { sid: s.siteId, size: 12 })),
                 s.avatarUrl
                   ? h('img', {
                     className: 'hwb-avatar-img', src: s.avatarUrl, alt: '', loading: 'lazy',
                     onError: (e) => { try { e.currentTarget.style.display = 'none'; } catch { /* 忽略 */ } },
                   })
-                  : null,
-                h('span', { className: 'hwb-avatar-glyph', 'aria-hidden': 'true' },
-                  h(SiteGlyph, { sid: s.siteId, size: 12 }))),
+                  : null),
               // 昵称：**抓到的真实昵称优先**，抓不到才回落槽名（displayName）。
               // 用户原话：「尝试拉取账户名称和图像，替代现在的默认头像和非圆框」。
               // 回落时仍是 displayName，绝不把槽名伪装成真实昵称。
@@ -3419,10 +3427,14 @@ window.__ModuleLoader__.load({
             updateInfo
               ? h('span', {
                 className: 'hwb-version',
+                // 0.19.61：文案里的数据源从「registry」改成「GitHub Releases」。
+                // 0.19.56 已把更新源换成 Releases，而这三句 title 仍写着 registry——
+                // 用户在排障时被这三句话引到错的源上（本项目对「显示与实现不一致」
+                // 记过多次：说 A 做 B 比不说更难查）。状态枚举本身没变。
                 title: updateInfo.status === 'outdated'
-                  ? '当前 v' + updateInfo.current + '，registry 上是 v' + updateInfo.latest
+                  ? '当前 v' + updateInfo.current + '，GitHub Releases 上是 v' + updateInfo.latest
                   : updateInfo.status === 'current'
-                    ? 'registry 上也是 v' + (updateInfo.latest || updateInfo.current)
+                    ? 'GitHub Releases 上也是 v' + (updateInfo.latest || updateInfo.current)
                     : '检查失败：' + (updateInfo.reason || '未知原因'),
               }, 'v' + updateInfo.current + (updateInfo.status === 'outdated' ? ' → v' + updateInfo.latest : ''))
               : (build?.version ? h('span', { className: 'hwb-version' }, 'v' + build.version) : null),
@@ -3431,7 +3443,7 @@ window.__ModuleLoader__.load({
               disabled: updating || updateCheckedLoading,
               title: updateInfo?.status === 'outdated'
                 ? '安装 v' + updateInfo.latest + '（装完需要重启 dsh web）'
-                : '到 npm registry 查一次有没有新版本',
+                : '到 GitHub Releases 查一次有没有新版本',
               onClick: () => (updateInfo?.status === 'outdated' ? doUpdate() : doCheckUpdate()),
             }, updating ? '更新中…' : updateCheckedLoading ? '检查中…'
               : updateInfo?.status === 'outdated' ? '更新到 v' + updateInfo.latest : '检查更新'),
@@ -4484,7 +4496,18 @@ window.__ModuleLoader__.load({
              */
             const primary = accounts[0] || null;
             const others = accounts.slice(1);
-            const title = (primary && primary.accountName) || siteName(sid);
+            // 卡片标题 = **网站原名**（0.19.61，用户 2026-10-04 指令）。
+            //
+            // 旧实现是 `primary.accountName || siteName(sid)`——「抓到昵称就显昵称」，
+            // 于是同一份目录里 glm 显示 `RSYHN`、kimi 显示 `TYZ0712`、而 deepseek / z.ai
+            // 因为昵称读不到（见 doc/long-term-issues.md #43）显示站点名——**同一列里
+            // 两种语义混排**：用户看到的标题有时是人名、有时是网站名。
+            // 用户原话：「右侧 tab 菜单显示的是用户名而不是网站名」。
+            //
+            // 现在标题恒为网站名，真实昵称**只在下拉的各账户行里**（`acctName`）——
+            // 昵称没有丢，只是回到了它能被正确解读的位置：一个站点一行标题，
+            // 行内的账户才是「人」。头像不受影响（仍是第 1 个账户的真实头像）。
+            const title = siteName(sid);
             const primaryAvatar = (primary && primary.avatarUrl) || null;
             // 叠层里最多画几颗。3 是「一眼看得出有几个号、又不把 56px 胶囊撑变形」的
             // 取中；它只影响**显示**，不参与任何读数或选路。
@@ -4519,13 +4542,24 @@ window.__ModuleLoader__.load({
                 h('span', { className: 'hwb-catalog-ico' + (hasBrandVector(sid) ? ' official' : '') },
                   // 真实头像优先；与下拉里的 acctIcon 同一纪律——跨域 CDN 拒热链时
                   // 藏掉 img 露出下面的矢量标记，**不造假**。
+                  //
+                  // 0.19.61 修**真缺陷**（用户 2026-10-04：「头像是网站矢量、头像是网站
+                  // 矢量，都没渲染」）：旧实现把 `SiteGlyph` 写在 `<img>` **之后**，
+                  // 于是两个都占满身份盒、按 DOM 顺序**矢量图盖在头像上**——头像永远
+                  // 看不见（名字能显示是因为文本在另一个节点上）。这不是「抓不到头像」
+                  // （服务端实测 deepseek/glm/kimi/doubao/zai 都有真实 avatarUrl），
+                  // 而是**画的顺序与占位错**。
+                  //
+                  // 现在按「谁优先谁后画」排序：矢量标记先画，头像后画 ⇒ 有头像时头像
+                  // 在最上层；头像 `onError` 时把自己 display:none，底下的矢量自然露出
+                  //（旧注释承诺的「藏掉 img 露出下面的标记」现在才真的成立）。
+                  hasBrandVector(sid) ? h(SiteGlyph, { sid, size: 26 }) : null,
                   primaryAvatar
                     ? h('img', {
                       className: 'hwb-catalog-img', src: primaryAvatar, alt: '', loading: 'lazy',
                       onError: (e) => { try { e.currentTarget.style.display = 'none'; } catch { /* 忽略 */ } },
                     })
-                    : null,
-                  h(SiteGlyph, { sid, size: 26 })),
+                    : null),
                 others.length
                   ? h('span', {
                     className: 'hwb-catalog-stack',
@@ -4561,13 +4595,23 @@ window.__ModuleLoader__.load({
             // 少一种控件形状）。
             const acctIcon = (a) => {
               const url = a.avatarUrl || null;
-              if (!url) return h('span', { className: 'hwb-acct-glyph' }, h(SiteGlyph, { sid, size: 16 }));
+              const glyph = h('span', { className: 'hwb-acct-glyph' }, h(SiteGlyph, { sid, size: 16 }));
+              if (!url) return glyph;
               // 真实头像（0.19.4）。跨域 CDN 可能拒热链 → onError 时把 img 藏掉，
               // 露出后面的站点标记；**不造假**：读不到就不用槽名冒充头像。
-              return h('img', {
+              //
+              // 0.19.61 修：旧实现这里**只 return 那个 `<img>`**，矢量标记压根没画进
+              // DOM ⇒ 注释承诺的「露出后面的站点标记」没有落点，头像加载失败时
+              // 那一行就是**空白**（不是回落标记）。现在两者都画、标记在先、
+              // 头像绝对定位盖在上面（CSS 见 `.hwb-acct-img`），失败时藏 img 即露出标记。
+              //
+              // 为什么包一层 `<span>` 而不是直接 return 数组：`Menu` 的 `icon` 契约是
+              // **单个 React 节点**，数组会被当成两个并列图标；而且头像要绝对定位，
+              // 必须有一个定位父元素（`.hwb-acct-face`）。
+              return h('span', { className: 'hwb-acct-face' }, glyph, h('img', {
                 className: 'hwb-acct-img', src: url, alt: '', loading: 'lazy',
                 onError: (e) => { try { e.currentTarget.style.display = 'none'; } catch { /* 忽略 */ } },
-              });
+              }));
             };
             // 昵称取值已在上面（叠层要先用到它）定义，这里不再重复一份——
             // 两处各写一份正是本项目记过多次的「口径漂移」形状。
@@ -5182,7 +5226,16 @@ window.__ModuleLoader__.load({
         // 状态环用 `border` 实现（而不是 outline/box-shadow）：border 参与布局，
         // 三种状态的框大小恒定，切换时不会让整行跳动。
         // 颜色**不是唯一载体**：aria-label/title/可见文本都带状态，见 SiteAccounts.
-        ".hwb-avatar{width:28px;height:28px;padding:0;flex:none;border-radius:50%;cursor:pointer;background:transparent;display:inline-flex;align-items:center;justify-content:center;border:2px solid var(--dsw-alias-label-tertiary,#9aa0a6)}",
+        // `.hwb-avatar-glyph` 与 `.hwb-catalog-ico` 都是**同尺寸叠层**的底图：标记先画、头像
+        // 绝对定位盖在上面（0.19.61）。三处头像挂点（设置页账户行 / 目录卡片 / 目录下拉）
+        // 共用「容器 overflow:hidden + 头像绝对定位」这一套，因此「有头像」与「回落标记」
+        // 占的像素完全相同，任何一种失败都不会把整行挤变形。
+        //
+        // ⚠ `overflow:hidden` 不是装饰：`SiteGlyph` 的画布是 `size + 8`（它自己的居中余量，
+        // 见 SiteGlyph 内 `const box = size + 8`）。放进 26px 身份盒时那个 34×34 的画布
+        // **会从盒子里溢出来**——用户看到的「矢量图边边角角露出来/头像旁边多一块」
+        // 正是它。裁掉溢出后，矢量按盒子边缘对齐，头像也盖得干净。
+        ".hwb-avatar{position:relative;overflow:hidden;width:28px;height:28px;padding:0;flex:none;border-radius:50%;cursor:pointer;background:transparent;display:inline-flex;align-items:center;justify-content:center;border:2px solid var(--dsw-alias-label-tertiary,#9aa0a6)}",
         ".hwb-avatar.ok{border-color:var(--dsw-alias-state-success-primary,#2e7d32)}",
         ".hwb-avatar.dead{border-color:var(--dsw-alias-state-error-primary,#93443e)}",
         ".hwb-avatar.picked{box-shadow:0 0 0 2px var(--dsw-alias-label-primary,#1f2328)}",
@@ -5191,7 +5244,11 @@ window.__ModuleLoader__.load({
         // 因此必须是 inline-flex 居中，而不是靠 font-size/line-height 摆一个字符。
         // 两者对文字标记同样成立（SiteGlyph 的文字分支也是 svg），所以这一条
         // 同时覆盖有官方矢量与只有文字标记的站点，不需要第二条规则。
-        ".hwb-avatar-img{width:100%;height:100%;border-radius:50%;object-fit:cover;flex:none}",
+        //
+        // 0.19.61：`.hwb-avatar-img` 加 `position:absolute`（与 `.hwb-catalog-img` 同口径）。
+        // 旧实现缺这一条 ⇒ img 与 glyph 并排挤在 28px 圆框里，头像看起来「没渲染」。
+        // `inset:0` + `object-fit:cover` 让它铺满圆框、盖住底下的矢量标记。
+        ".hwb-avatar-img{position:absolute;inset:0;width:100%;height:100%;border-radius:50%;object-fit:cover;flex:none}",
         ".hwb-avatar-glyph{display:inline-flex;align-items:center;justify-content:center;font-size:12px;line-height:1;color:var(--dsw-alias-label-secondary,inherit);pointer-events:none}",
         // 花名册那组 `.hwb-roster*` 类名随设置页「正在运行（子代理 / Team）」卡
         //（0.19.x）一并删除——它们的唯一消费者是 AgentRoster，留着就是没人用的样式。
@@ -5408,15 +5465,45 @@ window.__ModuleLoader__.load({
         //（`className` 透传），因此 ghost 的配色、按下态、焦点环都由官方给，这里只负责
         // 胶囊的几何。
         // 0.16.38：目录与站点胶囊与左右边界留出间距（与首屏网格同一条口径）。
-        // 0.17.0：完全参考官方 GuideBody（min-height:100% + justify-content:center + :after 10% 弹性留白），
-        // 做到点击进入网站选择界面后垂直水平居中，解决顶部贴着的问题。
-        ".hwb-catalog{box-sizing:border-box;display:flex;flex-direction:column;justify-content:center;align-items:center;gap:14px;min-height:100%;padding:0 clamp(8px,3vw,24px);color:inherit}",
-        ".hwb-catalog:after{content:\"\";flex:0 10%}",
+        // 0.17.0：参考官方 GuideBody，做到进入网站选择界面后垂直水平居中。
+        //
+        // 0.19.61 修**真缺陷**（用户 2026-10-04 原话：「右侧 tab 展开时候，窗口够大就没问题，
+        // 但是缩小窗口就能看到，顶部置顶了，已经够大时候就已经是偏上了」）。
+        //
+        // ## 旧写法为什么必然出这个症状
+        //
+        // 旧规则是官方 GuideBody 的逐字复制：`justify-content:center` + `min-height:100%`
+        // + `:after{flex:0 10%}`。那三件在**官方那个容器里**成立，因为 guide 的内容只有
+        // 一两行、永远装得下。但本站点目录是**十行胶囊**，在窄窗口/矮窗口下内容高于
+        // 容器 ⇒ 竖直居中（`justify-content:center`）会把**顶部溢出到容器之外**，
+        // 而宿主 `.P3OORG_tabBody` 是 `overflow:hidden`（官方原文，不可改）⇒
+        // 溢出的那几行**被裁掉且无法滚动到达**。这就是「顶部置顶/被切」。
+        //
+        // 「窗口够大时也偏上」是同一个原因的另一半：`:after{flex:0 10%}` 只在**有富余
+        // 空间**时才分到 10%，而 `justify-content:center` 已经把富余空间从两端平分过一次，
+        // 于是视觉重心被那 10% 的下方留白往下推之前就被居中了——富余不足时看起来就是偏上。
+        //
+        // ## 为什么改成 auto margin（而不是继续抄 GuideBody）
+        //
+        // `margin:auto` 是**唯一**同时满足两件事的写法：
+        //   · 有富余空间时，上下 auto margin 等分 ⇒ **垂直居中**（视觉与旧的居中完全一致）；
+        //   · 空间不足时，auto margin 归零 ⇒ 内容从容器顶部开始、**可以自然滚动/
+        //     不被裁**（`justify-content:center` 做不到这一条，那是它的已知行为）。
+        // 因此 `min-height:100%` 保留（撑满才能居中）、`overflow-y:auto` 补上
+        //（矮窗口下能滚到被挤出去的部分），`:after` 那 10% 的假留白**删掉**——
+        // 它本来就是「富余空间不够时反而把内容推偏」的来源。
+        ".hwb-catalog{box-sizing:border-box;display:flex;flex-direction:column;align-items:center;gap:14px;min-height:100%;padding:0 clamp(8px,3vw,24px);color:inherit;overflow-y:auto}",
+        // 上下 auto margin 才是居中本体（见上）；它同时让「装不下」时归零为可滚动。
+        //
         // 0.16.39：列表宽度与首屏网格**同一口径**（官方 guide 的 380px + 居中）。
         // 官方的 `.entryCell` 就是 `width:380px;max-width:100%`，所以「目录页」与
         //「首屏选站点」在同一块面板里读起来是同一列宽——这也是用户说的
         //「宽度需要和官方一致」在目录页那一半的对应实现。
-        ".hwb-catalog-list{display:flex;flex-direction:column;gap:8px;width:380px;max-width:100%;margin:0 auto}",
+        //
+        // ⚠ 水平与垂直的 auto 必须写在**同一条**规则里。旧实现这里另有一条
+        // `margin:0 auto`（0.16.39 立的），它会覆盖掉垂直居中的 auto——两条同名
+        // 规则只有后者生效，而 0.19.61 之前没人注意到「居中是靠哪一条成立的」。
+        ".hwb-catalog-list{display:flex;flex-direction:column;gap:8px;width:380px;max-width:100%;margin:auto}",
         ".hwb-site-card{box-sizing:border-box;min-width:0;border:.5px solid var(--dsw-alias-border-l4,#8884);background:var(--dsw-alias-bg-layer-1,#fff);border-radius:24px;align-items:stretch;width:100%;display:flex;overflow:hidden}",
         ".hwb-site-main{text-align:left;border-radius:24px 0 0 24px;flex:1;justify-content:flex-start;gap:14px;min-width:0;height:auto;min-height:56px;padding:14px 20px}",
         ".hwb-site-text{flex-direction:column;gap:3px;min-width:0;display:flex}",
@@ -5426,8 +5513,14 @@ window.__ModuleLoader__.load({
         // 账号下拉里的头像与回落标记（0.19.4）。尺寸取官方 Menu 的 leading icon 档
         // （figma `.Menu_cell` gap 8、图标 16），圆框是为了让真实头像与站点标记
         // 在**同一列宽**里对齐——两种来源混排时，列宽不齐比图标不精致更显眼。
-        ".hwb-acct-img{width:16px;height:16px;border-radius:50%;object-fit:cover;flex:none}",
-        ".hwb-acct-glyph{display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;flex:none}",
+        // 账户下拉行里的身份图（0.19.61）：与另两处头像挂点同一套几何——标记当底图、
+        // 头像绝对定位盖在上面。`overflow:hidden` 同样是为了裁掉 SiteGlyph 的
+        // `size+8` 画布余量（16px 盒里画布是 24×24，不裁就会溢到相邻文本上）。
+        ".hwb-acct-img{position:absolute;inset:0;width:16px;height:16px;border-radius:50%;object-fit:cover;flex:none;z-index:1}",
+        ".hwb-acct-glyph{position:relative;display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;flex:none;overflow:hidden;border-radius:50%}",
+        // 下拉图标那一格的定位父元素（0.19.61）：头像绝对定位要挂在它上面。
+        // 16×16 + `overflow:hidden` 与另两处头像挂点同一口径。
+        ".hwb-acct-face{position:relative;display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;flex:none;overflow:hidden;border-radius:50%}",
         // 卡片左端的**身份盒**（0.19.59）：主头像与站点矢量标记在同一个 26px 圆槽里
         // **重合**（头像绝对定位盖住标记），于是「抓到头像」与「回落标记」两种情况
         // 占宽逐像素相同——卡片宽度与标题起始位置不会因为身份读没读到而跳动。
@@ -5436,9 +5529,14 @@ window.__ModuleLoader__.load({
         //（`<img>` + `SiteGlyph` 各一份），抓到头像时两个图标会同时画出来；注释描述的是
         // 意图而不是实现（本仓库记过多次的同一形状）。本条的 `position:absolute` 才让
         // 那句承诺成立，`onError` 藏掉 img 也才真的「露出下面的标记」。
+        // 0.19.61：`overflow:hidden` 裁掉 SiteGlyph 的 `size+8` 画布余量（26px 盒里是 34×34），
+        // 否则矢量会从盒子四角溢出来——那正是用户报的「边边角角出来」。
         ".hwb-catalog-face{position:relative;display:inline-flex;align-items:center;justify-content:center;flex:none;width:26px;height:26px}",
-        ".hwb-catalog-ico{position:relative;width:26px;height:26px}",
-        ".hwb-catalog-img{position:absolute;inset:0;width:26px;height:26px;border-radius:50%;object-fit:cover}",
+        ".hwb-catalog-ico{position:relative;width:26px;height:26px;overflow:hidden;border-radius:50%}",
+        // 主头像：绝对定位盖在矢量标记**上面**（DOM 顺序也是标记先画，见 SiteCatalogBody）。
+        // `z-index` 显式写在头像这一侧：两者都是定位元素，靠 DOM 顺序已经够，
+        // 但显式一层能让后来改顺序的人不必推理层叠上下文。
+        ".hwb-catalog-img{position:absolute;inset:0;width:26px;height:26px;border-radius:50%;object-fit:cover;z-index:1}",
         // 其余账户的叠层缩略图（0.19.59）：绝对定位在身份盒右下角，**不参与排版**，
         // 因此账号多少都不会改变胶囊高度与标题位置。14px 一颗、互相压 5px；
         // 超出上限的账户折成 `+N` 一颗，账户数一个不丢（说明行仍写着总数）。

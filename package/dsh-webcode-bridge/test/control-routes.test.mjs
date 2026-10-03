@@ -236,8 +236,19 @@ test('★ 0.19.39 更新：控制面必须同时有只读的 update-status 与�
   assert.match(src, /'POST update'/, '必须有 POST update（唯一有副作用的那个）');
   // 版本号形状必须被校验：spec 会被拼进命令行，放开等于开一个任意参数入口。
   assert.match(src, /版本号形状不合法/, 'POST update 必须校验版本号形状（它会进命令行）');
-  // profile 必须由服务端从 profileDir 推出来——浏览器侧不知道自己在哪个 profile 里跑。
-  assert.match(src, /path\.basename\(String\(config\.profileDir/, 'profile 名必须由服务端从 profileDir 推出');
+  // profile 必须由服务端推出——浏览器侧不知道自己在哪个 profile 里跑。
+  //
+  // 0.19.61 修判据：旧断言钉的是 `path.basename(String(config.profileDir`，而**那正是
+  // 缺陷本身**。`config.profileDir` 是桥自己的浏览器数据目录
+  //（`webcode-edge-profile` / 桌面端 patch 改成 `webcode-edge-profile-desktop`），
+  // 不是 DSH profile 名。真机读数（2026-10-04，运行中的 0.19.60）：该端点实回
+  // `profile: "webcode-edge-profile-desktop"` ⇒ `dsh plugin --profile
+  // webcode-edge-profile-desktop add …` 指向不存在的 profile。宿主唯一权威来源是
+  // `DSH_PROFILE`（dsh-shell-env 写 `values[DSH_PROFILE_KEY] = profile.name`）。
+  // 判据因此改成钉「环境变量优先」，并**反向**禁止退回按 profileDir 末段取名。
+  assert.match(src, /process\.env\.DSH_PROFILE/, 'profile 名必须优先取宿主发的 DSH_PROFILE（唯一权威来源）');
+  assert.ok(!/path\.basename\(String\(config\.profileDir/.test(src),
+    '不得再拿 profileDir 的末段当 profile 名 —— 那是浏览器数据目录名，不是 DSH profile 名（0.19.61 的真缺陷）');
   // 装完必须清缓存：current 变了，旧的检查结果不再成立。
   assert.match(src, /updateCache = null/, '装完必须清掉检查缓存');
   // 「只提醒重启」的落点在 lib/update.js：装完只回 needsRestart，不代重启。

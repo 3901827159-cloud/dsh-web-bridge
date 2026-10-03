@@ -1049,10 +1049,16 @@ test('窗口声明可见性（B-3）：模型目录与状态里能核对自己�
   // 目录条目带 context（此前 listAllModels 有、但要看得到「真实来源」）
   assert.match(prov, /context: m\.context \|\| null/, 'listAllModels 必须透出 context');
   assert.match(prov, /const GLM_CONTEXT_WINDOW = 1_000_000;/, 'glm/zai 窗口声明应有实名常量');
-  // 控制面 /models 走的就是 listAllModels，因此面板能读到
+  // 控制面 /models 走的就是 listAllModels，因此面板能读到。
+  //
+  // 0.19.61 修判据：旧断言钉的是 `listAllModels()` **不传参**的形态，而**那正是缺陷**
+  // ——不传 accounts ⇒ 只有默认槽 ⇒ 面板模型下拉里永远看不到账户2/3… 的行
+  //（用户 2026-10-04：「模型选择的选项是独立的了」）。现在必须把设置里的账号传进去。
   const ctl = bridgeSrc('web-control.js');
-  assert.match(ctl, /'GET models': async \(\) => \(\{ ok: true, models: listAllModels\(\) \}\)/,
-    '/__webcode/models 必须返回带 context 的目录');
+  assert.match(ctl, /'GET models': async \(\) => \{[\s\S]{0,400}listAllModels\(accounts\)/,
+    '/__webcode/models 必须按设置里的账号现算目录（不传 accounts = 只有默认槽）');
+  assert.ok(!/'GET models': async \(\) => \(\{ ok: true, models: listAllModels\(\) \}\)/.test(ctl),
+    '不得退回「不传 accounts」的旧形态 —— 那会让多账户站点的模型行永远不出现在选择器里');
   // 预算闸与声明共用同一个取值函数（否则「声明的数」与「闸门比的数」会分叉）
   const idx = bridgeSrc('index.js');
   assert.match(idx, /function contextWindowFor\(/, '窗口取值必须收口到一个函数');

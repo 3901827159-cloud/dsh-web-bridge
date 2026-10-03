@@ -2045,7 +2045,8 @@ test('★ 0.19.59 站点目录：多账户卡片以第 1 个账户为主身份�
   //    会同时画出两个图标，那是「展示方法不一致」的可见来源。
   assert.ok(/\.hwb-catalog-img\{[^}]*position:absolute/.test(src),
     '主头像必须绝对定位在身份盒里（否则头像与矢量标记同时出现）');
-  // ④ 行为断言：两个账户的站点 → 卡片标题是**第 1 个账户**的真实昵称，
+  // ④ 行为断言：两个账户的站点 → 卡片标题是**网站原名**（0.19.61 用户指令：
+  //    「右侧 tab 菜单显示的是用户名而不是网站名」），第 1 个账户的真实昵称仍在下拉行里，
   //    叠层与说明行都在，两个账户的昵称/头像一个都不丢。
   const two = [
     { siteId: 'deepseek', siteName: 'DeepSeek 网页版', accountKey: 'deepseek', slot: 'default', displayName: 'DeepSeek 网页版', initialized: true, loggedIn: true, accountName: 'RSYHN', avatarUrl: 'https://cdn.example.test/a.png' },
@@ -2054,12 +2055,113 @@ test('★ 0.19.59 站点目录：多账户卡片以第 1 个账户为主身份�
   const r = await renderPane({ payloads: [emptyWindows], sites: two, which: 'catalog' });
   assert.deepEqual(r.errors, [], '多账户目录渲染抛错：' + r.errors.map(e => e.message).join('; '));
   const text = treeText(r.tree);
-  assert.ok(text.includes('RSYHN'), '卡片主身份必须是第 1 个账户的真实昵称（不是站点名）');
+  // 标题恒为网站名：不许再出现「抓得到昵称就显昵称、抓不到就显站点名」那种同列两种语义。
+  // 取值走客户端的 `SITE_NAMES`（`siteName(sid)` ⇒ 'DeepSeek'），与服务端行里的
+  // `siteName` 字段无关——这正是「网站原名」的唯一来源。
+  assert.ok(text.includes('DeepSeek'), '卡片标题必须是网站原名');
+  assert.ok(!text.includes('RSYHN'), '卡片标题不得再取真实昵称当站点名（昵称只在下拉行里）');
   assert.ok(text.includes('2 个账号'), '说明行必须给出账户总数（叠层只画缩略图，计数在这里）');
   const html = JSON.stringify(r.tree);
   assert.ok(html.includes('hwb-catalog-stack'), '多账户卡片必须真的渲染叠层节点');
   assert.ok(html.includes('https://cdn.example.test/a.png'), '第 1 个账户的真实头像必须画进卡片');
   assert.ok(html.includes('17700000000'), '第 2 个账户的昵称必须仍在（下拉里各自一行）');
+  // 头像必须画在矢量标记**之后**（否则矢量盖住头像 —— 用户 2026-10-04 报的
+  // 「头像都没渲染、全是网站矢量」的真根因）。
+  assert.ok(src.indexOf("hwb-catalog-img") > src.indexOf("h(SiteGlyph, { sid, size: 26 })"),
+    '主头像必须画在矢量标记之后（DOM 顺序决定谁盖住谁）');
+});
+
+test('★ 0.19.61 站点目录标题恒为网站名；账号身份不再靠「用户名优先」混排', async () => {
+  // 用户 2026-10-04 原话：「右侧 tab 菜单显示的是用户名而不是网站名」「就是没显示网站，
+  // 网站错误」「应该显示网站名」。
+  const src = bridgeSrcFrom('client.cjs');
+  // ① 标题取值里**不得**再出现 accountName —— 抓得到昵称就显昵称会让同一列里
+  //    glm 显 RSYHN、deepseek 显站点名（昵称读不到时），同列两种语义。
+  assert.ok(!/const title = \(primary && primary\.accountName\)/.test(src),
+    '标题不得再取真实昵称（用户明确要求显示网站名）');
+  assert.ok(/const title = siteName\(sid\)/.test(src), '标题必须恒取网站原名');
+  // ② 昵称没有丢：下拉行仍用它（否则等于把已抓到的事实删掉）。
+  assert.ok(/const acctName = \(a\) => a\.accountName \|\| a\.displayName/.test(src),
+    '下拉行的昵称仍必须「真实值 → 回落槽名」');
+});
+
+test('★ 0.19.61 头像必须画在矢量标记**之后**（否则矢量盖住头像），且三处挂点同口径', async () => {
+  // 用户 2026-10-04 原话：「右侧 tab 菜单的头像和设置界面头像是网站矢量，头像是网站
+  // 矢量，都没渲染」；追问后确认「只有头像没出来，昵称是对的」。
+  //
+  // 真根因不是「抓不到头像」（服务端实测 deepseek/glm/kimi/doubao/zai 都回真实
+  // avatarUrl）：是**画的顺序与占位错**——`SiteGlyph` 与 `<img>` 都是身份盒的
+  // 铺满层，而矢量写在 `<img>` 之后 ⇒ 按 DOM 顺序矢量压在上面，头像永远看不见。
+  // 昵称能显示是因为它在另一个文本节点上，与这条层叠无关。
+  const src = bridgeSrcFrom('client.cjs');
+  // 与文件里其它样式断言同一条取规则纪律：CSS 是 `".hwb-x{...}"` 形式，
+  // 右界必须是 `}"`（写成 `"}` 会静默扫到文件结尾，断言横跨几十条规则 = 假绿）。
+  const ruleAt = (sel) => {
+    const i = src.indexOf('"' + sel + '{');
+    assert.ok(i > 0, '找不到样式规则：' + sel);
+    const end = src.indexOf('}"', i);
+    assert.ok(end > i, '样式规则 ' + sel + ' 没有终止符');
+    return src.slice(i, end + 2);
+  };
+  /** 该选择器在源码里出现了几次（重复定义会让后者静默覆盖前者）。 */
+  // ① 三处头像挂点：头像绝对定位、底图裁掉 SiteGlyph 的 `size+8` 画布余量。
+  assert.match(ruleAt('.hwb-catalog-img'), /position:absolute/, '目录卡片头像必须绝对定位');
+  assert.match(ruleAt('.hwb-catalog-ico'), /overflow:hidden/,
+    '目录身份盒必须裁掉 SiteGlyph 的 size+8 画布（否则矢量从四角溢出，即用户看到的「边边角角」）');
+  assert.match(ruleAt('.hwb-avatar-img'), /position:absolute/,
+    '设置页账户头像必须绝对定位（旧实现缺这条 ⇒ img 与矢量并排挤在 28px 圆框里，看起来「没渲染」）');
+  assert.match(ruleAt('.hwb-avatar'), /overflow:hidden/, '设置页头像圆框必须裁剪溢出');
+  assert.match(ruleAt('.hwb-acct-img'), /position:absolute/, '下拉行头像必须绝对定位');
+  // ② 下拉图标是**单个**定位节点（Menu 的 icon 契约收单个节点，数组会被当成两个图标）。
+  assert.ok(/className: 'hwb-acct-face'/.test(src), '下拉图标必须包一层定位父元素');
+  assert.match(ruleAt('.hwb-acct-face'), /position:relative/, '下拉图标父元素必须建立定位上下文');
+  // ③ 行为：渲染树里头像节点与矢量标记同时存在（有头像时头像在最上层、失败时露出标记）。
+  const sites = [{
+    siteId: 'glm', siteName: 'GLM', accountKey: 'glm', slot: 'default', displayName: 'GLM',
+    initialized: true, loggedIn: true, accountName: 'RSYHN', avatarUrl: 'https://cdn.example.test/g.png',
+  }];
+  const r = await renderPane({ payloads: [emptyWindows], sites, which: 'catalog' });
+  assert.deepEqual(r.errors, [], '目录渲染抛错：' + r.errors.map(e => e.message).join('; '));
+  const html = JSON.stringify(r.tree);
+  assert.ok(html.includes('hwb-catalog-img'), '有真实头像时必须真的画 img');
+  assert.ok(html.includes('hwb-catalog-ico'), '矢量标记必须仍在（img 失败时靠它回落）');
+  // 矢量标记必须**先**出现（DOM 顺序 = 谁盖住谁；z-index 只兜底）。
+  assert.ok(html.indexOf('hwb-catalog-ico') < html.indexOf('hwb-catalog-img'),
+    '矢量标记必须画在头像之前（否则矢量压住头像 = 用户报的「头像都没渲染」）');
+});
+
+test('★ 0.19.61 站点目录居中：用 auto margin，不得回到 justify-content:center', async () => {
+  // 用户 2026-10-04 原话：「右侧 tab，展开时候，窗口够大就没问题，但是缩小窗口就能看到，
+  // 顶部置顶了，已经够大时候就已经是偏上了」。
+  //
+  // 真根因：0.17.0 逐字抄了官方 GuideBody 的 `justify-content:center` + `min-height:100%`
+  // + `:after{flex:0 10%}`。那三件在官方 guide 里成立（内容只有一两行，永远装得下），
+  // 但站点目录是十行胶囊：窄/矮窗口下内容高于容器 ⇒ 竖直居中把**顶部推到容器外**，
+  // 而宿主 `.P3OORG_tabBody` 是 `overflow:hidden` ⇒ 顶部被裁且**无法滚动到达**。
+  //
+  // `margin:auto` 是唯一两边都成立的写法：有富余时上下等分（= 居中），
+  // 空间不足时归零（= 从顶部开始、可滚动、不丢内容）。
+  const src = bridgeSrcFrom('client.cjs');
+  const ruleAt = (sel) => {
+    const i = src.indexOf('"' + sel + '{');
+    assert.ok(i > 0, '找不到样式规则：' + sel);
+    const end = src.indexOf('}"', i);
+    return src.slice(i, end + 2);
+  };
+  const ruleCount = (sel) => (src.match(new RegExp('"' + sel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\{', 'g')) || []).length;
+  const catalog = ruleAt('.hwb-catalog');
+  assert.equal(ruleCount('.hwb-catalog'), 1, '.hwb-catalog 必须恰好一条规则');
+  assert.ok(!/justify-content:center/.test(catalog),
+    '不得用 justify-content:center 做竖直居中 —— 内容高于容器时顶部会被裁掉且滚不到');
+  assert.match(catalog, /overflow-y:auto/, '矮窗口下必须能滚动到被挤出去的内容');
+  assert.match(catalog, /min-height:100%/,
+    'min-height:100% 要保留：没有它 flex 容器不撑满，auto margin 没有富余空间可等分');
+  assert.equal(ruleCount('.hwb-catalog-list'), 1,
+    '.hwb-catalog-list 必须恰好一条规则（重复定义会让垂直 auto 被 margin:0 auto 覆盖）');
+  assert.match(ruleAt('.hwb-catalog-list'), /margin:auto/,
+    '上下 auto margin 才是居中本体，且空间不足时归零为可滚动');
+  assert.ok(!/hwb-catalog:after/.test(src),
+    '`:after{flex:0 10%}` 假留白必须删掉 —— 富余不足时它正是把内容推偏的来源');
 });
 
 test('★ 0.19.59 账户删除：站点页每个账户行都有「删除」，走服务端 account-remove 且必须两步确认', async () => {

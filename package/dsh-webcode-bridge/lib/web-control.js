@@ -93,13 +93,21 @@ if (!process.env.NODE_TEST_CONTEXT && process.env.WEBCODE_UPDATE_CHECK !== 'off'
     (async () => {
       try {
         const r = await fetchReleases({});
-        updateCache = {
-          at: Date.now(),
-          value: updateDecision({ releases: r.ok ? r.releases : null, error: r.ok ? null : r.error }),
-          releases: r.ok ? r.releases : null,
-        };
+        // 只缓存**原始事实**（清单与错误），**不缓存判据**（0.19.61 修）。
+        //
+        // 旧实现这里存的是 `updateDecision({releases, error})`——而它**没有 current**
+        // （这一层在模块顶层，拿不到 createWebControl 的 config.version）。于是缓存里
+        // 的决策恒为 `{status:'unknown', current:'', reason:'当前版本号无法解析'}`，
+        // 而读取端 `{...current, ...updateCache.value}` 又让那个空串**覆盖**掉服务端
+        // 刚读到的真实版本 ⇒ 启动 15 秒后的 10 分钟里，设置页版本位渲染成空的
+        // 「v」、按钮永远不是「更新到 vX」、点「检查更新」也照样命中这条坏缓存
+        // （UPDATE_CACHE_MS）。这正是用户报的「显示版本和更新都有问题」。
+        //
+        // 修法不是「补一个 current」而是**改缓存的东西**：清单是事实（不随 current 变），
+        // 判据是 current 的函数（必须在使用它的那一刻、用真实的 current 现算）。
+        updateCache = { at: Date.now(), releases: r.ok ? r.releases : null, error: r.ok ? null : r.error };
       } catch (e) {
-        updateCache = { at: Date.now(), value: updateDecision({ error: String(e?.message || e) }), releases: null };
+        updateCache = { at: Date.now(), releases: null, error: String(e?.message || e) };
       }
     })();
   }, 15_000).unref?.();
@@ -944,7 +952,17 @@ export function createWebControl(deps = {}) {
       relay.setConsent(body?.accepted === true);
       return { ok: true, consent: relay.status().consent };
     },
-    'GET models': async () => ({ ok: true, models: listAllModels() }),
+    // 0.19.61：目录必须按**当次设置里的账号**现算（与 index.js 的 listModels 同一取法）。
+    //
+    // 旧写法 `listAllModels()` **不传 accounts** ⇒ 只有默认槽，面板的模型下拉里
+    // 永远看不到账户2/3… 的行。`settingsStore` 是本控制面读设置的真源
+    //（与 POST settings / account-add 的落盘点同一个），因此取它即可。
+    // 取不到时回落到不传参（= 旧行为），绝不抛——读目录失败不该让整页 500。
+    'GET models': async () => {
+      let accounts = null;
+      try { accounts = settingsStore?.get?.()?.accounts ?? null; } catch { accounts = null; }
+      return { ok: true, models: listAllModels(accounts) };
+    },
     // 等待发送时长（0.14.4）：累计（设置页）与本会话（输入框底下速览）同源。
     //
     // 展示文案由**服务端**算好（composerWaitLine / waitStatRows）：client.cjs 是单
@@ -970,7 +988,11 @@ export function createWebControl(deps = {}) {
       //   displayContext = 站点/模型**声明**的窗口（如实反映、展示给用户看的数）
       //   sendBudget     = 发送前预算闸(B-2)真正比对、决定是否 CONTEXT_WINDOW_EXCEEDED 的数
       // contextWindow 保留为 sendBudget 的别名（旧字段，跨版本兼容），站点聚合用它。
-      const rows = listAllModels().map((m) => {
+      // 0.19.61：与 `GET models` 同一取法——列出的行必须与选择器里能选到的行一致，
+      // 否则「这个账号的窗口是多少」会对一个选择器里不存在的 id 给出读数。
+      let cwAccounts = null;
+      try { cwAccounts = settingsStore?.get?.()?.accounts ?? null; } catch { cwAccounts = null; }
+      const rows = listAllModels(cwAccounts).map((m) => {
         const displayContext = m.context ?? null;
         const sendBudget = contextWindowOf ? contextWindowOf(m) : (m.budget ?? m.context ?? null);
         return {
@@ -1480,23 +1502,61 @@ export function createWebControl(deps = {}) {
       const current = config.version || null;
       // profile 名由服务端给：客户端**拿不到**它（浏览器侧不知道自己在哪个
       // profile 里跑），而安装命令 `dsh plugin --profile <p> add` 需要它。
-      // 从 profileDir 的末段取（`~/.dsh/profiles/web` → `web`），取不到回落 'web'。
+      //
+      // 0.19.61 修**真缺陷**：旧实现用 `path.basename(config.profileDir)` 当 profile 名。
+      // 那个值是**桥自己的浏览器数据目录**（`DEFAULTS.profileDir` =
+      // `<dsh home>/webcode-edge-profile`，桌面端 patch 又把它改成
+      // `…/webcode-edge-profile-desktop`），**不是 DSH 的 profile 名**。真机读数
+      // （2026-10-04，运行中的 0.19.60）实测该端点回的就是
+      // `profile: "webcode-edge-profile-desktop"` ⇒ 安装命令变成
+      // `dsh plugin --profile webcode-edge-profile-desktop add …`，指向一个不存在的
+      // profile，**必然失败或装到错处**——这就是用户报的「更新装不上」的直接原因。
+      //
+      // 唯一权威来源是宿主自己发的 `DSH_PROFILE`（见 dsh-shell-env：`values[DSH_PROFILE_KEY]
+      // = profile.name`，本机实测 `DSH_PROFILE=desktop` / `DSH_PROFILE_DIR=…\profiles\desktop`）。
+      // 因此按「DSH_PROFILE → DSH_PROFILE_DIR 末段 → 本插件安装路径里的
+      // `profiles/<name>/node_modules/…` → 'web'」四级回落。
+      //
+      // 第三级为什么可靠：插件是按 profile 装进 `<dsh home>/profiles/<name>/node_modules/`
+      // 的（本机三个 profile 实测都是这个形状），所以从 `import.meta.dirname`
+      // 往上找到 `node_modules` 的前一段，拿到的就是**本进程真正所属的 profile 名**。
+      // 它比 `config.profileDir` 强得多——后者是桥的浏览器数据目录，两者只是**恰好**
+      // 在默认 DEFAULTS 下看起来相近（都是 `<dsh home>/…`），桌面端 patch 一改就分叉。
       const profile = (() => {
+        const fromEnv = String(process.env.DSH_PROFILE || '').trim();
+        if (fromEnv) return fromEnv;
+        const fromDir = (() => {
+          try {
+            const b = path.basename(String(process.env.DSH_PROFILE_DIR || ''));
+            return b && b !== '.' && b !== '/' && b !== 'profiles' ? b : '';
+          } catch { return ''; }
+        })();
+        if (fromDir) return fromDir;
+        // `…/profiles/<name>/node_modules/dsh-webcode-bridge/lib` ⇒ `<name>`
         try {
-          const base = path.basename(String(config.profileDir || ''));
-          return base && base !== '.' && base !== '/' ? base : 'web';
-        } catch { return 'web'; }
+          const parts = path.resolve(import.meta.dirname).split(path.sep);
+          const nm = parts.lastIndexOf('node_modules');
+          // nm - 1 必须存在且不是 `profiles` 自己（`profiles/node_modules/…` 是共享安装形态）。
+          const name = nm > 0 ? parts[nm - 1] : '';
+          if (name && name !== 'profiles' && name !== 'node_modules') return name;
+        } catch { /* 回落 */ }
+        return 'web';
       })();
       // 上一次检查的结果缓存在内存里（启动 15 秒后的那次检查也写这里）：
       // 设置页每次打开都打一次 GitHub API 是浪费，而且 API 慢的时候会让面板首屏卡住。
+      //
+      // 0.19.61：缓存现在只存**原始事实**（releases 清单 / error），判据在这里用
+      // **真实的 current** 现算——理由见模块顶层那段注释（旧的「连判据一起缓存」
+      // 正是版本位显示成空「v」的根因）。
       if (updateCache && Date.now() - updateCache.at < UPDATE_CACHE_MS) {
-        return { ok: true, package: PACKAGE_NAME, repo: GITHUB_REPO, current, profile, ...updateCache.value, cached: true };
+        const decision = updateDecision({ current, releases: updateCache.releases, error: updateCache.error });
+        return { ok: true, package: PACKAGE_NAME, repo: GITHUB_REPO, current, profile, ...decision, cached: true };
       }
       const r = await fetchReleases({});
-      const decision = updateDecision({ current, releases: r.ok ? r.releases : null, error: r.ok ? null : r.error });
       // 原始清单也留在缓存里：POST update 要从它定位 tarball 资产，
       // 复用同一次检查能省一次 API 往返（清单本身不随 current 变，只有判据变）。
-      updateCache = { at: Date.now(), value: decision, releases: r.ok ? r.releases : null };
+      updateCache = { at: Date.now(), releases: r.ok ? r.releases : null, error: r.ok ? null : r.error };
+      const decision = updateDecision({ current, releases: r.ok ? r.releases : null, error: r.ok ? null : r.error });
       return { ok: true, package: PACKAGE_NAME, repo: GITHUB_REPO, current, profile, cached: false, ...decision };
     },
     // 「更新插件市场」的对应物。**真的下载并安装**（用户明确选择「点了就真装」），

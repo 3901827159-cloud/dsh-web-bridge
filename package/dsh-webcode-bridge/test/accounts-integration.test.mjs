@@ -11,6 +11,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import { SITES, listAllModels, resolveWebModel, MODEL_ALIAS_IDS } from '../lib/providers.js';
 import { DEFAULT_SLOT, slotProfileDir, formatModelId, sendGapForSlot } from '../lib/accounts.js';
 
@@ -124,6 +125,45 @@ test('listAllModels(accounts)：展开后仍无重复显示名（下拉不会出
     assert.ok(!seen.has(m.name), `${m.id} 与 ${seen.get(m.name)} 同名: ${m.name}`);
     seen.set(m.name, m.id);
   }
+});
+
+// ---------------------------------------------------------------- 目录随账号动态化（0.19.61）
+
+/**
+ * ★ 0.19.61：**目录必须随账号动态计算**，不能在模块加载时冻结。
+ *
+ * 用户 2026-10-04 原话：「现在模型选择了后，又跟账号无关了，模型选择的选项是
+ * 独立的了」——他给站点加了第二个账号，选择器里看不到那个账号的模型。
+ *
+ * 真根因：`index.js` 顶层 `const WEB_MODELS = listAllModels();`（**不传 accounts**）
+ * 在进程启动时求值一次。而 `listModels` 里 0.19.46 加的
+ * `const listAccounts = configManager.get().accounts` 只用来**改显示名**，
+ * 没用来**决定有哪些行**。真机读数：`/__webcode/models` 回 17 条、`@2` 行 0 条，
+ * 而 `listAllModels([{siteId:'deepseek',slot:'2'}])` 实测回 18 条。
+ *
+ * 这条护栏钉三跳接线（任何一跳断了，界面上就是「模型选择与账号无关」）：
+ *   ① index.js 不得再有冻结的 `const WEB_MODELS = listAllModels()`
+ *   ② `listModels` 必须把当次 accounts 传给目录构造
+ *   ③ `POST settings` / `account-add` 落盘后必须广播 `llm/adapters-updated`
+ *      （宿主选择器是事件驱动的，不广播 ⇒ 数据对了界面还是旧的）
+ */
+test('★ 0.19.61 模型目录随账号动态化：不得冻结 + 必须广播目录变更', () => {
+  const idx = fs.readFileSync(new URL('../lib/index.js', import.meta.url), 'utf8');
+  // ① 冻结的旧写法必须消失。
+  assert.ok(!/^const WEB_MODELS = listAllModels\(\);/m.test(idx),
+    '不得再有模块级冻结的 WEB_MODELS —— 加账号后选择器永远看不到新行');
+  assert.match(idx, /const webModelsFor = \(accounts\) => listAllModels\(accounts\);/,
+    '目录必须收口到一个「按账号现算」的函数');
+  // ② listModels 必须把当次 accounts 传进去。
+  assert.match(idx, /return webModelsFor\(listAccounts\)/,
+    'listModels 必须把当次 settings.accounts 传进目录构造（只用来改显示名 = 缺陷本身）');
+  // ③ 账户增删后广播目录变更（事件名取宿主契约 `llm/adapters-updated`）。
+  assert.match(idx, /ctx\.emit\?\.\('llm\/adapters-updated'\)/,
+    '设置落盘后必须广播 llm/adapters-updated，否则界面不会重拉目录');
+  // ④ 控制面同一条取法（否则面板与选择器会各说各话）。
+  const ctl = fs.readFileSync(new URL('../lib/web-control.js', import.meta.url), 'utf8');
+  assert.match(ctl, /'GET models': async \(\) => \{[\s\S]{0,400}listAllModels\(accounts\)/,
+    'GET models 必须按设置里的账号现算');
 });
 
 // ---------------------------------------------------------------- 两槽不串

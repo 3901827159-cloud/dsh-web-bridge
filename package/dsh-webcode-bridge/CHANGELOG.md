@@ -5,6 +5,108 @@ All notable changes to this package. Newest first.
 The canonical, in-progress record of what was changed and why lives in [doc/progress.md](../../doc/progress.md);
 this file is the package-facing release history.
 
+## 0.19.61
+
+**六条用户反馈收口：站点标题改网站名 + 头像被矢量盖住的真根因 + 目录居中 + 模型目录随账号 + 版本/更新。**
+
+### 用户报了什么（原话，逐字）
+
+> 「1.右侧 tab 菜单，设置界面，这里头像是网站矢量，头像是网站矢量，都没渲染…
+> 2.右侧 tab 菜单显示的是用户名而不是网站名…
+> 3.现在模型选择了后，又跟账号无关了，模型选择的选项是独立的了
+> 4.右侧 tab，展开时候，窗口够大就没问题，但是缩小窗口就能看到，顶部置顶了，已经够大时候就已经是偏上了
+> 5.显示版本和更新都有问题，更新点击，并没有真正更新」
+
+### ① 头像「都没渲染」的真根因：画的顺序错了（不是抓不到）
+
+用户确认「**只有头像没出来，昵称是对的**」。而服务端实测 `deepseek` / `glm` / `kimi` /
+`doubao` / `z.ai` **都有真实 `avatarUrl`**（全部 URL 实测 200 + 有效 JPEG/PNG）⇒ 不是抓取问题。
+
+真因是**层叠顺序**：三处头像挂点里，`SiteGlyph` 矢量标记画在 `<img>` **之后**（DOM 顺序 =
+谁盖住谁），而两者都铺满身份盒 ⇒ **矢量永远压住头像**。昵称能显示是因为它在另一个文本节点上。
+
+另外两处独立缺陷同时修掉：
+- `SiteGlyph` 的画布是 `size + 8`（26px 盒里画 34×34），而身份盒**没有 `overflow:hidden`**
+  ⇒ 矢量从四角溢出来——这就是用户看到的「边边角角」；
+- 设置页的 `.hwb-avatar-img` **缺 `position:absolute`**（目录页那条有、这里没有）⇒ img 与
+  矢量是并排的两个 flex 子项，挤在 28px 圆框里 ⇒ 看起来就是「头像没渲染」；
+- 下拉行的 `acctIcon` 旧实现**只 return 那个 `<img>`**，矢量标记压根没进 DOM ⇒
+  注释承诺的「失败时露出下面的标记」没有落点，加载失败就是空白。
+
+现在三处**同一口径**：标记先画当底图、头像绝对定位盖在上面、容器 `overflow:hidden` 裁掉
+画布余量、`onError` 藏掉 img 即露出标记（回落链终于真的成立）。
+
+### ② 站点卡片标题 = 网站原名（昵称回到下拉行）
+
+旧实现 `title = primary.accountName || siteName(sid)`——「抓到昵称就显昵称」，于是同一列里
+`glm` 显 `RSYHN`、`kimi` 显 `TYZ0712`，而 deepseek / z.ai 因昵称读不到（长期问题 #43）显站点名：
+**同一列两种语义混排**。现改为恒取 `siteName(sid)`；真实昵称**只在下拉的账户行里**（没有丢）。
+
+### ③ 站点目录居中：`justify-content:center` → `margin:auto`
+
+旧规则逐字抄官方 GuideBody（`justify-content:center` + `min-height:100%` + `:after{flex:0 10%}`）。
+那三件在官方 guide 里成立（内容一两行、永远装得下），但站点目录是**十行胶囊**：窄/矮窗口下
+内容高于容器 ⇒ 竖直居中把**顶部推出容器**，而宿主 `.P3OORG_tabBody` 是 `overflow:hidden`
+⇒ 顶部被裁且**无法滚动到达**（`scrollTop` 不能为负）。
+
+`margin:auto` 是唯一两边都成立的写法：有富余时上下等分（= 居中）、空间不足时归零
+（= 从顶部开始、可滚动）。**真机反向变异验证**（`test-mock/probe-catalog-center.mjs`，
+真实 Chromium 量 `getBoundingClientRect`）：旧 CSS 在 420px 高窗口下 `gapTop = −106px`
+（顶部被推出 106px，不可达）；新 CSS `gapTop = 0`、可滚 212px；1200px 窗口下上下留白
+284/284 精确居中。
+
+### ④ 模型目录随账号动态化（用户报「模型选择跟账号无关」）
+
+`index.js` 顶层曾是 `const WEB_MODELS = listAllModels();`（**不传 accounts**），进程启动时
+求值一次就冻结。而 `listModels` 里 0.19.46 加的那句读 `settings.accounts` 只用来**改显示名**，
+**没用来决定有哪些行** ⇒ 非默认槽的模型行永远不出现。真机读数：`/__webcode/models` 回
+**17 条、`@2` 行 0 条**，而 `listAllModels([{siteId:'deepseek',slot:'2'}])` 实测 **18 条**。
+
+改为 `webModelsFor(accounts)` 按**当次**账号现算（`GET models` 与 `GET context-windows`
+同一条取法），并在 `configManager.set()`（`POST settings` / `account-add` / `account-remove`
+的唯一落盘路径）后广播 **`llm/adapters-updated`**——宿主选择器是事件驱动的，不广播则
+「数据对了、界面还是旧的」。实测账户 2/3 出现后目录 17 → 21 条且默认槽行一条不丢。
+
+### ⑤ 版本显示与更新
+
+- **`GET update-status` 的缓存里存的是判据、且缺 `current`**：启动 15 秒后那次检查在模块顶层
+  跑，拿不到 `config.version` ⇒ 缓存恒为 `{status:'unknown', current:''}`，而读取端
+  `{...current, ...updateCache.value}` 让空串**覆盖**真实版本 ⇒ 10 分钟内版本位渲染成空的
+  「v」、按钮永远不是「更新到 vX」。改为**只缓存原始事实**（releases 清单 / error），
+  判据在用它的那一刻用真实 `current` 现算。
+- **`profile` 名推导错**（用户报「更新装不上」的直接原因）：旧实现用
+  `path.basename(config.profileDir)`——那是**桥自己的浏览器数据目录**
+  （`webcode-edge-profile-desktop`），不是 DSH profile 名。真机实测该端点实回
+  `profile: "webcode-edge-profile-desktop"` ⇒ `dsh plugin --profile webcode-edge-profile-desktop add …`
+  指向不存在的 profile，**必然失败**。改为四级回落：`DSH_PROFILE`（宿主权威，
+  本机实测 `desktop`）→ `DSH_PROFILE_DIR` 末段 → **本插件安装路径里的
+  `profiles/<name>/node_modules/…`** → `'web'`。实测三种环境形状分别得到 `desktop` /
+  `headless` / `web`。
+- 文案里仍写「registry 上是 v…」，而 0.19.56 起数据源已是 **GitHub Releases**——改成 Releases。
+- ⚠ **「真正更新」还需一个仓库侧动作**（不是代码缺陷，如实记）：最新 tag 是 **v0.19.55**，
+  而 `package.json` 已是 0.19.60 ⇒ `latest < current` ⇒ 更新检查**恒报「已是最新」**。
+  要让更新真的能装到东西，需要 `git tag v0.19.61 && git push origin v0.19.61`（release.yml 才会
+  产出 tarball 挂到 Release）。本轮**未打 tag、未同步 GitHub**。
+
+### 验证与闸门
+
+- 全量单测 **121/121 文件逐文件 exit 0**；`client-render` **70/70**（新增 2 条 0.19.61 用例：
+  标题恒为网站名、头像必须在矢量之后 + 三处挂点同口径；另 1 条为居中规则）；
+  `accounts-integration` **17/17**（新增「目录随账号动态化」护栏）、`control-routes` **19/19**
+  （profile 判据改为钉 `DSH_PROFILE` 优先并**反向禁止**按 `profileDir` 末段取名——旧断言钉的
+  正是缺陷本身）、`regression` **54/54**。
+- 真机探针 `test-mock/probe-catalog-center.mjs`：**ALL PASS**（含反向变异证明旧 CSS 必红）。
+- 闸门：`lint-comments` 253 文件 0 error / 0 warn、`check-ledger` PASS、`check-repo-hygiene` PASS、
+  `check-commit-msg` PASS、`gen-index --check` PASS（52 模块）。
+
+### 未做 / 边界
+
+- **未新增 favicon 抓取**：这是我在诊断阶段提的假设，但真因是层叠（已修），且「没有真机读数
+  不许编能力」是本仓库纪律 ⇒ 不交付猜测的网络能力。
+- `deepseek` / `z.ai` 的**昵称**仍读不到（长期问题 **#43**，本轮未动）：本轮只修了「头像被盖住」，
+  没有为昵称编选择器。
+- 装机与重启由用户自己做（重启会终止正在使用的会话）；本轮未打包、未装机。
+
 ## 0.19.60
 
 **站点显示名统一为网站原名 + 账户身份取证的活页面通道。**

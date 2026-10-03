@@ -362,7 +362,30 @@ const clampSendGapMs = (v) => Math.min(SEND_GAP_MAX_MS, Math.max(0, Math.round(N
 
 // 模型目录 = 全部内容服务站点的模型（'site:model' 限定 id），DSH 模型选择器
 // 直接可见 GLM/ChatGPT/Kimi/Qwen/豆包/Grok/Claude/Gemini 的模型。
-const WEB_MODELS = listAllModels();
+//
+// ## 0.19.61 修**真缺陷**：目录必须**随账号动态计算**，不能冻结
+//
+// 用户 2026-10-04 原话：「现在模型选择了后，又跟账号无关了，模型选择的选项是
+// 独立的了」——即他给某个站点加了第二个账号，选择器里**看不到那个账号的模型**。
+//
+// 旧写法在模块顶层把目录算成一句常量（**不传 accounts**），进程启动时求值一次就
+// 再也不变。而目录构造函数 `listAllModels` 的契约恰恰是「传了账号槽就把每个启用槽
+// 展开成一组条目」（见 providers.js 的 JSDoc）。于是两处叠加成缺陷：
+//   · 默认槽的模型行永远在（冻结值里有）；
+//   · **非默认槽（账户2/3…）的模型行永远不在**——`listModels` 里那句读
+//     settings.accounts 的赋值（0.19.46 加的）拿到了真实账号列表，却**只用来改
+//     显示名**，而**没用来决定有哪些行**。
+//
+// 真机读数（2026-10-04，运行中的 0.19.60）：`/__webcode/models` 回 17 条、
+// `@2` 行 **0 条**；而 `listAllModels([{siteId:'deepseek',slot:'2'}])` 实测回 **18 条**
+// （多出的正是 `deepseek@2:deepseek`）。用户配了 `deepseek(账户2)` 却选不到，这就是根因。
+//
+// 为什么改成函数而不是在启动时重算一次：账号是**运行时可增删的**
+//（`POST account-add` / `POST account-remove`），启动时算一次只是把「冻结」
+// 从进程起点挪到首轮——加完账号照样看不到。`listModels` 本来就是**每次调用
+// 都重算**的（宿主在选择器打开/刷新时调它），所以只要这里按当次 accounts 现算，
+// 「加账号 ⇒ 选择器里出现那一行」就自然成立。
+const webModelsFor = (accounts) => listAllModels(accounts);
 
 /** 正文流式时保留的「消歧尾巴」字符数：协议标记可能分片到达（<t → <tool_call>），
  *  最后 8 个字符先扣住不发，等下一个增量消歧；收尾时由 tail 补发。 */
@@ -938,6 +961,25 @@ export function apply(ctx, config = {}) {
       // 并发上限即存即生效（见 laneCapSink 声明处的理由）。失败不影响保存——
       // 上限退回旧值只是「下次重启才生效」，不该让设置保存 500。
       try { laneCapSink?.(merged); } catch { /* 见上：统计类副作用不进主链路 */ }
+      // 模型目录可能变了 ⇒ 通知宿主重拉（0.19.61）。
+      //
+      // 为什么必须在这里广播：`listModels` 现在按**当次 accounts** 现算目录
+      //（见 webModelsFor 的说明），而宿主的选择器是**事件驱动**的——它不会自己
+      // 定期重拉，只在收到 `llm/adapters-updated` 等事件时 refresh
+      //（证据：dsh-client-ui-model-selection 的 ModelCatalogDirectory 只监听
+      // `llm/adapters-updated` / `settings/document-updated` / `credentials/reference-updated`）。
+      // 不广播的话，账户加/删之后**进程内数据已经正确、界面却仍显示旧目录**，
+      // 用户体感还是「模型选择跟账号无关」。
+      //
+      // 参考实现 `dsh-codearts-auth` 的同一处也走这条：`ctx.emit('llm/adapters-updated')`
+      //（其 jet-hub-rpc.ts 的 broadcastCatalogChanged）。载荷为空——它的语义是
+      // 「目录可能变了，去重拉」，不是「目录变成了什么」，因此重拉是唯一正确消费方式。
+      //
+      // 放在 set() 而不是 account-add 路由里：set() 是**唯一落盘路径**
+      //（POST settings 与 account-add 都走它），挂在这里就不会漏掉后来新增的写路径。
+      // 全部包 try/catch：广播是锦上添花，绝不能让它把设置保存打断（保存 500 的代价
+      // 远大于「目录晚一步刷新」）。
+      try { ctx.emit?.('llm/adapters-updated'); } catch (err) { warn('llm/adapters-updated emit failed:', err?.message); }
       // settingsService 初始化时已确认可写；运行期异常仍回落文件，绝不让保存 502
       if (settingsService) {
         try { settingsService.set('webcode', merged); return merged; } catch (err) { warn('host settings set failed:', err?.message); }
@@ -1131,6 +1173,9 @@ export function apply(ctx, config = {}) {
       // 模型 id 一个字都不动（仍是 `deepseek:deepseek` / `deepseek@2:deepseek`），
       // 因此历史会话、别名表、`subAgentSite` 全部不受影响——变的只是展示名。
       const listAccounts = configManager.get().accounts;
+      // 目录**按当次账号现算**（0.19.61）：`listAllModels(accounts)` 把每个启用槽
+      // 展开成一组条目，因此账户2/3… 的模型行在选择器里真的出现。不传 accounts
+      // 就是「只有默认槽」的旧行为——那正是用户报的「模型选择跟账号无关」。
       /** 某槽的展示用真实用户名（读不到返回 null）。 */
       const accountSlugFor = (siteId, slot) => {
         try {
@@ -1139,7 +1184,7 @@ export function apply(ctx, config = {}) {
           return nameSlugForDisplay(readIdentityCache(dir)?.name);
         } catch { return null; }
       };
-      return WEB_MODELS
+      return webModelsFor(listAccounts)
         .filter((m) => !MODEL_ALIAS_IDS.has(m.id) && (sid === null || m.siteId === sid))
         .map((m) => {
           const stt = getSite(m.siteId);
@@ -4507,7 +4552,9 @@ function imageMarkdown(images) {
         kind: 'exact',
         path: '/__webcode/settings-page',
         handler: (req, res) => {
-          const html = renderSettingsPage(WEB_MODELS);
+          // 这一页是「脱离宿主、单独打开」的设置页，没有 configManager 之外的账号入口，
+          // 因此按**当前设置里的账号**现算（与 listModels 同一取法，不另立第二套）。
+          const html = renderSettingsPage(webModelsFor(configManager.get().accounts));
           res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
           res.end(html);
         }

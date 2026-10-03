@@ -54,6 +54,7 @@
 | 40 | **并发会话的「一组一行」在官方会话清单里做不到**（2026-10-03 登记）——用户要「明显的一行是3个重叠标签页形状一行区分与普通会话」；真会话会各自成行，而官方清单条目是 **shell 私有代码**（`SessionNodeItem`），插件只能**装饰既有行**（4 个槽），不能新增行、不能分组。本轮已在**左栏面板行**上用「三个重叠标签页」图标表达「这是会话组」，清单内部分组未做 | 低 | 否 | `lib/client.cjs`（`ConcurrentPanelIcon`）、`doc/progress.md`（2026-10-03） |
 | 41 | **CI 在 `main` 上长期恒红（2026-09-26 起）**（2026-10-03 登记，**同轮已修**）——每条都是**判据/环境**问题、与产品行为无关：① `site-prompt-transport.test.mjs` 把 profile 建在**被 gitignore 的** `.tmp/` 下，干净 clone 里不存在 ⇒ `ENOENT ...\.tmp\siteprompt-cp-XXXXXX`（④/⑥a/⑥b/session-import 四条一起红）；② `column-fs.test.mjs` 拿**未规范化**的 `columnRootOf()` 去比**已规范化**的写入返回值，在「临时目录带 8.3 短名」的机器（CI `C:\Users\RUNNER~1\…`）必然为假；③ `pre-deliver-window.test.mjs` ①b 用「两轮墙钟之差」量间隔，而 `end-to-start` 基准下该差值恒 = gap − 上一轮稳态收尾（CI 实测 `4302 vs 1514`）；④ `column-fs.test.mjs` 另一条用例用 `new URL(import.meta.url).pathname.slice(1)` 拼源码路径，在 POSIX 上把 `/home/…` 削成 `home/…`（相对路径）⇒ ubuntu 腿 `ENOENT: open 'home/runner/…'`；⑤ `site-mount.test.mjs` 那条「白名单内 + 存在」的断言用 `path.join(os.homedir(),'.dsh')`，而 CI runner 上**没装 DSH** ⇒ 先撞「目录不存在」（两条腿都红）。修完前三条推上去 CI 又红，才暴露出④⑤——被前三条的噪声盖住了 | 中 | 否 | `test/site-prompt-transport.test.mjs`、`test/column-fs.test.mjs`、`test/pre-deliver-window.test.mjs`、`test/site-mount.test.mjs`、`doc/progress.md`（2026-10-03） |
 | 43 | **deepseek 与 z.ai 的账号昵称在驱动页面上读不到**（2026-10-03 登记，本轮**不修**）——deepseek 昵称候选 **0 条**（账号区不可见；但头像照样读到，因为读取不判可见性）；z.ai 头像候选 `rect.x = -12`（侧栏在视口外，同为折叠态）且是 Svelte 哈希类名。两站**没有昵称节点的真机读数 ⇒ 不声明选择器**；出路见正文（展开侧栏后取证 / 改成以头像为锚的结构感知读取） | 中 | 否 | `lib/providers.js`（`accountProbe`）、`lib/browser-driver.js`（`readAccountIdentity`）、`test-mock/probe-account-identity-live.mjs`、`lib/account-candidates.js` |
+| 44 | **「检查更新」恒报「已是最新」：仓库没跟上 `package.json` 的 tag**（2026-10-04 登记，本轮**不修**）——最新 tag 是 **v0.19.55** 而 `package.json` 已是 0.19.60/0.19.61 ⇒ `latest < current` ⇒ 判据如实给出「已是最新」。真因是 `release.yml` 只在**打 tag** 时产出 tarball，而 0.19.56–0.19.61 几轮只改版本号没打 tag ⇒ Releases 上最后一个是 0.19.55。发版是对外不可逆动作，登记不代做；出路（用户点头后）= `git tag v0.19.61 && git push origin v0.19.61`，且 tag 必须打在 `package.json` 已是 0.19.61 的 commit 上 | 低 | 否 | `package/dsh-webcode-bridge/package.json`、`.github/workflows/release.yml`、`lib/update.js` |
 | 42 | **「网页桥接」设置分区的导航图标不可自定义**（2026-10-03 登记）——用户报「仍然是默认齿轮」；真因在**官方壳**里：`settings.section` 的注册契约只有 `id/order/label`（**没有 icon**），导航字形由官方 `dsh-client-ui-settings-general` 的 `navIcon(id)` **硬编码**（只认 `account` / `models` / `agent-presets` / `plugins` / `archived-sessions`，其余一律回落齿轮）。插件侧**结构上无解**，除非改官方包或占用一个 shipped id | 低 | 否 | `lib/client.cjs`（`settings.section` 注册处）、官方 `@deepseek-ai/dsh-client-ui-settings-general/lib/client.js`（`navIcon`）、`doc/progress.md`（2026-10-03） |
 
 > **一览表完整性（2026-09-16 修正；2026-09-26 补上闸门）**：本表此前**漏登记 #19 与 #20**（正文有、表里没有）。
@@ -2731,3 +2732,49 @@ children: [navIcon(row.id), <span>{row.label}</span>]
 
 本条目**只**覆盖 deepseek 与 z.ai。glm（`p.sidebar-user-name`）、kimi（`span.user-name`）、
 doubao（`span.min-w-0.overflow-hidden.text-left`）三站已有真机读数并已声明 `accountProbe`。
+
+---
+
+## 44. **「检查更新」恒报「已是最新」：仓库没有跟上 `package.json` 的 tag**（2026-10-04 登记）
+
+### 现象与读数
+
+设置页点「检查更新」永远显示「已是最新」，**不是**因为它检查错了，而是因为
+**GitHub Releases 上确实没有比当前更新的版本**：
+
+| 事实来源 | 读数（2026-10-04） |
+| --- | --- |
+| `package/dsh-webcode-bridge/package.json` 的 `version` | **0.19.60**（本轮改到 0.19.61） |
+| 本机 `git tag --sort=-v:refname` 最新 | **v0.19.55** |
+
+于是 `updateDecision` 的比较是 `latest(0.19.55) < current(0.19.60)` ⇒ 判据给出
+「已是最新」。**这个判据本身是对的**（`lib/update.js` 用真 semver 比较，优于
+`dsh-store` 那种字符串不等判定——后者在本机已把 0.19.60 判成「可更新到 0.19.51」，是**降级**）。
+
+### 真因
+
+`release.yml` 的触发条件是**打 tag**（`on: push: tags: v*`），流程里还会校验
+`tag == v + package.json.version`。而 0.19.56–0.19.61 这几轮**只改了 `package.json`
+没有打 tag** ⇒ Releases 上最后一个是 0.19.55，中间 5 个版本从未产出 tarball。
+
+### 为什么本轮不修
+
+发版是**不可逆的对外动作**（会在 GitHub 上产生公开 Release 与 tag），且本轮尚未
+由用户确认要发。按本项目「交付动作要用户点头」的惯例，登记而不代做。
+
+### 出路（用户点头后一条命令）
+
+```powershell
+git tag v0.19.61 && git push origin v0.19.61
+```
+
+推上去后 `release.yml` 会产出 tarball 挂到 Release，更新检查随即能报出真实的新版本
+并装上。**注意顺序**：tag 必须打在 `package.json` 已是 0.19.61 的 commit 上，
+否则工作流第二步的「tag 与 version 一致」校验会直接失败。
+
+### 边界
+
+本条目只讲「Releases 上没有新版本可装」。它与 0.19.61 修掉的两件事**不是**同一件事：
+① 缓存里存判据且缺 `current` ⇒ 版本位渲染成空「v」（**已修**）；
+② `profile` 名取成了浏览器数据目录名 ⇒ 安装命令指向不存在的 profile（**已修**）。
+本条是第三个、**纯仓库流程**的缺口。
